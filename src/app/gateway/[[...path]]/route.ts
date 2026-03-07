@@ -1,5 +1,3 @@
-import { randomBytes } from "node:crypto";
-
 import { after } from "next/server";
 
 import { requireRouteAuth } from "@/server/auth/vercel-auth";
@@ -25,9 +23,6 @@ import {
   touchRunningSandbox,
 } from "@/server/sandbox/lifecycle";
 
-function generateNonce(): string {
-  return randomBytes(16).toString("base64");
-}
 export const maxDuration = 300;
 
 const NO_BODY_RESPONSE_STATUSES = new Set([204, 304]);
@@ -50,13 +45,12 @@ function buildWaitingResponse(
   status: string,
   setCookieHeader: string | null,
 ): Response {
-  const nonce = generateNonce();
   return withSetCookie(
-    new Response(getWaitingPageHtml(returnPath, status, nonce), {
+    new Response(getWaitingPageHtml(returnPath, status), {
       status: 202,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
-        "Content-Security-Policy": buildWaitingPageCsp(nonce),
+        "Content-Security-Policy": buildWaitingPageCsp(),
         "Cache-Control": "no-store, private",
       },
     }),
@@ -200,12 +194,10 @@ async function handleProxy(request: Request, path: string): Promise<Response> {
     logInfo("gateway.html_injection", { ...reqCtx, upstreamStatus: upstream.status });
     const html = await upstream.text();
     const sandboxOrigin = new URL(routeUrl).origin;
-    const nonce = generateNonce();
     const ticketId = await issueGatewayTicket(meta.gatewayToken);
     const modifiedHtml = injectWrapperScript(html, {
       sandboxOrigin,
       ticketId,
-      nonce,
     });
 
     return withSetCookie(
@@ -215,7 +207,6 @@ async function handleProxy(request: Request, path: string): Promise<Response> {
           sandboxOrigin,
           proxyOrigin: new URL(request.url).origin,
           upstreamHeaders: upstream.headers,
-          nonce,
         }),
       }),
       auth.setCookieHeader,

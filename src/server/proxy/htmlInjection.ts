@@ -3,7 +3,6 @@ import { logDebug } from "@/server/log";
 type WrapperContext = {
   sandboxOrigin: string;
   ticketId: string;
-  nonce: string;
 };
 
 function escapeForInlineScriptJson(value: unknown): string {
@@ -27,7 +26,7 @@ function buildInterceptorScript(context: WrapperContext): string {
     ticketId: context.ticketId,
   });
 
-  return `<script nonce="${context.nonce}">
+  return `<script>
 (function() {
   var CONTEXT = ${encodedContext};
   var SANDBOX_ORIGIN = CONTEXT.sandboxOrigin;

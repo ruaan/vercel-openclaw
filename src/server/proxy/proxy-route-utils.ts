@@ -184,7 +184,6 @@ export function buildTokenHtmlHeaders(
     sandboxOrigin: string;
     proxyOrigin: string;
     upstreamHeaders: Headers;
-    nonce: string;
   },
 ): Headers {
   const headers = stripProxyResponseHeaders(options.upstreamHeaders, [gatewayToken]);
@@ -195,31 +194,28 @@ export function buildTokenHtmlHeaders(
     options.proxyOrigin,
   ];
   const csp = [
-    `default-src 'self' 'nonce-${options.nonce}'`,
-    `script-src 'nonce-${options.nonce}'`,
-    `style-src 'self' 'unsafe-inline'`,
+    `default-src 'self' 'unsafe-inline'`,
     `connect-src ${connectSrc.join(" ")}`,
     "img-src 'self' data: blob:",
     "form-action 'self'",
-    "base-uri 'self'",
+    "base-uri 'none'",
   ].join("; ");
 
   headers.delete("content-length");
   headers.set("Content-Type", "text/html; charset=utf-8");
   headers.set("Content-Security-Policy", csp);
   headers.set("Referrer-Policy", "no-referrer");
+  headers.set("X-Frame-Options", "DENY");
   headers.set("Cache-Control", "no-store, private");
   return headers;
 }
 
-export function buildWaitingPageCsp(nonce: string): string {
+export function buildWaitingPageCsp(): string {
   return [
-    `default-src 'self' 'nonce-${nonce}'`,
-    `script-src 'nonce-${nonce}'`,
-    `style-src 'self' 'unsafe-inline'`,
+    "default-src 'self' 'unsafe-inline'",
     "connect-src 'self'",
     "img-src 'self' data:",
     "form-action 'self'",
-    "base-uri 'self'",
+    "base-uri 'none'",
   ].join("; ");
 }
