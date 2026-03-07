@@ -198,7 +198,7 @@ export function buildTokenHtmlHeaders(
     `connect-src ${connectSrc.join(" ")}`,
     "img-src 'self' data: blob:",
     "form-action 'self'",
-    "base-uri 'none'",
+    "base-uri 'self'",
   ].join("; ");
 
   headers.delete("content-length");
@@ -216,6 +216,6 @@ export function buildWaitingPageCsp(): string {
     "connect-src 'self'",
     "img-src 'self' data:",
     "form-action 'self'",
-    "base-uri 'none'",
+    "base-uri 'self'",
   ].join("; ");
 }
