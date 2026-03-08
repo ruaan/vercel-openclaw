@@ -82,6 +82,7 @@ export type SingleMeta = {
   startupScript: string | null;
   lastError: string | null;
   firewall: FirewallState;
+  lastTokenRefreshAt: number | null;
   channels: ChannelConfigs;
   snapshotHistory: SnapshotRecord[];
 };
@@ -110,6 +111,7 @@ export function createDefaultMeta(now: number, gatewayToken: string): SingleMeta
       updatedAt: now,
       lastIngestedAt: null,
     },
+    lastTokenRefreshAt: null,
     channels: createDefaultChannelConfigs(),
     snapshotHistory: [],
   };
@@ -164,6 +166,8 @@ export function ensureMetaShape(input: unknown): SingleMeta | null {
           ? raw.firewall.lastIngestedAt
           : null,
     },
+    lastTokenRefreshAt:
+      typeof raw.lastTokenRefreshAt === "number" ? raw.lastTokenRefreshAt : null,
     channels: ensureChannelConfigs(raw.channels),
     snapshotHistory: Array.isArray((raw as Record<string, unknown>).snapshotHistory)
       ? ((raw as Record<string, unknown>).snapshotHistory as unknown[]).filter(isSnapshotRecord)

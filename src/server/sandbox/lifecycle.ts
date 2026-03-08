@@ -9,7 +9,12 @@ import { syncFirewallPolicyIfRunning } from "@/server/firewall/state";
 import { applyFirewallPolicyToSandbox } from "@/server/firewall/policy";
 import { logError, logInfo, logWarn } from "@/server/log";
 import { setupOpenClaw } from "@/server/openclaw/bootstrap";
-import { OPENCLAW_STARTUP_SCRIPT_PATH } from "@/server/openclaw/config";
+import {
+  OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+  OPENCLAW_BIN,
+  OPENCLAW_STARTUP_SCRIPT_PATH,
+  OPENCLAW_STATE_DIR,
+} from "@/server/openclaw/config";
 import {
   getStore,
   getInitializedMeta,
@@ -22,6 +27,7 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const SANDBOX_PORTS = [OPENCLAW_PORT];
 const EXTEND_TIMEOUT_MS = 15 * 60 * 1000;
 const ACCESS_TOUCH_THROTTLE_MS = 30_000;
+const TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const LIFECYCLE_LOCK_KEY = "openclaw-single:lock:lifecycle";
 const START_LOCK_KEY = "openclaw-single:lock:start";
 const LIFECYCLE_LOCK_TTL_SECONDS = 20 * 60;
@@ -188,9 +194,66 @@ export async function touchRunningSandbox(): Promise<SingleMeta> {
     }
   }
 
+  // Refresh the AI Gateway token if it's been a while.
+  const lastRefresh = meta.lastTokenRefreshAt ?? 0;
+  if (now - lastRefresh > TOKEN_REFRESH_INTERVAL_MS) {
+    void refreshAiGatewayToken(sandbox, meta.sandboxId).catch((err) => {
+      logWarn("sandbox.token_refresh_failed", {
+        sandboxId: meta.sandboxId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
   return mutateMeta((next) => {
     next.lastAccessedAt = now;
   });
+}
+
+const WRITE_AI_GATEWAY_TOKEN_SCRIPT = [
+  `install -d -m 700 ${OPENCLAW_STATE_DIR}`,
+  `printf '%s' "$1" > ${OPENCLAW_AI_GATEWAY_API_KEY_PATH}`,
+  `chmod 600 ${OPENCLAW_AI_GATEWAY_API_KEY_PATH}`,
+].join("\n");
+
+const RESTART_OPENCLAW_GATEWAY_SCRIPT = [
+  `pkill -f 'openclaw gateway' || true`,
+  `bash ${OPENCLAW_STARTUP_SCRIPT_PATH}`,
+].join("\n");
+
+async function refreshAiGatewayToken(sandbox: Sandbox, sandboxId: string): Promise<void> {
+  const freshToken = await getAiGatewayBearerTokenOptional();
+  if (!freshToken) {
+    return;
+  }
+
+  logInfo("sandbox.token_refresh.start", { sandboxId });
+
+  const writeResult = await sandbox.runCommand("sh", [
+    "-c",
+    WRITE_AI_GATEWAY_TOKEN_SCRIPT,
+    "--",
+    freshToken,
+  ]);
+  if (writeResult.exitCode !== 0) {
+    const output = await writeResult.output("both");
+    throw new Error(`Failed to write AI Gateway token: ${output.slice(0, 300)}`);
+  }
+
+  const restartResult = await sandbox.runCommand("bash", [
+    "-lc",
+    RESTART_OPENCLAW_GATEWAY_SCRIPT,
+  ]);
+  if (restartResult.exitCode !== 0) {
+    const output = await restartResult.output("both");
+    throw new Error(`Failed to restart OpenClaw gateway: ${output.slice(0, 300)}`);
+  }
+
+  await mutateMeta((next) => {
+    next.lastTokenRefreshAt = Date.now();
+  });
+
+  logInfo("sandbox.token_refresh.complete", { sandboxId });
 }
 
 export async function probeGatewayReady(): Promise<boolean> {
@@ -361,6 +424,18 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
       meta.sandboxId = sandbox.sandboxId;
       meta.portUrls = resolvePortUrls(sandbox);
     });
+
+    // Write a fresh AI Gateway token before starting — the snapshot's
+    // baked-in key file contains a stale OIDC token.
+    const freshApiKey = await getAiGatewayBearerTokenOptional();
+    if (freshApiKey) {
+      await sandbox.runCommand("sh", [
+        "-c",
+        WRITE_AI_GATEWAY_TOKEN_SCRIPT,
+        "--",
+        freshApiKey,
+      ]);
+    }
 
     const restoreResult = await sandbox.runCommand("bash", [
       OPENCLAW_STARTUP_SCRIPT_PATH,
