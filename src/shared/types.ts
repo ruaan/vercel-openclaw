@@ -70,6 +70,7 @@ export type FirewallState = {
 
 export type SingleMeta = {
   _schemaVersion: number;
+  version: number;
   id: "openclaw-single";
   sandboxId: string | null;
   snapshotId: string | null;
@@ -87,11 +88,12 @@ export type SingleMeta = {
   snapshotHistory: SnapshotRecord[];
 };
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export function createDefaultMeta(now: number, gatewayToken: string): SingleMeta {
   return {
     _schemaVersion: CURRENT_SCHEMA_VERSION,
+    version: 1,
     id: "openclaw-single",
     sandboxId: null,
     snapshotId: null,
@@ -130,6 +132,12 @@ export function ensureMetaShape(input: unknown): SingleMeta | null {
 
   return {
     _schemaVersion: CURRENT_SCHEMA_VERSION,
+    version:
+      typeof raw.version === "number" &&
+      Number.isSafeInteger(raw.version) &&
+      raw.version >= 1
+        ? raw.version
+        : 1,
     id: "openclaw-single",
     sandboxId: typeof raw.sandboxId === "string" ? raw.sandboxId : null,
     snapshotId: typeof raw.snapshotId === "string" ? raw.snapshotId : null,

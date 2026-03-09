@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getStore, _resetStoreForTesting } from "@/server/store/store";
+import { createDefaultMeta } from "@/shared/types";
+import {
+  getInitializedMeta,
+  getStore,
+  mutateMeta,
+  _resetStoreForTesting,
+} from "@/server/store/store";
 
-function withEnv(
+function withEnv<T>(
   overrides: Record<string, string | undefined>,
-  fn: () => void,
-): void {
+  fn: () => T | Promise<T>,
+): T | Promise<T> {
   const originals: Record<string, string | undefined> = {};
   for (const key of Object.keys(overrides)) {
     originals[key] = process.env[key];
@@ -17,7 +23,7 @@ function withEnv(
     }
   }
   try {
-    fn();
+    return fn();
   } finally {
     for (const key of Object.keys(originals)) {
       if (originals[key] === undefined) {
@@ -92,6 +98,71 @@ test("getStore: falls back to MemoryStore when NODE_ENV is test", () => {
     () => {
       const store = getStore();
       assert.equal(store.name, "memory");
+    },
+  );
+});
+
+test("getStore: compareAndSetMeta rejects stale versions and accepts current", async () => {
+  await withEnv(
+    {
+      NODE_ENV: "test",
+      VERCEL: undefined,
+      UPSTASH_REDIS_REST_URL: undefined,
+      UPSTASH_REDIS_REST_TOKEN: undefined,
+      KV_REST_API_URL: undefined,
+      KV_REST_API_TOKEN: undefined,
+    },
+    async () => {
+      const store = getStore();
+      const meta = createDefaultMeta(Date.now(), "gateway-token");
+      const created = await store.createMetaIfAbsent(meta);
+
+      assert.equal(created, true);
+
+      const staleWrite = await store.compareAndSetMeta(99, {
+        ...meta,
+        version: 100,
+      });
+      assert.equal(staleWrite, false);
+
+      const currentWrite = await store.compareAndSetMeta(1, {
+        ...meta,
+        version: 2,
+        status: "creating",
+      });
+      assert.equal(currentWrite, true);
+
+      const persisted = await store.getMeta();
+      assert.equal(persisted?.version, 2);
+      assert.equal(persisted?.status, "creating");
+    },
+  );
+});
+
+test("mutateMeta: increments persisted version after initialization", async () => {
+  await withEnv(
+    {
+      NODE_ENV: "test",
+      VERCEL: undefined,
+      UPSTASH_REDIS_REST_URL: undefined,
+      UPSTASH_REDIS_REST_TOKEN: undefined,
+      KV_REST_API_URL: undefined,
+      KV_REST_API_TOKEN: undefined,
+    },
+    async () => {
+      const initial = await getInitializedMeta();
+      assert.equal(initial.version, 1);
+
+      const updated = await mutateMeta((meta) => {
+        meta.status = "creating";
+      });
+
+      assert.equal(updated.version, 2);
+      assert.equal(updated.status, "creating");
+
+      const persisted = await getStore().getMeta();
+      assert.equal(persisted?.version, 2);
+      assert.equal(persisted?.status, "creating");
     },
   );
 });
