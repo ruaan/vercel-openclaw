@@ -74,3 +74,55 @@ test("createDiscordAdapter extracts slash command text", async () => {
   assert.equal(result.message.channelId, "channel-1");
   assert.equal(result.message.userId, "user-1");
 });
+
+test("createDiscordAdapter sends follow-up webhook posts for reply chunks after the first", async () => {
+  const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  const fetchFn: typeof fetch = async (input, init) => {
+    fetchCalls.push({ input, init });
+    return new Response(null, { status: 200 });
+  };
+
+  const adapter = createDiscordAdapter(
+    {
+      publicKey: "a".repeat(64),
+      applicationId: "app-123",
+      botToken: "bot-token",
+      configuredAt: Date.now(),
+    },
+    { fetchFn },
+  );
+
+  await adapter.sendReply(
+    {
+      text: "ignored",
+      interactionId: "interaction-1",
+      interactionToken: "interaction-token",
+      applicationId: "app-123",
+      channelId: "channel-1",
+      userId: "user-1",
+    },
+    `${"a".repeat(1999)} ${"b".repeat(1990)}`,
+  );
+
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(
+    fetchCalls[0]?.input,
+    "https://discord.com/api/v10/webhooks/app-123/interaction-token/messages/@original",
+  );
+  assert.equal(fetchCalls[0]?.init?.method, "PATCH");
+  assert.equal(
+    fetchCalls[0]?.init?.body,
+    JSON.stringify({
+      content: `${"a".repeat(1999)} `,
+    }),
+  );
+
+  assert.equal(fetchCalls[1]?.input, "https://discord.com/api/v10/webhooks/app-123/interaction-token");
+  assert.equal(fetchCalls[1]?.init?.method, "POST");
+  assert.equal(
+    fetchCalls[1]?.init?.body,
+    JSON.stringify({
+      content: `(2/2) ${"b".repeat(1990)}`,
+    }),
+  );
+});

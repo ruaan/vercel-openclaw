@@ -330,6 +330,10 @@ function resolveDiscordWebhookMessageUrl(message: DiscordExtractedMessage): stri
   return `https://discord.com/api/v10/webhooks/${message.applicationId}/${message.interactionToken}/messages/@original`;
 }
 
+function resolveDiscordWebhookFollowupUrl(message: DiscordExtractedMessage): string {
+  return `https://discord.com/api/v10/webhooks/${message.applicationId}/${message.interactionToken}`;
+}
+
 function toRetryableSendError(
   message: string,
   retryAfterSeconds?: number,
@@ -344,6 +348,52 @@ function toRetryableSendError(
   error.retryAfterSeconds = retryAfterSeconds;
   error.cause = cause;
   return error as RetryableSendError;
+}
+
+async function sendDiscordInteractionFollowup(
+  message: DiscordExtractedMessage,
+  content: string,
+  fetchFn: typeof fetch,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchFn(resolveDiscordWebhookFollowupUrl(message), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        content,
+      }),
+      signal: AbortSignal.timeout(DISCORD_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isLikelyNetworkError(error)) {
+      throw toRetryableSendError(
+        `discord_followup_network: ${error instanceof Error ? error.message : String(error)}`,
+        undefined,
+        error,
+      );
+    }
+    throw error;
+  }
+
+  if (response.status === 429 || response.status >= 500) {
+    throw toRetryableSendError(
+      `discord_followup_retryable status=${response.status}`,
+      parseRetryAfterSeconds(response.headers.get("retry-after")),
+    );
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    const detail = body.slice(0, 200);
+    throw new Error(
+      detail.length > 0
+        ? `discord_followup_failed status=${response.status} body=${detail}`
+        : `discord_followup_failed status=${response.status}`,
+    );
+  }
 }
 
 export function createDiscordAdapter(
@@ -502,6 +552,16 @@ export function createDiscordAdapter(
           detail.length > 0
             ? `discord_followup_failed status=${response.status} body=${detail}`
             : `discord_followup_failed status=${response.status}`,
+        );
+      }
+
+      for (let index = 1; index < contentChunks.length; index += 1) {
+        const chunk = clampDiscordText(contentChunks[index] ?? "");
+        const followupBaseContent = `(${index + 1}/${contentChunks.length}) ${chunk}`;
+        await sendDiscordInteractionFollowup(
+          message,
+          clampDiscordText(followupBaseContent),
+          fetchFn,
         );
       }
     },
