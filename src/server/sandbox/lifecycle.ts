@@ -11,7 +11,6 @@ import { logError, logInfo, logWarn } from "@/server/log";
 import { setupOpenClaw } from "@/server/openclaw/bootstrap";
 import {
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
-  OPENCLAW_BIN,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
@@ -27,16 +26,31 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const SANDBOX_PORTS = [OPENCLAW_PORT];
 const EXTEND_TIMEOUT_MS = 15 * 60 * 1000;
 const ACCESS_TOUCH_THROTTLE_MS = 30_000;
-const TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const LIFECYCLE_LOCK_KEY = "openclaw-single:lock:lifecycle";
 const START_LOCK_KEY = "openclaw-single:lock:start";
 const LIFECYCLE_LOCK_TTL_SECONDS = 20 * 60;
-const START_LOCK_TTL_SECONDS = 60;
+const START_LOCK_TTL_SECONDS = 15 * 60;
+const LOCK_RENEW_INTERVAL_MS = 30_000;
 const STALE_OPERATION_MS = 5 * 60 * 1000;
 const READY_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const READY_WAIT_POLL_MS = 1_000;
 
 type BackgroundScheduler = (callback: () => Promise<void> | void) => void;
+
+type AutoRenewedLockOptions = {
+  key: string;
+  token: string;
+  ttlSeconds: number;
+  label: string;
+};
+
+class LifecycleLockUnavailableError extends Error {
+  constructor() {
+    super("Sandbox lifecycle lock unavailable.");
+    this.name = "LifecycleLockUnavailableError";
+  }
+}
 
 export async function ensureSandboxRunning(options: {
   origin: string;
@@ -301,38 +315,68 @@ async function scheduleLifecycleWork(options: {
   const store = getStore();
   const startToken = await store.acquireLock(START_LOCK_KEY, START_LOCK_TTL_SECONDS);
   if (!startToken) {
+    logInfo("sandbox.start_lock_contended", { reason: options.reason });
+    return;
+  }
+
+  const latest = await getInitializedMeta();
+  if (latest.status === "running" && latest.sandboxId) {
+    await store.releaseLock(START_LOCK_KEY, startToken);
+    return;
+  }
+
+  if (isBusyStatus(latest.status) && !isOperationStale(latest)) {
+    await store.releaseLock(START_LOCK_KEY, startToken);
     return;
   }
 
   const nextStatus =
-    options.meta.snapshotId && options.meta.status !== "uninitialized"
+    latest.snapshotId && latest.status !== "uninitialized"
       ? "restoring"
       : "creating";
 
   await mutateMeta((meta) => {
+    if (meta.status === "running" && meta.sandboxId) {
+      return;
+    }
     meta.status = nextStatus;
     meta.lastError = null;
   });
 
   const run = async (): Promise<void> => {
-    try {
-      if (nextStatus === "restoring") {
-        await restoreSandboxFromSnapshot(options.origin);
-      } else {
-        await createAndBootstrapSandbox(options.origin);
-      }
-    } catch (error) {
-      logError("sandbox.lifecycle_failed", {
-        reason: options.reason,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await mutateMeta((meta) => {
-        meta.status = "error";
-        meta.lastError = error instanceof Error ? error.message : String(error);
-      });
-    } finally {
-      await store.releaseLock(START_LOCK_KEY, startToken);
-    }
+    await withAutoRenewedLock(
+      {
+        key: START_LOCK_KEY,
+        token: startToken,
+        ttlSeconds: START_LOCK_TTL_SECONDS,
+        label: "sandbox.start",
+      },
+      async () => {
+        try {
+          if (nextStatus === "restoring") {
+            await restoreSandboxFromSnapshot(options.origin);
+          } else {
+            await createAndBootstrapSandbox(options.origin);
+          }
+        } catch (error) {
+          if (error instanceof LifecycleLockUnavailableError) {
+            logInfo("sandbox.lifecycle_lock_contended", {
+              reason: options.reason,
+            });
+            return;
+          }
+
+          logError("sandbox.lifecycle_failed", {
+            reason: options.reason,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await mutateMeta((meta) => {
+            meta.status = "error";
+            meta.lastError = error instanceof Error ? error.message : String(error);
+          });
+        }
+      },
+    );
   };
 
   if (options.schedule) {
@@ -471,13 +515,71 @@ async function withLifecycleLock<T>(fn: () => Promise<T>): Promise<T> {
   const store = getStore();
   const token = await store.acquireLock(LIFECYCLE_LOCK_KEY, LIFECYCLE_LOCK_TTL_SECONDS);
   if (!token) {
-    throw new Error("Sandbox lifecycle lock unavailable.");
+    throw new LifecycleLockUnavailableError();
   }
+
+  return withAutoRenewedLock(
+    {
+      key: LIFECYCLE_LOCK_KEY,
+      token,
+      ttlSeconds: LIFECYCLE_LOCK_TTL_SECONDS,
+      label: "sandbox.lifecycle",
+    },
+    fn,
+  );
+}
+
+async function withAutoRenewedLock<T>(
+  options: AutoRenewedLockOptions,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const store = getStore();
+  let stopRenewal = false;
+  const intervalMs = Math.max(
+    1_000,
+    Math.min(LOCK_RENEW_INTERVAL_MS, Math.floor((options.ttlSeconds * 1000) / 2)),
+  );
+
+  const interval = setInterval(() => {
+    if (stopRenewal) {
+      return;
+    }
+
+    void store
+      .renewLock(options.key, options.token, options.ttlSeconds)
+      .then((renewed) => {
+        if (!renewed) {
+          stopRenewal = true;
+          logWarn("sandbox.lock_renewal_lost", {
+            key: options.key,
+            label: options.label,
+          });
+        }
+      })
+      .catch((error) => {
+        logWarn("sandbox.lock_renewal_failed", {
+          key: options.key,
+          label: options.label,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, intervalMs);
+
+  const maybeUnref = interval as unknown as { unref?: () => void };
+  maybeUnref.unref?.();
 
   try {
     return await fn();
   } finally {
-    await store.releaseLock(LIFECYCLE_LOCK_KEY, token);
+    stopRenewal = true;
+    clearInterval(interval);
+    await store.releaseLock(options.key, options.token).catch((error) => {
+      logWarn("sandbox.lock_release_failed", {
+        key: options.key,
+        label: options.label,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 }
 
