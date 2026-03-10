@@ -5,6 +5,7 @@ import {
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { RetryableSendError } from "@/server/channels/core/types";
 import {
   createDiscordAdapter,
   verifyDiscordRequestSignature,
@@ -124,5 +125,65 @@ test("createDiscordAdapter sends follow-up webhook posts for reply chunks after 
     JSON.stringify({
       content: `(2/2) ${"b".repeat(1990)}`,
     }),
+  );
+});
+
+test("createDiscordAdapter getSessionKey scopes history to channel and user", () => {
+  const adapter = createDiscordAdapter({
+    publicKey: "a".repeat(64),
+    applicationId: "app-123",
+    botToken: "bot-token",
+    configuredAt: Date.now(),
+  });
+
+  assert.equal(
+    adapter.getSessionKey?.({
+      text: "hello discord",
+      interactionId: "interaction-1",
+      interactionToken: "interaction-token",
+      applicationId: "app-123",
+      channelId: "channel-1",
+      userId: "user-1",
+    }),
+    "discord:channel:channel-1:user:user-1",
+  );
+});
+
+test("createDiscordAdapter sendReply throws RetryableSendError when Discord rate limits", async () => {
+  const adapter = createDiscordAdapter(
+    {
+      publicKey: "a".repeat(64),
+      applicationId: "app-123",
+      botToken: "bot-token",
+      configuredAt: Date.now(),
+    },
+    {
+      fetchFn: async () =>
+        new Response("rate limited", {
+          status: 429,
+          headers: {
+            "retry-after": "3",
+          },
+        }),
+    },
+  );
+
+  await assert.rejects(
+    adapter.sendReply(
+      {
+        text: "hello discord",
+        interactionId: "interaction-1",
+        interactionToken: "interaction-token",
+        applicationId: "app-123",
+        channelId: "channel-1",
+        userId: "user-1",
+      },
+      "reply text",
+    ),
+    (error) => {
+      assert.ok(error instanceof RetryableSendError);
+      assert.equal(error.retryAfterSeconds, 3);
+      return true;
+    },
   );
 });

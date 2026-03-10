@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { RetryableSendError } from "@/server/channels/core/types";
 import {
   createSlackAdapter,
   getSlackUrlVerificationChallenge,
@@ -72,4 +73,39 @@ test("createSlackAdapter extracts a basic threadable message", async () => {
   assert.equal(result.message.text, "hello from slack");
   assert.equal(result.message.channel, "C123");
   assert.equal(result.message.threadTs, "123.45");
+});
+
+test("createSlackAdapter sendReply throws RetryableSendError when Slack rate limits", async () => {
+  const adapter = createSlackAdapter(
+    {
+      signingSecret: "secret",
+      botToken: "xoxb-token",
+    },
+    {
+      fetchFn: async () =>
+        new Response(JSON.stringify({ ok: false, error: "ratelimited" }), {
+          status: 429,
+          headers: {
+            "retry-after": "7",
+          },
+        }),
+    },
+  );
+
+  await assert.rejects(
+    adapter.sendReply(
+      {
+        text: "hello from slack",
+        channel: "C123",
+        threadTs: "123.45",
+        ts: "123.45",
+      },
+      "reply text",
+    ),
+    (error) => {
+      assert.ok(error instanceof RetryableSendError);
+      assert.equal(error.retryAfterSeconds, 7);
+      return true;
+    },
+  );
 });

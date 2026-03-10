@@ -1,10 +1,10 @@
 import * as crypto from "node:crypto";
 
 import type { DiscordChannelConfig } from "@/shared/channels";
+import { RetryableSendError } from "@/server/channels/core/types";
 import type {
   ExtractedChannelMessage,
   PlatformAdapter,
-  RetryableSendError,
 } from "@/server/channels/core/types";
 import {
   sendChannelMessage,
@@ -339,15 +339,7 @@ function toRetryableSendError(
   retryAfterSeconds?: number,
   cause?: unknown,
 ): RetryableSendError {
-  const error = new Error(message) as Error & {
-    name: string;
-    retryAfterSeconds?: number;
-    cause?: unknown;
-  };
-  error.name = "RetryableSendError";
-  error.retryAfterSeconds = retryAfterSeconds;
-  error.cause = cause;
-  return error as RetryableSendError;
+  return new RetryableSendError(message, { retryAfterSeconds, cause });
 }
 
 async function sendDiscordInteractionFollowup(
@@ -567,7 +559,7 @@ export function createDiscordAdapter(
     },
 
     getSessionKey(message) {
-      return `discord:channel:${message.channelId}`;
+      return `discord:channel:${message.channelId}:user:${message.userId}`;
     },
   };
 }

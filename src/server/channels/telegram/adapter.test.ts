@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { RetryableSendError } from "@/server/channels/core/types";
 import {
   createTelegramAdapter,
   isTelegramWebhookSecretValid,
@@ -49,4 +50,49 @@ test("createTelegramAdapter extracts chat text updates", async () => {
 
   assert.equal(result.message.text, "hello telegram");
   assert.equal(result.message.chatId, "42");
+});
+
+test("createTelegramAdapter sendReply throws RetryableSendError when Telegram rate limits", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        ok: false,
+        error_code: 429,
+        description: "Too Many Requests",
+        parameters: {
+          retry_after: 11,
+        },
+      }),
+      {
+        status: 429,
+      },
+    );
+
+  try {
+    const adapter = createTelegramAdapter({
+      botToken: "bot-token",
+      webhookSecret: "secret",
+      webhookUrl: "https://example.com/api/channels/telegram/webhook",
+      botUsername: "openclaw_bot",
+      configuredAt: Date.now(),
+    });
+
+    await assert.rejects(
+      adapter.sendReply(
+        {
+          text: "hello telegram",
+          chatId: "42",
+        },
+        "reply text",
+      ),
+      (error) => {
+        assert.ok(error instanceof RetryableSendError);
+        assert.equal(error.retryAfterSeconds, 11);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -1,7 +1,8 @@
 import * as crypto from "node:crypto";
 
 import type { TelegramChannelConfig } from "@/shared/channels";
-import type { PlatformAdapter, RetryableSendError } from "@/server/channels/core/types";
+import { RetryableSendError } from "@/server/channels/core/types";
+import type { PlatformAdapter } from "@/server/channels/core/types";
 import {
   isRetryableTelegramSendError,
   sendChatAction,
@@ -86,15 +87,7 @@ function toRetryableSendError(
   retryAfterSeconds?: number,
   cause?: unknown,
 ): RetryableSendError {
-  const error = new Error(message) as Error & {
-    name: string;
-    retryAfterSeconds?: number;
-    cause?: unknown;
-  };
-  error.name = "RetryableSendError";
-  error.retryAfterSeconds = retryAfterSeconds;
-  error.cause = cause;
-  return error as RetryableSendError;
+  return new RetryableSendError(message, { retryAfterSeconds, cause });
 }
 
 export function createTelegramAdapter(

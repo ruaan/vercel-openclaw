@@ -1,10 +1,10 @@
 import * as crypto from "node:crypto";
 
+import { RetryableSendError } from "@/server/channels/core/types";
 import type {
   ExtractedChannelMessage,
   OpenClawMessage,
   PlatformAdapter,
-  RetryableSendError,
 } from "@/server/channels/core/types";
 
 const SLACK_SIGNATURE_VERSION = "v0";
@@ -104,15 +104,7 @@ function toRetryableSendError(
   retryAfterSeconds?: number,
   cause?: unknown,
 ): RetryableSendError {
-  const error = new Error(message) as Error & {
-    name: string;
-    retryAfterSeconds?: number;
-    cause?: unknown;
-  };
-  error.name = "RetryableSendError";
-  error.retryAfterSeconds = retryAfterSeconds;
-  error.cause = cause;
-  return error as RetryableSendError;
+  return new RetryableSendError(message, { retryAfterSeconds, cause });
 }
 
 function parseRetryAfterSeconds(retryAfterHeader: string | null): number | undefined {
