@@ -411,7 +411,7 @@ async function createAndBootstrapSandbox(origin: string): Promise<SingleMeta> {
     const sandbox = await Sandbox.create({
       ports: SANDBOX_PORTS,
       timeout: DEFAULT_TIMEOUT_MS,
-      resources: { vcpus: 2 },
+      resources: { vcpus: 1 },
       ...(await buildRuntimeEnv()),
     });
 
@@ -464,7 +464,7 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
     const sandbox = await Sandbox.create({
       ports: SANDBOX_PORTS,
       timeout: DEFAULT_TIMEOUT_MS,
-      resources: { vcpus: 2 },
+      resources: { vcpus: 1 },
       source: {
         type: "snapshot",
         snapshotId: current.snapshotId,
