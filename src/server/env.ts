@@ -63,7 +63,11 @@ export function getStoreEnv():
 export function getBaseOrigin(request: Request): string {
   const configured = process.env.NEXT_PUBLIC_APP_URL?.trim();
   if (configured) {
-    return configured.replace(/\/$/, "");
+    return new URL(configured).origin;
+  }
+
+  if (isProduction()) {
+    throw new Error("NEXT_PUBLIC_APP_URL is required in production.");
   }
 
   return new URL(request.url).origin;

@@ -19,13 +19,32 @@ export const OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH = `${OPENCLAW_PKG_DIR}/skill
 export const OPENCLAW_LOG_FILE = "/tmp/openclaw.log";
 export const OPENCLAW_STARTUP_SCRIPT_PATH = "/vercel/sandbox/.on-restore.sh";
 
+function readBooleanEnv(name: string, defaultValue = false): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) {
+    return defaultValue;
+  }
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") {
+    return true;
+  }
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") {
+    return false;
+  }
+  throw new Error(
+    `${name} must be one of: true, false, 1, 0, yes, no, on, off.`,
+  );
+}
+
 export function buildGatewayConfig(
   apiKey?: string,
   proxyOrigin?: string,
 ): string {
   const controlUi: Record<string, unknown> = {
-    allowInsecureAuth: true,
-    dangerouslyDisableDeviceAuth: true,
+    allowInsecureAuth: readBooleanEnv("OPENCLAW_ALLOW_INSECURE_AUTH", false),
+    dangerouslyDisableDeviceAuth: readBooleanEnv(
+      "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH",
+      false,
+    ),
   };
   if (proxyOrigin) {
     controlUi.allowedOrigins = [proxyOrigin];
