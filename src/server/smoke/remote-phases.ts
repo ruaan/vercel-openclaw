@@ -1,0 +1,741 @@
+/**
+ * Remote smoke phase functions.
+ *
+ * Each function hits a live deployed instance over HTTP and returns
+ * a structured PhaseResult. No external dependencies — plain fetch().
+ */
+
+import { authHeaders, getAuthSource } from "./remote-auth.js";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface PhaseResult {
+  phase: string;
+  passed: boolean;
+  durationMs: number;
+  detail?: Record<string, unknown>;
+  error?: string;
+  /** Machine-readable error classification. Present on every failure. */
+  errorCode?: string;
+  /** The endpoint that was called when the failure occurred. */
+  endpoint?: string;
+  /** HTTP status code of the failed response, if applicable. */
+  httpStatus?: number;
+  /** Actionable suggestion for fixing the failure. */
+  hint?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Default per-request timeout in milliseconds. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+function url(base: string, path: string): string {
+  return `${base.replace(/\/$/, "")}${path}`;
+}
+
+async function timed<T>(fn: () => Promise<T>): Promise<[T, number]> {
+  const t0 = performance.now();
+  const result = await fn();
+  return [result, Math.round(performance.now() - t0)];
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function log(phase: string, msg: string, data?: Record<string, unknown>): void {
+  const entry = { ts: new Date().toISOString(), phase, msg, ...data };
+  console.error(JSON.stringify(entry));
+}
+
+/**
+ * Fetch with an AbortController timeout.
+ * Rejects with an error containing "timeout" if the request exceeds `timeoutMs`.
+ */
+function fetchWithTimeout(
+  input: string,
+  init?: RequestInit,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(input, { ...init, signal: controller.signal }).finally(() =>
+    clearTimeout(timer),
+  );
+}
+
+/**
+ * Normalize abort/timeout errors to a consistent message and error code.
+ */
+function classifyError(err: unknown): { message: string; errorCode: string; hint: string } {
+  if (
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error &&
+      (err.name === "AbortError" || err.message.includes("aborted")))
+  ) {
+    return {
+      message: "request timeout (aborted)",
+      errorCode: "TIMEOUT",
+      hint: "Increase --request-timeout or check if the endpoint is reachable",
+    };
+  }
+  if (err instanceof Error) {
+    if (err.message.includes("ECONNREFUSED") || err.message.includes("connect")) {
+      return {
+        message: err.message,
+        errorCode: "CONNECTION_REFUSED",
+        hint: "Verify the base URL is correct and the server is running",
+      };
+    }
+    if (err.message.includes("ENOTFOUND") || err.message.includes("getaddrinfo")) {
+      return {
+        message: err.message,
+        errorCode: "DNS_FAILURE",
+        hint: "Check the hostname in --base-url",
+      };
+    }
+    return {
+      message: err.message,
+      errorCode: "FETCH_ERROR",
+      hint: "Check network connectivity and server logs",
+    };
+  }
+  return {
+    message: String(err),
+    errorCode: "UNKNOWN_ERROR",
+    hint: "Unexpected error — check stderr logs for details",
+  };
+}
+
+/** Back-compat wrapper used in polling loop. */
+function errorMessage(err: unknown): string {
+  return classifyError(err).message;
+}
+
+/** Build a failed PhaseResult from a caught exception. */
+function failFromError(
+  phase: string,
+  endpoint: string,
+  err: unknown,
+): PhaseResult {
+  const { message, errorCode, hint } = classifyError(err);
+  log(phase, "error", { error: message, errorCode });
+  return { phase, passed: false, durationMs: 0, error: message, errorCode, endpoint, hint };
+}
+
+/** Build a failed PhaseResult from an unexpected HTTP response. */
+function failFromHttp(
+  phase: string,
+  endpoint: string,
+  httpStatus: number,
+  error: string,
+  opts: { durationMs: number; detail?: Record<string, unknown>; errorCode?: string; hint?: string },
+): PhaseResult {
+  const errorCode = opts.errorCode ?? (httpStatus === 401 || httpStatus === 403 ? "AUTH_FAILED" : `HTTP_${httpStatus}`);
+  const hint = opts.hint ?? (httpStatus === 401 || httpStatus === 403
+    ? "Set SMOKE_AUTH_COOKIE or check deployment protection settings"
+    : `Endpoint returned HTTP ${httpStatus}`);
+  return {
+    phase,
+    passed: false,
+    durationMs: opts.durationMs,
+    detail: opts.detail,
+    error,
+    errorCode,
+    endpoint,
+    httpStatus,
+    hint,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Centralized response classification
+// ---------------------------------------------------------------------------
+
+/** Structured classification of an HTTP response or parse failure. */
+export interface ResponseClassification {
+  errorCode: string;
+  error: string;
+  hint: string;
+}
+
+/** Detect login/sign-in pages returned as 200 instead of the expected content. */
+function looksLikeLoginPage(body: string): boolean {
+  const lower = body.toLowerCase();
+  return (
+    (lower.includes("<form") &&
+      (lower.includes("login") ||
+        lower.includes("sign in") ||
+        lower.includes("password"))) ||
+    lower.includes("sign in with vercel") ||
+    lower.includes("__vercel_auth")
+  );
+}
+
+/**
+ * Classify common HTTP response problems before phase-specific validation.
+ * Returns null if no common problem is detected.
+ *
+ * Handles: 401/403 auth, login HTML detection, unexpected redirects.
+ */
+export function classifyResponse(
+  status: number,
+  bodyText: string,
+  headers?: { get(name: string): string | null },
+): ResponseClassification | null {
+  if (status === 401 || status === 403) {
+    return {
+      errorCode: "AUTH_FAILED",
+      error: `Authentication failed (HTTP ${status})`,
+      hint: "Set SMOKE_AUTH_COOKIE or check deployment protection settings",
+    };
+  }
+
+  if (status >= 300 && status < 400) {
+    const location = headers?.get("location") ?? "unknown";
+    return {
+      errorCode: "UNEXPECTED_REDIRECT",
+      error: `Unexpected redirect to ${location} (HTTP ${status})`,
+      hint: "Check proxy rewrite rules or deployment protection settings",
+    };
+  }
+
+  if (looksLikeLoginPage(bodyText)) {
+    return {
+      errorCode: "LOGIN_PAGE",
+      error: "Response is a login/sign-in page, not the expected content",
+      hint: "Set SMOKE_AUTH_COOKIE — the endpoint requires authentication",
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Try to parse a response body as a JSON object.
+ * Returns the parsed data or a classification for malformed/non-object JSON.
+ */
+export function parseJsonBody(
+  bodyText: string,
+): { ok: true; data: Record<string, unknown> } | { ok: false; classification: ResponseClassification } {
+  try {
+    const data = JSON.parse(bodyText);
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      const kind = data === null ? "null" : Array.isArray(data) ? "array" : typeof data;
+      return {
+        ok: false,
+        classification: {
+          errorCode: "MALFORMED_JSON",
+          error: `Expected JSON object, got ${kind}`,
+          hint: "The endpoint returned valid JSON but not an object — check the API implementation",
+        },
+      };
+    }
+    return { ok: true, data: data as Record<string, unknown> };
+  } catch {
+    return {
+      ok: false,
+      classification: {
+        errorCode: "MALFORMED_JSON",
+        error: "Response body is not valid JSON",
+        hint: "The endpoint returned non-JSON content — it may be an error page or login redirect",
+      },
+    };
+  }
+}
+
+/**
+ * Read body as text, run classifyResponse, then parse JSON.
+ * Returns a PhaseResult on early failure or the parsed body on success.
+ */
+function classifyAndParseJson(
+  phase: string,
+  endpoint: string,
+  res: Response,
+  bodyText: string,
+  durationMs: number,
+): PhaseResult | { body: Record<string, unknown> } {
+  const c = classifyResponse(res.status, bodyText, res.headers);
+  if (c) {
+    log(phase, "classified", { errorCode: c.errorCode, httpStatus: res.status });
+    return {
+      phase, passed: false, durationMs, endpoint,
+      httpStatus: res.status, error: c.error, errorCode: c.errorCode, hint: c.hint,
+    };
+  }
+  const p = parseJsonBody(bodyText);
+  if (!p.ok) {
+    log(phase, "malformed-json", { errorCode: p.classification.errorCode });
+    return {
+      phase, passed: false, durationMs, endpoint,
+      httpStatus: res.status,
+      error: p.classification.error,
+      errorCode: p.classification.errorCode,
+      hint: p.classification.hint,
+    };
+  }
+  return { body: p.data };
+}
+
+// ---------------------------------------------------------------------------
+// Options shared by all phase functions
+// ---------------------------------------------------------------------------
+
+export interface PhaseOptions {
+  /** Per-request timeout in milliseconds. Defaults to DEFAULT_REQUEST_TIMEOUT_MS. */
+  requestTimeoutMs?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Safe phases (read-only)
+// ---------------------------------------------------------------------------
+
+export async function health(baseUrl: string, opts?: PhaseOptions): Promise<PhaseResult> {
+  const phase = "health";
+  const endpoint = "/api/health";
+  const timeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    // Health is unauthenticated at the app level, but Vercel deployment
+    // protection intercepts at the edge. Include bypass headers if available.
+    const bypassHdrs = authHeaders();
+    const [res, ms] = await timed(() =>
+      fetchWithTimeout(url(baseUrl, endpoint), Object.keys(bypassHdrs).length ? { headers: bypassHdrs } : undefined, timeout),
+    );
+    const bodyText = await res.text();
+    const cr = classifyAndParseJson(phase, endpoint, res, bodyText, ms);
+    if ("passed" in cr) return cr;
+    const body = cr.body;
+
+    const passed = res.ok && body.ok === true;
+    log(phase, passed ? "ok" : "failed", { status: res.status, body });
+    if (passed) return { phase, passed, durationMs: ms, detail: body, endpoint };
+    return failFromHttp(phase, endpoint, res.status, body.ok === false ? "health check returned ok:false" : `unexpected HTTP ${res.status}`, {
+      durationMs: ms,
+      detail: body,
+      errorCode: body.ok === false ? "HEALTH_NOT_OK" : undefined,
+      hint: body.ok === false ? "The server is up but reporting unhealthy — check server logs" : undefined,
+    });
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+export async function status(baseUrl: string, opts?: PhaseOptions): Promise<PhaseResult> {
+  const phase = "status";
+  const endpoint = "/api/status";
+  const timeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    const hdrs = authHeaders();
+    const [res, ms] = await timed(() =>
+      fetchWithTimeout(url(baseUrl, endpoint), { headers: hdrs }, timeout),
+    );
+    const bodyText = await res.text();
+    const cr = classifyAndParseJson(phase, endpoint, res, bodyText, ms);
+    if ("passed" in cr) return cr;
+    const body = cr.body;
+
+    const passed =
+      res.ok &&
+      typeof body.status === "string" &&
+      typeof body.authMode === "string" &&
+      typeof body.storeBackend === "string";
+    log(phase, passed ? "ok" : "failed", { status: res.status, body });
+    if (passed) return { phase, passed, durationMs: ms, detail: body, endpoint };
+    const missing = ["status", "authMode", "storeBackend"].filter(k => typeof body[k] !== "string");
+    return failFromHttp(phase, endpoint, res.status,
+      !res.ok ? `HTTP ${res.status}` : `missing fields: ${missing.join(", ")}`,
+      { durationMs: ms, detail: body, errorCode: res.ok ? "MISSING_FIELDS" : undefined, hint: res.ok ? "Status endpoint returned 200 but response is missing expected fields" : undefined },
+    );
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+export async function gatewayProbe(baseUrl: string, opts?: PhaseOptions): Promise<PhaseResult> {
+  const phase = "gatewayProbe";
+  const endpoint = "/gateway/";
+  const timeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    const hdrs = authHeaders();
+    const [res, ms] = await timed(() =>
+      fetchWithTimeout(
+        url(baseUrl, endpoint),
+        { headers: hdrs, redirect: "manual" },
+        timeout,
+      ),
+    );
+    const text = await res.text();
+
+    // Centralized classification for auth/redirect/login-page
+    const classified = classifyResponse(res.status, text, res.headers);
+    if (classified) {
+      log(phase, "classified", { errorCode: classified.errorCode, httpStatus: res.status });
+      return {
+        phase, passed: false, durationMs: ms, endpoint,
+        httpStatus: res.status, error: classified.error, errorCode: classified.errorCode, hint: classified.hint,
+      };
+    }
+
+    const hasMarker = text.includes("openclaw-app");
+    const isWaitingPage = res.status === 202 || text.includes("waiting");
+
+    const passed =
+      (res.status === 200 && hasMarker) || res.status === 202;
+
+    const detail: Record<string, unknown> = {
+      httpStatus: res.status,
+      bodyLength: text.length,
+      hasMarker,
+      isWaitingPage,
+      ...(res.status === 200 && !hasMarker
+        ? { expected: "body containing 'openclaw-app'", found: "200 without marker" }
+        : {}),
+    };
+
+    if (passed) {
+      log(phase, "ok", detail);
+      return { phase, passed, durationMs: ms, detail, endpoint };
+    }
+
+    const error =
+      res.status === 200 && !hasMarker
+        ? "200 response missing 'openclaw-app' marker — may not be the real gateway"
+        : `unexpected HTTP ${res.status}`;
+    const errorCode =
+      res.status === 200 && !hasMarker ? "MISSING_MARKER" : `HTTP_${res.status}`;
+    const hint =
+      res.status === 200 && !hasMarker
+        ? "The response body should contain 'openclaw-app' — the proxy may be serving a different page"
+        : `Gateway returned HTTP ${res.status}`;
+
+    log(phase, "failed", detail);
+    return { phase, passed, durationMs: ms, detail, error, errorCode, endpoint, httpStatus: res.status, hint };
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+export async function firewallRead(baseUrl: string, opts?: PhaseOptions): Promise<PhaseResult> {
+  const phase = "firewallRead";
+  const endpoint = "/api/firewall";
+  const timeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    const hdrs = authHeaders();
+    const [res, ms] = await timed(() =>
+      fetchWithTimeout(url(baseUrl, endpoint), { headers: hdrs }, timeout),
+    );
+    const bodyText = await res.text();
+    const cr = classifyAndParseJson(phase, endpoint, res, bodyText, ms);
+    if ("passed" in cr) return cr;
+    const body = cr.body;
+
+    const passed =
+      res.ok &&
+      typeof body.mode === "string" &&
+      Array.isArray(body.allowlist);
+    log(phase, passed ? "ok" : "failed", { status: res.status, body });
+    if (passed) return { phase, passed, durationMs: ms, detail: body, endpoint };
+    const missing = [
+      typeof body.mode !== "string" && "mode",
+      !Array.isArray(body.allowlist) && "allowlist",
+    ].filter(Boolean);
+    return failFromHttp(phase, endpoint, res.status,
+      !res.ok ? `HTTP ${res.status}` : `missing fields: ${missing.join(", ")}`,
+      { durationMs: ms, detail: body, errorCode: res.ok ? "MISSING_FIELDS" : undefined, hint: res.ok ? "Firewall endpoint responded but is missing expected fields" : undefined },
+    );
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+export async function channelsSummary(baseUrl: string, opts?: PhaseOptions): Promise<PhaseResult> {
+  const phase = "channelsSummary";
+  const endpoint = "/api/channels/summary";
+  const timeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    const hdrs = authHeaders();
+    const [res, ms] = await timed(() =>
+      fetchWithTimeout(url(baseUrl, endpoint), { headers: hdrs }, timeout),
+    );
+    const bodyText = await res.text();
+    const cr = classifyAndParseJson(phase, endpoint, res, bodyText, ms);
+    if ("passed" in cr) return cr;
+    const body = cr.body;
+
+    const passed = res.ok;
+    log(phase, passed ? "ok" : "failed", { status: res.status, body });
+    if (passed) return { phase, passed, durationMs: ms, detail: body, endpoint };
+    return failFromHttp(phase, endpoint, res.status,
+      `HTTP ${res.status}`,
+      { durationMs: ms, detail: body },
+    );
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+export async function sshEcho(baseUrl: string, opts?: PhaseOptions): Promise<PhaseResult> {
+  const phase = "sshEcho";
+  const endpoint = "/api/admin/ssh";
+  const timeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    const hdrs = { ...authHeaders({ mutation: true }), "Content-Type": "application/json" };
+    const [res, ms] = await timed(() =>
+      fetchWithTimeout(
+        url(baseUrl, endpoint),
+        {
+          method: "POST",
+          headers: hdrs,
+          body: JSON.stringify({ command: "echo", args: ["smoke-ok"] }),
+        },
+        timeout,
+      ),
+    );
+    const bodyText = await res.text();
+    const cr = classifyAndParseJson(phase, endpoint, res, bodyText, ms);
+    if ("passed" in cr) return cr;
+    const body = cr.body;
+
+    const passed =
+      res.ok &&
+      typeof body.stdout === "string" &&
+      (body.stdout as string).includes("smoke-ok");
+    log(phase, passed ? "ok" : "failed", { status: res.status, body });
+    if (passed) return { phase, passed, durationMs: ms, detail: body, endpoint };
+    if (!res.ok) {
+      return failFromHttp(phase, endpoint, res.status, `HTTP ${res.status}`, { durationMs: ms, detail: body });
+    }
+    return {
+      phase, passed: false, durationMs: ms, detail: body, endpoint,
+      error: "stdout missing 'smoke-ok' marker",
+      errorCode: "ECHO_MISMATCH",
+      hint: "SSH echo command ran but output did not contain expected marker",
+    };
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Destructive phases (opt-in)
+// ---------------------------------------------------------------------------
+
+const POLL_INITIAL_DELAY_MS = 2_000;
+const POLL_MAX_DELAY_MS = 10_000;
+const POLL_BACKOFF_FACTOR = 1.5;
+
+async function pollUntilRunning(
+  baseUrl: string,
+  timeoutMs: number,
+  requestTimeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<{ running: boolean; lastBody: Record<string, unknown> | null }> {
+  const deadline = Date.now() + timeoutMs;
+  let delay = POLL_INITIAL_DELAY_MS;
+  let lastBody: Record<string, unknown> | null = null;
+
+  while (Date.now() < deadline) {
+    await sleep(delay);
+    try {
+      const hdrs = authHeaders();
+      const res = await fetchWithTimeout(
+        url(baseUrl, "/api/status"),
+        { headers: hdrs },
+        requestTimeoutMs,
+      );
+      const body = (await res.json()) as Record<string, unknown>;
+      lastBody = body;
+      log("poll", "status", { status: body.status });
+      if (body.status === "running") return { running: true, lastBody };
+      if (body.status === "error") return { running: false, lastBody };
+    } catch (err) {
+      log("poll", "fetch-error", { error: errorMessage(err) });
+    }
+    delay = Math.min(delay * POLL_BACKOFF_FACTOR, POLL_MAX_DELAY_MS);
+  }
+
+  return { running: false, lastBody };
+}
+
+export async function ensureRunning(
+  baseUrl: string,
+  timeoutMs = 120_000,
+  opts?: PhaseOptions,
+): Promise<PhaseResult> {
+  const phase = "ensureRunning";
+  const endpoint = "/api/admin/ensure";
+  const reqTimeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    const hdrs = { ...authHeaders({ mutation: true }), "Content-Type": "application/json" };
+    const [res, fetchMs] = await timed(() =>
+      fetchWithTimeout(
+        url(baseUrl, endpoint),
+        { method: "POST", headers: hdrs, body: "{}" },
+        reqTimeout,
+      ),
+    );
+    const bodyText = await res.text();
+    const cr = classifyAndParseJson(phase, endpoint, res, bodyText, fetchMs);
+    if ("passed" in cr) return cr;
+    const body = cr.body;
+    log(phase, "initial-response", { status: res.status, body });
+
+    if (res.status === 200 && body.state === "running") {
+      return { phase, passed: true, durationMs: fetchMs, detail: body, endpoint };
+    }
+
+    if (res.status === 202) {
+      const [poll, pollMs] = await timed(() =>
+        pollUntilRunning(baseUrl, timeoutMs, reqTimeout),
+      );
+      const totalMs = fetchMs + pollMs;
+      if (poll.running) {
+        log(phase, "running-after-poll", { totalMs });
+        return {
+          phase,
+          passed: true,
+          durationMs: totalMs,
+          detail: poll.lastBody ?? body,
+          endpoint,
+        };
+      }
+      log(phase, "timeout", { totalMs, lastBody: poll.lastBody });
+      return {
+        phase, passed: false, durationMs: totalMs,
+        detail: poll.lastBody ?? body,
+        error: "Timed out waiting for running state",
+        errorCode: "POLL_TIMEOUT",
+        endpoint,
+        hint: "Sandbox did not reach 'running' within the timeout — increase --timeout or check sandbox logs",
+      };
+    }
+
+    return failFromHttp(phase, endpoint, res.status, `Unexpected status ${res.status}`, {
+      durationMs: fetchMs, detail: body,
+    });
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+export async function snapshotStop(baseUrl: string, opts?: PhaseOptions): Promise<PhaseResult> {
+  const phase = "snapshotStop";
+  const endpoint = "/api/admin/snapshot";
+  const timeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    const hdrs = { ...authHeaders({ mutation: true }), "Content-Type": "application/json" };
+    const [res, ms] = await timed(() =>
+      fetchWithTimeout(
+        url(baseUrl, endpoint),
+        { method: "POST", headers: hdrs, body: "{}" },
+        timeout,
+      ),
+    );
+    const bodyText = await res.text();
+    const cr = classifyAndParseJson(phase, endpoint, res, bodyText, ms);
+    if ("passed" in cr) return cr;
+    const body = cr.body;
+
+    const passed = res.ok && typeof body.snapshotId === "string";
+    log(phase, passed ? "ok" : "failed", { status: res.status, body });
+    if (passed) return { phase, passed, durationMs: ms, detail: body, endpoint };
+    if (!res.ok) {
+      return failFromHttp(phase, endpoint, res.status, `HTTP ${res.status}`, { durationMs: ms, detail: body });
+    }
+    return {
+      phase, passed: false, durationMs: ms, detail: body, endpoint,
+      error: "Response missing snapshotId field",
+      errorCode: "MISSING_SNAPSHOT_ID",
+      hint: "Snapshot endpoint returned 200 but no snapshotId — the sandbox may not have been running",
+    };
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+export async function restoreFromSnapshot(
+  baseUrl: string,
+  snapshotId?: string,
+  timeoutMs = 120_000,
+  opts?: PhaseOptions,
+): Promise<PhaseResult> {
+  const phase = "restoreFromSnapshot";
+  const endpoint = "/api/admin/snapshots/restore";
+  const reqTimeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  try {
+    // If no snapshotId provided, read it from status
+    let sid = snapshotId;
+    if (!sid) {
+      const hdrs = authHeaders();
+      const statusRes = await fetchWithTimeout(
+        url(baseUrl, "/api/status"),
+        { headers: hdrs },
+        reqTimeout,
+      );
+      const statusText = await statusRes.text();
+      const statusCr = classifyAndParseJson(phase, "/api/status", statusRes, statusText, 0);
+      if ("passed" in statusCr) return statusCr;
+      sid = statusCr.body.snapshotId as string | undefined;
+      if (!sid) {
+        return {
+          phase, passed: false, durationMs: 0, endpoint,
+          error: "No snapshotId available for restore",
+          errorCode: "NO_SNAPSHOT_ID",
+          hint: "Run snapshotStop first or ensure status returns a snapshotId",
+        };
+      }
+    }
+
+    const hdrs = { ...authHeaders({ mutation: true }), "Content-Type": "application/json" };
+    const [res, fetchMs] = await timed(() =>
+      fetchWithTimeout(
+        url(baseUrl, endpoint),
+        { method: "POST", headers: hdrs, body: JSON.stringify({ snapshotId: sid }) },
+        reqTimeout,
+      ),
+    );
+    const bodyText = await res.text();
+    const cr = classifyAndParseJson(phase, endpoint, res, bodyText, fetchMs);
+    if ("passed" in cr) return cr;
+    const body = cr.body;
+    log(phase, "initial-response", { status: res.status, body });
+
+    // Poll until running if not immediate
+    if (body.status !== "running" && body.state !== "running") {
+      const [poll, pollMs] = await timed(() =>
+        pollUntilRunning(baseUrl, timeoutMs, reqTimeout),
+      );
+      const totalMs = fetchMs + pollMs;
+      if (poll.running) {
+        log(phase, "running-after-poll", { totalMs });
+        return {
+          phase, passed: true, durationMs: totalMs, endpoint,
+          detail: { snapshotId: sid, ...poll.lastBody },
+        };
+      }
+      return {
+        phase, passed: false, durationMs: totalMs, endpoint,
+        detail: poll.lastBody ?? body,
+        error: "Timed out waiting for restore to complete",
+        errorCode: "POLL_TIMEOUT",
+        hint: "Restore did not reach 'running' within the timeout — increase --timeout",
+      };
+    }
+
+    if (res.ok) {
+      return {
+        phase, passed: true, durationMs: fetchMs, endpoint,
+        detail: { snapshotId: sid, ...body },
+      };
+    }
+    return failFromHttp(phase, endpoint, res.status, `HTTP ${res.status}`, {
+      durationMs: fetchMs, detail: { snapshotId: sid, ...body },
+    });
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}

@@ -36,6 +36,37 @@ pnpm build
 
 Tests use `node:test` through `tsx --test`.
 
+### Remote smoke testing
+
+```bash
+pnpm smoke:remote --base-url https://my-app.vercel.app
+pnpm smoke:remote --base-url https://my-app.vercel.app --destructive --timeout 180
+pnpm smoke:remote --base-url https://my-app.vercel.app --json-only --auth-cookie "session=..."
+pnpm smoke:remote --base-url https://my-app.vercel.app --request-timeout 10
+```
+
+Flags:
+
+- `--base-url` (required) — the deployed app URL to test
+- `--destructive` — include destructive phases (ensure, snapshot, restore). Omit for safe read-only checks only.
+- `--timeout` — timeout in seconds for polling phases (default: 120)
+- `--request-timeout` — per-request fetch timeout in seconds (default: 30)
+- `--auth-cookie` — auth cookie value, overrides `SMOKE_AUTH_COOKIE` env var. The raw value is never logged.
+- `--json-only` — suppress all human-readable stderr output; emit only the JSON report to stdout
+
+Environment:
+
+- `SMOKE_AUTH_COOKIE` — encrypted session cookie for `sign-in-with-vercel` mode. Not needed for `deployment-protection` mode where Vercel handles auth upstream. Overridden by `--auth-cookie` if both are set.
+
+Output:
+
+- Structured JSON report to stdout: `{ schemaVersion: 1, passed: boolean, phases: PhaseResult[], totalMs: number }`
+- Human-readable progress to stderr (suppressed by `--json-only`)
+- Exit code 0 (all pass) or 1 (any fail)
+
+Safe phases (always run): `health`, `status`, `gatewayProbe`, `firewallRead`, `channelsSummary`, `sshEcho`.
+Destructive phases (opt-in): `ensureRunning`, `snapshotStop`, `restoreFromSnapshot`.
+
 ## Architecture
 
 ## Control plane
