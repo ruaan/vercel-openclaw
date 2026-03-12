@@ -1,11 +1,10 @@
-import { Sandbox } from "@vercel/sandbox";
-
 import { ApiError } from "@/shared/http";
 import type { FirewallEvent, FirewallState, LearnedDomain } from "@/shared/types";
 import { getInitializedMeta, getStore, mutateMeta } from "@/server/store/store";
 import { applyFirewallPolicyToSandbox } from "@/server/firewall/policy";
 import { extractDomains, normalizeDomainList } from "@/server/firewall/domains";
 import { logInfo, logWarn } from "@/server/log";
+import { getSandboxController } from "@/server/sandbox/controller";
 
 const EVENT_RETENTION = 200;
 const LEARNED_RETENTION = 500;
@@ -153,7 +152,7 @@ export async function syncFirewallPolicyIfRunning(): Promise<{
     return { applied: false, reason: "sandbox-not-running" };
   }
 
-  const sandbox = await Sandbox.get({ sandboxId: meta.sandboxId });
+  const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
   await applyFirewallPolicyToSandbox(sandbox, meta);
   return { applied: true, reason: "policy-applied" };
 }
@@ -187,7 +186,7 @@ export async function ingestLearningFromSandbox(
   }
 
   try {
-    const sandbox = await Sandbox.get({ sandboxId: meta.sandboxId });
+    const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
     const result = await sandbox.runCommand("bash", [
       "-lc",
       `if [ -f ${LEARNING_LOG_PATH} ]; then cat ${LEARNING_LOG_PATH}; : > ${LEARNING_LOG_PATH}; fi`,

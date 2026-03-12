@@ -446,7 +446,12 @@ function buildUnauthenticatedResponse(
   const next = `${new URL(request.url).pathname}${new URL(request.url).search}`;
   const redirectUrl = new URL("/api/auth/authorize", request.url);
   redirectUrl.searchParams.set("next", next);
-  return Response.redirect(redirectUrl, 302);
+  // Use a mutable Response so callers can append Set-Cookie headers.
+  // Response.redirect() creates an immutable response.
+  return new Response(null, {
+    status: 302,
+    headers: { Location: redirectUrl.toString() },
+  });
 }
 
 export function sanitizeNextPath(next: string | null): string {

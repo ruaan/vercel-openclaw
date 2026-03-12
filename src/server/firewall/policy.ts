@@ -1,7 +1,8 @@
-import type { NetworkPolicy, Sandbox } from "@vercel/sandbox";
+import type { NetworkPolicy } from "@vercel/sandbox";
 
 import type { SingleMeta } from "@/shared/types";
 import { logInfo } from "@/server/log";
+import type { SandboxHandle } from "@/server/sandbox/controller";
 
 export function toNetworkPolicy(
   mode: SingleMeta["firewall"]["mode"],
@@ -17,7 +18,7 @@ export function toNetworkPolicy(
 }
 
 export async function applyFirewallPolicyToSandbox(
-  sandbox: Sandbox,
+  sandbox: SandboxHandle,
   meta: SingleMeta,
 ): Promise<NetworkPolicy> {
   const policy = toNetworkPolicy(meta.firewall.mode, meta.firewall.allowlist);

@@ -315,8 +315,15 @@ async function processChannelJob<
   let typingStarted = false;
   try {
     if (adapter.sendTypingIndicator) {
-      await adapter.sendTypingIndicator(message);
-      typingStarted = true;
+      try {
+        await adapter.sendTypingIndicator(message);
+        typingStarted = true;
+      } catch (typingError) {
+        logWarn("channels.typing_indicator_failed", {
+          channel: options.channel,
+          error: formatError(typingError),
+        });
+      }
     }
 
     const readyMeta = await ensureSandboxReady({

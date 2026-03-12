@@ -24,10 +24,10 @@ export async function GET(request: Request): Promise<Response> {
     const gatewayReady =
       meta.status === "running"
         ? includeHealth
-          ? await probeGatewayReady()
+          ? (await probeGatewayReady()).ready
           : true
         : includeHealth
-          ? await probeGatewayReady()
+          ? (await probeGatewayReady()).ready
           : false;
 
     const response = Response.json({

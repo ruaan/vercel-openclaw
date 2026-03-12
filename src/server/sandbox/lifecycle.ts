@@ -1,5 +1,3 @@
-import { Sandbox } from "@vercel/sandbox";
-
 import { randomUUID } from "node:crypto";
 
 import { ApiError } from "@/shared/http";
@@ -22,6 +20,8 @@ import {
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
+import { getSandboxController } from "@/server/sandbox/controller";
+import type { SandboxHandle } from "@/server/sandbox/controller";
 import {
   getStore,
   getInitializedMeta,
@@ -101,7 +101,7 @@ export async function ensureSandboxReady(options: {
     });
     lastMeta = result.meta;
 
-    if (await probeGatewayReady()) {
+    if ((await probeGatewayReady()).ready) {
       return getInitializedMeta();
     }
 
@@ -133,7 +133,7 @@ export async function stopSandbox(): Promise<SingleMeta> {
     }
 
     logInfo("sandbox.snapshotting", { sandboxId: meta.sandboxId });
-    const sandbox = await Sandbox.get({ sandboxId: meta.sandboxId });
+    const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
     const snapshot = await sandbox.snapshot();
     logInfo("sandbox.status_transition", { from: meta.status, to: "stopped", snapshotId: snapshot.snapshotId });
     return mutateMeta((next) => {
@@ -181,7 +181,7 @@ export async function getSandboxDomain(port = OPENCLAW_PORT): Promise<string> {
     return cached;
   }
 
-  const sandbox = await Sandbox.get({ sandboxId: meta.sandboxId });
+  const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
   const domain = sandbox.domain(port);
   await mutateMeta((next) => {
     next.portUrls = {
@@ -203,7 +203,7 @@ export async function touchRunningSandbox(): Promise<SingleMeta> {
     return meta;
   }
 
-  const sandbox = await Sandbox.get({ sandboxId: meta.sandboxId });
+  const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
   try {
     await sandbox.extendTimeout(EXTEND_TIMEOUT_MS);
   } catch (error) {
@@ -243,7 +243,7 @@ const RESTART_OPENCLAW_GATEWAY_SCRIPT = [
   `bash ${OPENCLAW_STARTUP_SCRIPT_PATH}`,
 ].join("\n");
 
-async function refreshAiGatewayToken(sandbox: Sandbox, sandboxId: string): Promise<void> {
+async function refreshAiGatewayToken(sandbox: SandboxHandle, sandboxId: string): Promise<void> {
   const freshToken = await getAiGatewayBearerTokenOptional();
   if (!freshToken) {
     return;
@@ -278,14 +278,21 @@ async function refreshAiGatewayToken(sandbox: Sandbox, sandboxId: string): Promi
   logInfo("sandbox.token_refresh.complete", { sandboxId });
 }
 
-export async function probeGatewayReady(): Promise<boolean> {
+export type ProbeResult = {
+  ready: boolean;
+  statusCode?: number;
+  markerFound?: boolean;
+  error?: string;
+};
+
+export async function probeGatewayReady(): Promise<ProbeResult> {
   const meta = await getInitializedMeta();
   if (!meta.sandboxId || !["running", "setup", "booting"].includes(meta.status)) {
-    return false;
+    return { ready: false };
   }
 
   try {
-    const sandbox = await Sandbox.get({ sandboxId: meta.sandboxId });
+    const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
     const routeUrl = meta.portUrls?.[String(OPENCLAW_PORT)] ?? sandbox.domain(OPENCLAW_PORT);
     const response = await fetch(routeUrl, {
       method: "GET",
@@ -296,7 +303,8 @@ export async function probeGatewayReady(): Promise<boolean> {
       signal: AbortSignal.timeout(5_000),
     });
     const body = await response.text();
-    const ready = response.ok && body.includes("openclaw-app");
+    const markerFound = body.includes("openclaw-app");
+    const ready = response.ok && markerFound;
 
     if (ready && meta.status !== "running") {
       await mutateMeta((next) => {
@@ -305,12 +313,11 @@ export async function probeGatewayReady(): Promise<boolean> {
       });
     }
 
-    return ready;
+    return { ready, statusCode: response.status, markerFound };
   } catch (error) {
-    logWarn("sandbox.probe_failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return false;
+    const message = error instanceof Error ? error.message : String(error);
+    logWarn("sandbox.probe_failed", { error: message });
+    return { ready: false, error: message };
   }
 }
 
@@ -408,7 +415,7 @@ async function createAndBootstrapSandbox(origin: string): Promise<SingleMeta> {
       meta.snapshotId = null;
     });
 
-    const sandbox = await Sandbox.create({
+    const sandbox = await getSandboxController().create({
       ports: SANDBOX_PORTS,
       timeout: DEFAULT_TIMEOUT_MS,
       resources: { vcpus: 1 },
@@ -461,7 +468,7 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
       meta.lastError = null;
     });
 
-    const sandbox = await Sandbox.create({
+    const sandbox = await getSandboxController().create({
       ports: SANDBOX_PORTS,
       timeout: DEFAULT_TIMEOUT_MS,
       resources: { vcpus: 1 },
@@ -531,8 +538,8 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
     });
 
     await applyFirewallPolicyToSandbox(sandbox, next);
-    const ready = await probeGatewayReady();
-    if (!ready) {
+    const probe = await probeGatewayReady();
+    if (!probe.ready) {
       await mutateMeta((meta) => {
         meta.status = "booting";
       });
@@ -616,7 +623,7 @@ async function withAutoRenewedLock<T>(
   }
 }
 
-function resolvePortUrls(sandbox: Sandbox): Record<string, string> {
+function resolvePortUrls(sandbox: SandboxHandle): Record<string, string> {
   const urls: Record<string, string> = {};
   for (const port of SANDBOX_PORTS) {
     try {

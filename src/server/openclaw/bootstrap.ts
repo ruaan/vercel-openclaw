@@ -1,5 +1,3 @@
-import type { Sandbox } from "@vercel/sandbox";
-
 import { logInfo } from "@/server/log";
 import {
   buildForcePairScript,
@@ -20,8 +18,10 @@ import {
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
 
+import type { SandboxHandle } from "@/server/sandbox/controller";
+
 export async function setupOpenClaw(
-  sandbox: Sandbox,
+  sandbox: SandboxHandle,
   options: {
     gatewayToken: string;
     apiKey?: string;
@@ -101,9 +101,15 @@ export async function setupOpenClaw(
   return { startupScript };
 }
 
-export async function waitForGatewayReady(sandbox: Sandbox): Promise<void> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    await sleep(1000);
+export async function waitForGatewayReady(
+  sandbox: SandboxHandle,
+  options?: { maxAttempts?: number; delayMs?: number },
+): Promise<void> {
+  const maxAttempts = options?.maxAttempts ?? 60;
+  const delayMs = options?.delayMs ?? 1000;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    await sleep(delayMs);
     try {
       const result = await sandbox.runCommand("curl", [
         "-s",
@@ -121,7 +127,7 @@ export async function waitForGatewayReady(sandbox: Sandbox): Promise<void> {
     }
   }
 
-  throw new Error("Gateway never became ready within 60 seconds.");
+  throw new Error(`Gateway never became ready within ${maxAttempts} attempts.`);
 }
 
 async function sleep(ms: number): Promise<void> {

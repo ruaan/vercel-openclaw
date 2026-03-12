@@ -78,7 +78,17 @@ export function getCronSecret(): string | null {
   return secret || null;
 }
 
+let _aiGatewayTokenOverride: string | undefined | null = null;
+
+export function _setAiGatewayTokenOverrideForTesting(value: string | undefined | null): void {
+  _aiGatewayTokenOverride = value;
+}
+
 export async function getAiGatewayBearerTokenOptional(): Promise<string | undefined> {
+  if (_aiGatewayTokenOverride !== null) {
+    return _aiGatewayTokenOverride;
+  }
+
   const staticKey = process.env.AI_GATEWAY_API_KEY?.trim();
   if (staticKey) {
     return staticKey;
