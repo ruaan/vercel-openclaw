@@ -166,12 +166,12 @@ test("concurrency: concurrent stopSandbox produces exactly one snapshot", async 
       assert.equal(failure.status, "rejected");
     }
 
-    // Exactly one snapshot event
+    // Bootstrap auto-snapshot plus explicit stop snapshot
     const snapshotEvents = h.controller.eventsOfKind("snapshot");
     assert.equal(
       snapshotEvents.length,
-      1,
-      `Expected exactly 1 snapshot event, got ${snapshotEvents.length}`,
+      2,
+      `Expected exactly 2 snapshot events, got ${snapshotEvents.length}`,
     );
 
     // Meta should be stopped with a snapshotId
