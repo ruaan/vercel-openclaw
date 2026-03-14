@@ -528,6 +528,50 @@ export async function sshEcho(baseUrl: string, opts?: PhaseOptions): Promise<Pha
 }
 
 // ---------------------------------------------------------------------------
+// Test channel configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Configure test channels with generated credentials (bypasses platform API
+ * validation). Returns true if configuration succeeded.
+ */
+async function configureTestChannels(
+  baseUrl: string,
+  requestTimeoutMs: number,
+): Promise<boolean> {
+  try {
+    const hdrs = { ...authHeaders({ mutation: true }), "Content-Type": "application/json" };
+    const res = await fetchWithTimeout(
+      url(baseUrl, "/api/admin/channel-secrets"),
+      { method: "PUT", headers: hdrs },
+      requestTimeoutMs,
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove test channel configurations.
+ */
+async function removeTestChannels(
+  baseUrl: string,
+  requestTimeoutMs: number,
+): Promise<void> {
+  try {
+    const hdrs = { ...authHeaders({ mutation: true }), "Content-Type": "application/json" };
+    await fetchWithTimeout(
+      url(baseUrl, "/api/admin/channel-secrets"),
+      { method: "DELETE", headers: hdrs },
+      requestTimeoutMs,
+    );
+  } catch {
+    // Best-effort cleanup
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Server-side channel webhook signing
 // ---------------------------------------------------------------------------
 
@@ -590,13 +634,15 @@ export async function channelRoundTrip(baseUrl: string, opts?: PhaseOptions & { 
   const reqTimeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const pollTimeout = opts?.pollTimeoutMs ?? 120_000;
 
+  let configuredByUs = false;
+
   try {
-    // 1. Send smoke webhooks (signed + delivered server-side)
+    // 1. Try sending smoke webhooks (signed + delivered server-side)
     const slackPayload = buildSlackSmokePayload().body;
     const telegramPayload = buildTelegramSmokePayload();
 
-    const slackResult = await sendSmokeWebhook(baseUrl, "slack", slackPayload, reqTimeout);
-    const telegramResult = await sendSmokeWebhook(baseUrl, "telegram", telegramPayload, reqTimeout);
+    let slackResult = await sendSmokeWebhook(baseUrl, "slack", slackPayload, reqTimeout);
+    let telegramResult = await sendSmokeWebhook(baseUrl, "telegram", telegramPayload, reqTimeout);
 
     if (!slackResult && !telegramResult) {
       log(phase, "skipped", { reason: "smoke-webhook-endpoint-unavailable" });
@@ -606,27 +652,42 @@ export async function channelRoundTrip(baseUrl: string, opts?: PhaseOptions & { 
       };
     }
 
-    const hasSlack = slackResult?.configured === true && slackResult.sent === true;
-    const hasTelegram = telegramResult?.configured === true && telegramResult.sent === true;
+    let hasSlack = slackResult?.configured === true && slackResult.sent === true;
+    let hasTelegram = telegramResult?.configured === true && telegramResult.sent === true;
 
     if (!hasSlack && !hasTelegram) {
-      // Channels not configured — graceful skip
+      // Channels not configured — auto-configure test channels and retry
       const noneConfigured = (slackResult?.configured === false) && (telegramResult?.configured === false);
       if (noneConfigured) {
-        log(phase, "skipped", { reason: "no-channels-configured" });
+        log(phase, "auto-configuring", { reason: "no-channels-configured" });
+        const configured = await configureTestChannels(baseUrl, reqTimeout);
+        if (!configured) {
+          log(phase, "skipped", { reason: "auto-configure-failed" });
+          return {
+            phase, passed: true, durationMs: 0, endpoint,
+            detail: { skipped: true, reason: "No channels configured and auto-configure failed" },
+          };
+        }
+        configuredByUs = true;
+
+        // Retry with fresh payloads
+        const retrySlackPayload = buildSlackSmokePayload().body;
+        const retryTelegramPayload = buildTelegramSmokePayload();
+        slackResult = await sendSmokeWebhook(baseUrl, "slack", retrySlackPayload, reqTimeout);
+        telegramResult = await sendSmokeWebhook(baseUrl, "telegram", retryTelegramPayload, reqTimeout);
+        hasSlack = slackResult?.configured === true && slackResult.sent === true;
+        hasTelegram = telegramResult?.configured === true && telegramResult.sent === true;
+      }
+
+      if (!hasSlack && !hasTelegram) {
+        log(phase, "send-failed", { slack: slackResult, telegram: telegramResult });
         return {
-          phase, passed: true, durationMs: 0, endpoint,
-          detail: { skipped: true, reason: "No channels configured (Slack or Telegram)" },
+          phase, passed: false, durationMs: 0, endpoint,
+          error: "Failed to send smoke webhooks",
+          errorCode: "WEBHOOK_SEND_FAILED",
+          detail: { slack: slackResult, telegram: telegramResult },
         };
       }
-      // Configured but send failed
-      log(phase, "send-failed", { slack: slackResult, telegram: telegramResult });
-      return {
-        phase, passed: false, durationMs: 0, endpoint,
-        error: "Failed to send smoke webhooks",
-        errorCode: "WEBHOOK_SEND_FAILED",
-        detail: { slack: slackResult, telegram: telegramResult },
-      };
     }
 
     // 2. Read baseline queue state
@@ -695,10 +756,17 @@ export async function channelRoundTrip(baseUrl: string, opts?: PhaseOptions & { 
     const allDrained = channelResults.every((r) => r.drained);
     const passed = allSent && allDrained;
 
-    log(phase, passed ? "ok" : "failed", { channelResults });
+    log(phase, passed ? "ok" : "failed", { channelResults, configuredByUs });
+
+    // Clean up auto-configured test channels
+    if (configuredByUs) {
+      await removeTestChannels(baseUrl, reqTimeout);
+      log(phase, "test-channels-removed", {});
+    }
+
     return {
       phase, passed, durationMs: totalMs, endpoint: "/api/channels/*/webhook",
-      detail: { channels: channelResults },
+      detail: { channels: channelResults, autoConfigured: configuredByUs },
       ...(!passed ? {
         error: !allSent ? "Failed to send some webhooks" : "Queues did not drain within timeout",
         errorCode: !allSent ? "WEBHOOK_SEND_FAILED" : "QUEUE_DRAIN_TIMEOUT",
@@ -706,6 +774,10 @@ export async function channelRoundTrip(baseUrl: string, opts?: PhaseOptions & { 
       } : {}),
     };
   } catch (err) {
+    // Clean up on failure too
+    if (configuredByUs) {
+      await removeTestChannels(baseUrl, reqTimeout);
+    }
     return failFromError(phase, endpoint, err);
   }
 }
@@ -723,15 +795,31 @@ export async function channelWakeFromSleep(
   const endpoint = "/api/channels/slack/webhook";
   const reqTimeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
+  let configuredByUs = false;
+
   try {
-    // 1. Probe if Slack is configured (send a dummy probe — won't enqueue because {} is invalid)
-    const slackProbe = await sendSmokeWebhook(baseUrl, "slack", "{}", reqTimeout);
+    // 1. Probe if Slack is configured
+    let slackProbe = await sendSmokeWebhook(baseUrl, "slack", "{}", reqTimeout);
     if (!slackProbe?.configured) {
-      log(phase, "skipped", { reason: "no-slack-configured" });
-      return {
-        phase, passed: true, durationMs: 0, endpoint,
-        detail: { skipped: true, reason: "Slack not configured — cannot test wake-from-sleep" },
-      };
+      // Auto-configure test channels
+      log(phase, "auto-configuring", { reason: "no-slack-configured" });
+      const configured = await configureTestChannels(baseUrl, reqTimeout);
+      if (!configured) {
+        log(phase, "skipped", { reason: "auto-configure-failed" });
+        return {
+          phase, passed: true, durationMs: 0, endpoint,
+          detail: { skipped: true, reason: "Slack not configured and auto-configure failed" },
+        };
+      }
+      configuredByUs = true;
+      slackProbe = await sendSmokeWebhook(baseUrl, "slack", "{}", reqTimeout);
+      if (!slackProbe?.configured) {
+        log(phase, "skipped", { reason: "still-not-configured-after-auto" });
+        return {
+          phase, passed: true, durationMs: 0, endpoint,
+          detail: { skipped: true, reason: "Slack still not configured after auto-configure" },
+        };
+      }
     }
 
     const t0 = performance.now();
@@ -840,11 +928,20 @@ export async function channelWakeFromSleep(
       };
     }
 
+    // Clean up auto-configured test channels
+    if (configuredByUs) {
+      await removeTestChannels(baseUrl, reqTimeout);
+      log(phase, "test-channels-removed", {});
+    }
+
     return {
       phase, passed: true, durationMs: totalMs, endpoint,
-      detail: { sandboxWokeUp: true, queueDrained: true },
+      detail: { sandboxWokeUp: true, queueDrained: true, autoConfigured: configuredByUs },
     };
   } catch (err) {
+    if (configuredByUs) {
+      await removeTestChannels(baseUrl, reqTimeout);
+    }
     return failFromError(phase, endpoint, err);
   }
 }

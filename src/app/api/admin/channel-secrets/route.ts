@@ -1,21 +1,68 @@
+import { randomBytes } from "node:crypto";
+
 import { requireMutationAuth, authJsonOk } from "@/server/auth/route-auth";
 import { ApiError, jsonError } from "@/shared/http";
-import { getInitializedMeta } from "@/server/store/store";
+import { getInitializedMeta, mutateMeta } from "@/server/store/store";
 import { signSlackPayload } from "@/server/smoke/remote-crypto";
 import { logInfo, logWarn } from "@/server/log";
 
 /**
- * Server-side smoke webhook sender.
+ * Smoke testing endpoint for channel webhooks.
  *
- * Accepts a channel name and payload body, signs it using the stored
- * channel secrets, and POSTs the signed webhook directly to the local
- * webhook endpoint. Raw secrets never leave the server — they are used
- * server-side only for signing/header construction.
+ * PUT  — Configure test channels with generated credentials (bypasses
+ *        platform API validation). Sets up Slack and Telegram with
+ *        random signing secrets so smoke webhooks can be sent.
  *
- * POST /api/admin/channel-secrets
- * Body: { channel: "slack" | "telegram", body: string }
- * Returns: { sent: boolean, status?: number, channel: string }
+ * POST — Sign and send a webhook payload to the local webhook endpoint.
+ *        Raw secrets never leave the server.
+ *
+ * DELETE — Remove test channel configurations.
  */
+
+// ---- PUT: configure test channels ----------------------------------------
+
+export async function PUT(request: Request): Promise<Response> {
+  const auth = await requireMutationAuth(request);
+  if (auth instanceof Response) {
+    return auth;
+  }
+
+  try {
+    const now = Date.now();
+    const slackSigningSecret = randomBytes(32).toString("hex");
+    const telegramWebhookSecret = randomBytes(24).toString("base64url");
+    const origin = new URL(request.url).origin;
+
+    await mutateMeta((meta) => {
+      meta.channels.slack = {
+        signingSecret: slackSigningSecret,
+        botToken: "xoxb-smoke-test-token",
+        configuredAt: now,
+        team: "Smoke Test",
+        user: "smoke-bot",
+        botId: "B_SMOKE",
+      };
+      meta.channels.telegram = {
+        botToken: "000000000:smoke-test-bot-token",
+        webhookSecret: telegramWebhookSecret,
+        webhookUrl: `${origin}/api/channels/telegram/webhook`,
+        botUsername: "smoke_test_bot",
+        configuredAt: now,
+      };
+    });
+
+    logInfo("admin.smoke_channels_configured", { slack: true, telegram: true });
+    return authJsonOk({ configured: true, channels: ["slack", "telegram"] }, auth);
+  } catch (error) {
+    logWarn("admin.smoke_channels_configure_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return jsonError(new ApiError(503, "CONFIGURE_FAILED", "Failed to configure test channels."));
+  }
+}
+
+// ---- POST: sign and send webhook -----------------------------------------
+
 export async function POST(request: Request): Promise<Response> {
   const auth = await requireMutationAuth(request);
   if (auth instanceof Response) {
@@ -77,5 +124,28 @@ export async function POST(request: Request): Promise<Response> {
       error: error instanceof Error ? error.message : String(error),
     });
     return jsonError(new ApiError(503, "SEND_FAILED", "Failed to send smoke webhook."));
+  }
+}
+
+// ---- DELETE: remove test channels ----------------------------------------
+
+export async function DELETE(request: Request): Promise<Response> {
+  const auth = await requireMutationAuth(request);
+  if (auth instanceof Response) {
+    return auth;
+  }
+
+  try {
+    await mutateMeta((meta) => {
+      meta.channels.slack = null;
+      meta.channels.telegram = null;
+    });
+    logInfo("admin.smoke_channels_removed", {});
+    return authJsonOk({ removed: true }, auth);
+  } catch (error) {
+    logWarn("admin.smoke_channels_remove_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return jsonError(new ApiError(503, "REMOVE_FAILED", "Failed to remove test channels."));
   }
 }
