@@ -57,6 +57,16 @@ async function readAdminSession(
 }
 
 /**
+ * Check whether a request carries a valid admin session cookie.
+ * Does not check bearer tokens — intended for SSR page rendering
+ * where only cookies are available.
+ */
+export async function hasAdminSession(request: Request): Promise<boolean> {
+  const session = await readAdminSession(request);
+  return session !== null;
+}
+
+/**
  * Require admin authentication.
  *
  * Checks (in order):

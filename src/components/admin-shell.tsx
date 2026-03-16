@@ -19,7 +19,6 @@ import {
 } from "@/components/api-route-errors";
 import type {
   StatusPayload,
-  UnauthorizedPayload,
 } from "@/components/admin-types";
 import type { ChannelReadiness } from "@/shared/launch-verification";
 
@@ -38,11 +37,11 @@ export function AdminShell({
   initialStatus?: StatusPayload | null;
 }) {
   const [status, setStatus] = useState<StatusPayload | null>(initialStatus);
-  const [authorizeUrl, setAuthorizeUrl] = useState(
-    "/api/auth/authorize?next=/admin",
-  );
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [channelReadiness, setChannelReadiness] = useState<ChannelReadiness | null>(null);
+  const [loginSecret, setLoginSecret] = useState("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginBusy, setLoginBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -52,11 +51,7 @@ export function AdminShell({
       });
 
       if (response.status === 401) {
-        const payload = (await response.json()) as UnauthorizedPayload;
         setStatus(null);
-        setAuthorizeUrl(
-          payload.authorizeUrl ?? "/api/auth/authorize?next=/admin",
-        );
         return;
       }
 
@@ -87,11 +82,7 @@ export function AdminShell({
       });
 
       if (response.status === 401) {
-        const payload = (await response.json()) as UnauthorizedPayload;
         setStatus(null);
-        setAuthorizeUrl(
-          payload.authorizeUrl ?? "/api/auth/authorize?next=/admin",
-        );
       }
     } catch {
       // Best-effort background ingest; status refresh below handles visible errors.
@@ -138,9 +129,7 @@ export function AdminShell({
       });
 
       if (response.status === 401) {
-        const payload = (await response.json()) as UnauthorizedPayload;
         setStatus(null);
-        setAuthorizeUrl(payload.authorizeUrl ?? authorizeUrl);
         return null;
       }
 
@@ -179,6 +168,38 @@ export function AdminShell({
     await requestJson(action, input);
   }
 
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const secret = loginSecret.trim();
+    if (!secret) return;
+
+    setLoginBusy(true);
+    setLoginError(null);
+
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-requested-with": "XMLHttpRequest",
+        },
+        body: JSON.stringify({ secret }),
+      });
+
+      if (response.ok) {
+        setLoginSecret("");
+        await refresh();
+      } else {
+        const body = await response.json().catch(() => null) as { message?: string } | null;
+        setLoginError(body?.message ?? "Invalid admin secret.");
+      }
+    } catch {
+      setLoginError("Network error. Please try again.");
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
   if (!status) {
     return (
       <main className="shell">
@@ -189,16 +210,37 @@ export function AdminShell({
           </h1>
           <p className="lede">
             Manage one persistent VClaw sandbox with on-demand restore,
-            firewall controls, and channel entry points behind Vercel auth.
+            firewall controls, and channel entry points behind admin auth.
           </p>
-          <div className="hero-actions">
-            <a className="button primary" href={authorizeUrl}>
-              Sign in with Vercel
-            </a>
-            <Link className="button ghost" href="/api/health">
-              Health check
-            </Link>
-          </div>
+          <form onSubmit={handleLogin} className="login-form" autoComplete="off">
+            <div className="login-field">
+              <label className="field-label" htmlFor="admin-secret">
+                Admin secret
+              </label>
+              <input
+                id="admin-secret"
+                className="text-input"
+                type="password"
+                placeholder="Paste admin secret"
+                value={loginSecret}
+                onChange={(e) => { setLoginSecret(e.target.value); setLoginError(null); }}
+                disabled={loginBusy}
+                autoFocus
+              />
+            </div>
+            {loginError && <p className="login-error">{loginError}</p>}
+            <div className="hero-actions">
+              <button className="button primary" type="submit" disabled={loginBusy || !loginSecret.trim()}>
+                {loginBusy ? "Signing in\u2026" : "Sign in"}
+              </button>
+              <Link className="button ghost" href="/api/health">
+                Health check
+              </Link>
+            </div>
+            <p className="muted-copy">
+              Enter the admin secret configured for this deployment.
+            </p>
+          </form>
         </section>
       </main>
     );
