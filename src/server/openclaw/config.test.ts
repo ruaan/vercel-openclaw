@@ -30,11 +30,10 @@ function withEnv<T>(
   }
 }
 
-test("buildGatewayConfig disables insecure auth toggles by default", () => {
+test("buildGatewayConfig disables insecure auth by default but always disables device auth", () => {
   withEnv(
     {
       OPENCLAW_ALLOW_INSECURE_AUTH: undefined,
-      OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH: undefined,
     },
     () => {
       const config = JSON.parse(buildGatewayConfig()) as {
@@ -47,16 +46,15 @@ test("buildGatewayConfig disables insecure auth toggles by default", () => {
       };
 
       assert.equal(config.gateway.controlUi.allowInsecureAuth, false);
-      assert.equal(config.gateway.controlUi.dangerouslyDisableDeviceAuth, false);
+      assert.equal(config.gateway.controlUi.dangerouslyDisableDeviceAuth, true);
     },
   );
 });
 
-test("buildGatewayConfig reads insecure auth toggles from env", () => {
+test("buildGatewayConfig reads insecure auth toggle from env", () => {
   withEnv(
     {
       OPENCLAW_ALLOW_INSECURE_AUTH: "yes",
-      OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH: "on",
     },
     () => {
       const config = JSON.parse(buildGatewayConfig()) as {

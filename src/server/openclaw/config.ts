@@ -41,10 +41,11 @@ export function buildGatewayConfig(
 ): string {
   const controlUi: Record<string, unknown> = {
     allowInsecureAuth: readBooleanEnv("OPENCLAW_ALLOW_INSECURE_AUTH", false),
-    dangerouslyDisableDeviceAuth: readBooleanEnv(
-      "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH",
-      false,
-    ),
+    // Device auth is always disabled in the proxied setup because the
+    // server-side force-pair identity can never match the browser's
+    // client-generated identity.  The proxy enforces auth before any
+    // gateway traffic reaches the sandbox.
+    dangerouslyDisableDeviceAuth: true,
   };
   if (proxyOrigin) {
     controlUi.allowedOrigins = [proxyOrigin];
