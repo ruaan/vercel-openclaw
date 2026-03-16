@@ -1018,7 +1018,7 @@ test("route-smoke: gateway returns waiting page when sandbox not running", async
   const origFetch = globalThis.fetch;
   globalThis.fetch = h.fakeFetch.fetch;
   try {
-    const result = await callGatewayGet("/");
+    const result = await callGatewayGet("/", { accept: "text/html" });
     assert.equal(result.status, 202);
     assert.ok(result.text.includes("<!DOCTYPE html") || result.text.includes("<html"), "Should return HTML waiting page");
   } catch (err) {

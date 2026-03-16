@@ -110,7 +110,7 @@ test("Auth gate: deployment-protection mode passes auth transparently", async ()
   try {
     // deployment-protection is the default — auth always succeeds.
     // Sandbox is uninitialized so we expect a waiting page, not an auth error.
-    const result = await callGatewayGet("/");
+    const result = await callGatewayGet("/", { accept: "text/html" });
 
     // Should NOT be 401 or 302-to-authorize — should be 202 waiting page
     assert.equal(result.status, 202);
@@ -136,7 +136,7 @@ test("Waiting page: GET /gateway when sandbox is stopped returns 202 with waitin
       meta.snapshotId = "snap-test-waiting";
     });
 
-    const result = await callGatewayGet("/");
+    const result = await callGatewayGet("/", { accept: "text/html" });
 
     assert.equal(result.status, 202);
     assert.ok(result.text.includes("<!DOCTYPE html>") || result.text.includes("<html"), "Should be HTML");
@@ -160,7 +160,7 @@ test("Waiting page: GET /gateway when sandbox is creating returns 202", async ()
       meta.status = "creating";
     });
 
-    const result = await callGatewayGet("/");
+    const result = await callGatewayGet("/", { accept: "text/html" });
 
     assert.equal(result.status, 202);
     assert.ok(result.text.includes("Creating"), "Expected 'Creating' status label");

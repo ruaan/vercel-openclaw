@@ -4,17 +4,16 @@ import { requireAdminAuth } from "@/server/auth/admin-auth";
 import { getPublicOrigin } from "@/server/public-url";
 import { extractRequestId, logError, logInfo, logWarn } from "@/server/log";
 import { injectWrapperScript } from "@/server/proxy/htmlInjection";
+import { buildGatewayPendingResponse } from "@/server/proxy/pending-response";
 import {
   buildSafeProxyHeaders,
   buildSandboxTargetUrl,
   buildTokenHtmlHeaders,
-  buildWaitingPageCsp,
   isInvalidProxyTargetPath,
   normalizeProxyTargetPath,
   sanitizeProxyQueryParams,
   stripProxyResponseHeaders,
 } from "@/server/proxy/proxy-route-utils";
-import { getWaitingPageHtml } from "@/server/proxy/waitingPage";
 import {
   ensureSandboxRunning,
   getSandboxDomain,
@@ -39,24 +38,6 @@ function withSetCookie(response: Response, setCookieHeader: string | null): Resp
   return response;
 }
 
-function buildWaitingResponse(
-  returnPath: string,
-  status: string,
-  setCookieHeader: string | null,
-): Response {
-  return withSetCookie(
-    new Response(getWaitingPageHtml(returnPath, status), {
-      status: 202,
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Content-Security-Policy": buildWaitingPageCsp(),
-        "Cache-Control": "no-store, private",
-      },
-    }),
-    setCookieHeader,
-  );
-}
-
 async function handleProxy(request: Request, path: string): Promise<Response> {
   const requestId = extractRequestId(request);
   const reqCtx: Record<string, unknown> = { path, method: request.method };
@@ -78,15 +59,26 @@ async function handleProxy(request: Request, path: string): Promise<Response> {
     reason: "gateway.request",
     schedule: after,
   });
+  const returnPath = `/gateway${path === "/" ? "" : path}`;
+
   if (ensure.state !== "running") {
-    logInfo("gateway.waiting_page", { ...reqCtx, sandboxStatus: ensure.meta.status });
-    const returnPath = `/gateway${path === "/" ? "" : path}`;
-    return buildWaitingResponse(returnPath, ensure.meta.status, auth.setCookieHeader);
+    logInfo("gateway.pending", { ...reqCtx, sandboxStatus: ensure.meta.status });
+    return buildGatewayPendingResponse({
+      request,
+      returnPath,
+      status: ensure.meta.status,
+      setCookieHeader: auth.setCookieHeader,
+    });
   }
 
   const meta = await touchRunningSandbox();
   if (!meta.sandboxId || !meta.gatewayToken) {
-    return buildWaitingResponse(`/gateway${path === "/" ? "" : path}`, meta.status, auth.setCookieHeader);
+    return buildGatewayPendingResponse({
+      request,
+      returnPath,
+      status: meta.status,
+      setCookieHeader: auth.setCookieHeader,
+    });
   }
 
   const routeUrl = await getSandboxDomain();
@@ -127,7 +119,12 @@ async function handleProxy(request: Request, path: string): Promise<Response> {
       reason: "gateway.410",
       schedule: after,
     });
-    return buildWaitingResponse(`/gateway${path === "/" ? "" : path}`, "restoring", auth.setCookieHeader);
+    return buildGatewayPendingResponse({
+      request,
+      returnPath,
+      status: "restoring",
+      setCookieHeader: auth.setCookieHeader,
+    });
   }
 
   const responseHeaders = stripProxyResponseHeaders(upstream.headers, [meta.gatewayToken]);

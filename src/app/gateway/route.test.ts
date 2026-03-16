@@ -129,7 +129,7 @@ test("Gateway: GET when sandbox is stopped returns 202 waiting page", async () =
       meta.status = "stopped";
       meta.snapshotId = "snap-test-waiting";
     });
-    const result = await callGatewayGet("/");
+    const result = await callGatewayGet("/", { accept: "text/html" });
     assert.equal(result.status, 202);
     const ct = result.response.headers.get("content-type");
     assert.ok(ct?.includes("text/html"), `Expected text/html, got: ${ct}`);
@@ -574,7 +574,7 @@ test("Gateway: upstream 410 marks sandbox unavailable and returns waiting page",
     const originalFetch = globalThis.fetch;
     globalThis.fetch = h.fakeFetch.fetch;
     try {
-      const result = await callGatewayGet("/");
+      const result = await callGatewayGet("/", { accept: "text/html" });
       assert.equal(result.status, 202);
       assert.ok(
         result.text.includes("<!DOCTYPE html>") || result.text.includes("<html"),
