@@ -1346,11 +1346,11 @@ a[href]:focus-visible {
 
 .channel-card .inline-actions {
   margin-top: 12px;
+  gap: 8px;
 }
 
 .channel-card .inline-actions .button {
-  flex: 1 1 0;
-  min-width: 0;
+  white-space: nowrap;
 }
 
 .channel-validation-error {
