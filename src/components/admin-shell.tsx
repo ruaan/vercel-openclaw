@@ -226,6 +226,10 @@ export function AdminShell({
                 onChange={(e) => { setLoginSecret(e.target.value); setLoginError(null); }}
                 disabled={loginBusy}
                 autoFocus
+                autoComplete="off"
+                data-1p-ignore
+                data-lpignore="true"
+                data-form-type="other"
               />
             </div>
             {loginError && <p className="login-error">{loginError}</p>}

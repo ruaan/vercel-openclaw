@@ -1,7 +1,11 @@
 /**
  * Smoke tests for POST /api/admin/ssh.
  *
- * Covers CSRF rejection, missing command validation, and sandbox-not-running.
+ * Covers CSRF rejection, missing command validation, sandbox-not-running,
+ * and happy-path execution for every suggested one-click command.
+ *
+ * The route runs all commands via `sh -c <command>` so that shell features
+ * like glob expansion and pipes work correctly.
  *
  * Run: npm test src/app/api/admin/ssh/route.test.ts
  */
@@ -22,9 +26,27 @@ import {
   patchNextServerAfter,
   resetAfterCallbacks,
 } from "@/test-utils/route-caller";
-import { FakeSandboxController } from "@/test-utils/harness";
+import {
+  FakeSandboxController,
+  type CommandResponder,
+} from "@/test-utils/harness";
 
 patchNextServerAfter();
+
+// ---------------------------------------------------------------------------
+// Suggested commands — mirrors SUGGESTED_COMMANDS in ssh-panel.tsx
+// ---------------------------------------------------------------------------
+
+const SUGGESTED_COMMANDS = [
+  { label: "Tail OpenClaw log", value: "tail -f /tmp/openclaw/openclaw-*.log" },
+  { label: "List OpenClaw logs", value: "ls -la /tmp/openclaw/" },
+  { label: "Tail sandbox logs", value: "tail -f /vercel/sandbox/.logs" },
+  { label: "View config", value: "cat /etc/openclaw/openclaw.json" },
+  { label: "Running processes", value: "ps aux" },
+  { label: "Disk usage", value: "df -h" },
+  { label: "Memory info", value: "free -h" },
+  { label: "Network listeners", value: "ss -tlnp" },
+] as const;
 
 // ---------------------------------------------------------------------------
 // Environment isolation
@@ -77,7 +99,7 @@ async function withTestEnv(fn: () => Promise<void>): Promise<void> {
 }
 
 // ===========================================================================
-// POST /api/admin/ssh
+// POST /api/admin/ssh — validation
 // ===========================================================================
 
 test("POST /api/admin/ssh: without CSRF headers returns 403", async () => {
@@ -170,23 +192,87 @@ test("POST /api/admin/ssh: returns 400 for command exceeding max length", async 
   });
 });
 
-test("POST /api/admin/ssh: returns 400 for too many args", async () => {
+// ===========================================================================
+// Suggested one-click commands — happy path
+//
+// The route runs `sh -c <command>`, so the responder matches on `sh` and
+// verifies the `-c` arg carries the full raw command string.
+// ===========================================================================
+
+for (const cmd of SUGGESTED_COMMANDS) {
+  test(`POST /api/admin/ssh: suggested "${cmd.label}" succeeds`, async () => {
+    await withTestEnv(async () => {
+      const controller = new FakeSandboxController();
+      _setSandboxControllerForTesting(controller);
+
+      await mutateMeta((meta) => {
+        meta.status = "running";
+        meta.sandboxId = "sbx-suggested";
+      });
+
+      const responder: CommandResponder = (c, a) => {
+        if (c === "sh" && a?.[0] === "-c" && a[1] === cmd.value) {
+          return {
+            exitCode: 0,
+            output: async (stream?: string) =>
+              stream === "stderr" ? "" : `fake output for ${cmd.value}`,
+          };
+        }
+        return undefined;
+      };
+
+      const handle = await controller.get({ sandboxId: "sbx-suggested" });
+      (handle as import("@/test-utils/fake-sandbox-controller").FakeSandboxHandle)
+        .responders.push(responder);
+
+      const route = getAdminSshRoute();
+      const request = buildAuthPostRequest(
+        "/api/admin/ssh",
+        JSON.stringify({ command: cmd.value }),
+      );
+      const result = await callRoute(route.POST!, request);
+
+      assert.equal(result.status, 200, `${cmd.label} should return 200`);
+      const body = result.json as {
+        stdout: string;
+        stderr: string;
+        exitCode: number;
+      };
+      assert.equal(body.exitCode, 0, `${cmd.label} should exit 0`);
+      assert.equal(body.stdout, `fake output for ${cmd.value}`);
+      assert.equal(body.stderr, "");
+    });
+  });
+}
+
+// ===========================================================================
+// Shell execution verification
+// ===========================================================================
+
+test("POST /api/admin/ssh: commands are executed via sh -c", async () => {
   await withTestEnv(async () => {
+    const controller = new FakeSandboxController();
+    _setSandboxControllerForTesting(controller);
+
     await mutateMeta((meta) => {
       meta.status = "running";
-      meta.sandboxId = "sbx-ssh-4";
+      meta.sandboxId = "sbx-shell";
     });
 
+    const handle = await controller.get({ sandboxId: "sbx-shell" });
+    const fakeHandle =
+      handle as import("@/test-utils/fake-sandbox-controller").FakeSandboxHandle;
+
     const route = getAdminSshRoute();
-    const args = Array.from({ length: 21 }, (_, i) => `arg${i}`);
     const request = buildAuthPostRequest(
       "/api/admin/ssh",
-      JSON.stringify({ command: "echo", args }),
+      JSON.stringify({ command: "echo hello && echo world" }),
     );
     const result = await callRoute(route.POST!, request);
+    assert.equal(result.status, 200);
 
-    assert.equal(result.status, 400);
-    const body = result.json as { error: string };
-    assert.equal(body.error, "TOO_MANY_ARGS");
+    const lastCmd = fakeHandle.commands[fakeHandle.commands.length - 1];
+    assert.equal(lastCmd.cmd, "sh", "Should invoke sh");
+    assert.deepEqual(lastCmd.args, ["-c", "echo hello && echo world"]);
   });
 });

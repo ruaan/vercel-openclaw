@@ -261,6 +261,9 @@ export function SlackPanel({
                 value={signingSecret}
                 onChange={(event) => setSigningSecret(event.target.value)}
                 placeholder="Signing Secret"
+                data-1p-ignore
+                data-lpignore="true"
+                data-form-type="other"
               />
               <button
                 className="button ghost channel-toggle-btn"
@@ -288,6 +291,9 @@ export function SlackPanel({
                   setTestResult(null);
                 }}
                 placeholder="xoxb-..."
+                data-1p-ignore
+                data-lpignore="true"
+                data-form-type="other"
               />
               <button
                 className="button ghost channel-toggle-btn"

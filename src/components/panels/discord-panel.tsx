@@ -344,6 +344,9 @@ export function DiscordPanel({
                 value={botToken}
                 onChange={(event) => setBotToken(event.target.value)}
                 placeholder="Paste bot token"
+                data-1p-ignore
+                data-lpignore="true"
+                data-form-type="other"
               />
               <button
                 className="button ghost channel-toggle-btn"

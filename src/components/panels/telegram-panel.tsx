@@ -226,6 +226,9 @@ export function TelegramPanel({
                 }}
                 placeholder="123456:ABC-DEF1234..."
                 autoComplete="off"
+                data-1p-ignore
+                data-lpignore="true"
+                data-form-type="other"
               />
               <button
                 type="button"

@@ -5,7 +5,6 @@ import { requireMutationAuth, authJsonOk } from "@/server/auth/route-auth";
 import { getInitializedMeta } from "@/server/store/store";
 
 const MAX_COMMAND_LENGTH = 2000;
-const MAX_ARGS = 20;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
 export async function POST(request: Request): Promise<Response> {
@@ -22,7 +21,7 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  let body: { command?: string; args?: string[] };
+  let body: { command?: string };
   try {
     body = await request.json();
   } catch {
@@ -31,7 +30,7 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  const { command, args } = body;
+  const { command } = body;
 
   if (typeof command !== "string" || command.trim().length === 0) {
     return jsonError(
@@ -49,26 +48,9 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  if (args !== undefined) {
-    if (!Array.isArray(args) || args.some((a) => typeof a !== "string")) {
-      return jsonError(
-        new ApiError(400, "INVALID_ARGS", "args must be an array of strings."),
-      );
-    }
-    if (args.length > MAX_ARGS) {
-      return jsonError(
-        new ApiError(
-          400,
-          "TOO_MANY_ARGS",
-          `At most ${MAX_ARGS} arguments are allowed.`,
-        ),
-      );
-    }
-  }
-
   try {
     const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
-    const result = await sandbox.runCommand(command, args ?? []);
+    const result = await sandbox.runCommand("sh", ["-c", command]);
 
     const stdout = (await result.output("stdout")).slice(0, MAX_OUTPUT_BYTES);
     const stderr = (await result.output("stderr")).slice(0, MAX_OUTPUT_BYTES);

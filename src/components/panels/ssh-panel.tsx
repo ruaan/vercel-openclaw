@@ -89,13 +89,6 @@ export function SshPanel({ status, busy, requestJson }: SshPanelProps) {
         return next.slice(0, MAX_HISTORY);
       });
 
-      // Parse command: first token is the command, rest are args
-      const parts = trimmed.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [
-        trimmed,
-      ];
-      const baseCmd = parts[0];
-      const args = parts.slice(1).map((a) => a.replace(/^["']|["']$/g, ""));
-
       const result = await requestJson<{
         stdout: string;
         stderr: string;
@@ -103,7 +96,7 @@ export function SshPanel({ status, busy, requestJson }: SshPanelProps) {
       }>("/api/admin/ssh", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ command: baseCmd, args }),
+        body: JSON.stringify({ command: trimmed }),
         label: `Run: ${trimmed.slice(0, 40)}`,
         refreshAfter: false,
       });
@@ -171,6 +164,9 @@ export function SshPanel({ status, busy, requestJson }: SshPanelProps) {
           disabled={!isRunning || busy || running}
           autoComplete="off"
           spellCheck={false}
+          data-1p-ignore
+          data-lpignore="true"
+          data-form-type="other"
         />
         <button
           type="submit"
