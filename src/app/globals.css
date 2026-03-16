@@ -308,6 +308,17 @@ a[href]:focus-visible {
   border-color: #0d9950;
 }
 
+.button.danger {
+  background: transparent;
+  border-color: #7f1d1d;
+  color: #ef4444;
+}
+
+.button.danger:hover:not(:disabled) {
+  background: #7f1d1d;
+  color: #fca5a5;
+}
+
 .button.secondary:hover:not(:disabled),
 .button.accent:hover:not(:disabled),
 .button.ghost:hover:not(:disabled) {

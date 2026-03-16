@@ -84,17 +84,9 @@ export function StatusPanel({ status, busy, runAction }: StatusPanelProps) {
         </div>
       </dl>
 
-      <div className="hero-actions">
-        <a
-          className="button success"
-          href={status.gatewayUrl}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Open VClaw
-        </a>
+      <div className="hero-actions" style={{ justifyContent: "flex-end" }}>
         <button
-          className="button ghost"
+          className="button danger"
           disabled={busy}
           onClick={() => void handleStop()}
         >
@@ -107,6 +99,14 @@ export function StatusPanel({ status, busy, runAction }: StatusPanelProps) {
         >
           Save snapshot
         </button>
+        <a
+          className="button success"
+          href={status.gatewayUrl}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open VClaw
+        </a>
       </div>
 
       {status.lastError ? (
