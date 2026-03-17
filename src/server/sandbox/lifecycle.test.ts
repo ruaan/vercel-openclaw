@@ -846,7 +846,7 @@ test("restoreSandboxFromSnapshot runs sh -c to write AI gateway key when token a
   });
 });
 
-test("restoreSandboxFromSnapshot skips AI gateway key write when no token available", async () => {
+test("restoreSandboxFromSnapshot always writes credential files, truncating API key when unavailable", async () => {
   const fake = new FakeSandboxController();
   const originalFetch = globalThis.fetch;
 
@@ -863,11 +863,17 @@ test("restoreSandboxFromSnapshot skips AI gateway key write when no token availa
     try {
       const { handle } = await triggerRestore(fake);
 
-      // Should NOT have an "sh" command for writing the AI gateway token
+      // Should still run sh -c to write both credential files
       const shCmd = handle.commands.find(
         (c) => c.cmd === "sh" && c.args?.[0] === "-c",
       );
-      assert.equal(shCmd, undefined, "Should not run sh -c when no token available");
+      assert.ok(shCmd, "Should run sh -c to write credential files even without API key");
+      // The gateway token should be passed as the first positional arg
+      assert.ok(shCmd.args?.includes("test-gw-token"), "Should pass the gateway token");
+      // The API key should be an empty string (truncate) since no fresh key is available
+      const dashDashIdx = shCmd.args?.indexOf("--");
+      assert.ok(dashDashIdx !== undefined && dashDashIdx >= 0, "Should have -- separator");
+      assert.equal(shCmd.args?.[dashDashIdx! + 2], "", "Should pass empty string for API key when unavailable");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1950,7 +1956,7 @@ test("[failure] restore failure when token write command fails", async () => {
 
       const meta = await getInitializedMeta();
       assert.equal(meta.status, "error", "Status should be error after token write failure");
-      assert.ok(meta.lastError?.includes("write-ai-gateway-token"), "lastError should mention token write failure");
+      assert.ok(meta.lastError?.includes("write-restore-credential-files"), "lastError should mention credential write failure");
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);
       globalThis.fetch = originalFetch;

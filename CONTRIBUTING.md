@@ -57,6 +57,10 @@ The app has two planes:
 
 Also: `restoring`, `error`
 
+### Restore fast path
+
+`src/server/openclaw/restore-assets.ts` splits restore files into static (scripts, skills) and dynamic (`openclaw.json`). Static files use a manifest-based hash (`RestorePhaseMetrics.assetSha256`) to skip redundant uploads. Readiness is probed locally first, then publicly. Per-phase timings are recorded as `RestorePhaseMetrics` on metadata.
+
 ### Firewall modes
 
 | Mode | Network policy |
@@ -107,7 +111,8 @@ Full reference:
 | `NEXT_PUBLIC_VERCEL_APP_CLIENT_ID` | Sign-in mode | OAuth client ID |
 | `VERCEL_APP_CLIENT_SECRET` | Sign-in mode | OAuth client secret |
 | `SESSION_SECRET` | Sign-in mode | Cookie encryption secret |
-| `OPENCLAW_PACKAGE_SPEC` | No | OpenClaw version to install (defaults to `openclaw@latest`) |
+| `OPENCLAW_PACKAGE_SPEC` | No | OpenClaw version to install (defaults to `openclaw@latest`). Pin it for repeatable benchmark baselines. |
+| `OPENCLAW_SANDBOX_VCPUS` | No | vCPU count for sandbox create and snapshot restore (valid: 1, 2, 4, 8; default: 1). Keep fixed during benchmarks. |
 | `VERCEL_AUTOMATION_BYPASS_SECRET` | No | Appended to webhook URLs to pass Deployment Protection |
 | `CRON_SECRET` | No | Enables `/api/cron/drain-channels` diagnostic backstop |
 | `NEXT_PUBLIC_APP_URL` | No | Base origin override |

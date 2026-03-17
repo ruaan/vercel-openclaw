@@ -4,6 +4,7 @@ import { afterEach, test } from "node:test";
 import {
   _setAiGatewayTokenOverrideForTesting,
   getAiGatewayAuthMode,
+  getOpenclawPackageSpec,
   getSessionSecret,
   isVercelDeployment,
   requiresDurableStore,
@@ -220,4 +221,18 @@ test("local dev returns placeholder session secret", () => {
       assert.ok(secret.includes("change-me"));
     },
   );
+});
+
+// --- getOpenclawPackageSpec ---
+
+test("getOpenclawPackageSpec defaults to openclaw@latest when env var is unset", () => {
+  withEnv({ OPENCLAW_PACKAGE_SPEC: undefined }, () => {
+    assert.equal(getOpenclawPackageSpec(), "openclaw@latest");
+  });
+});
+
+test("getOpenclawPackageSpec returns explicit value when set", () => {
+  withEnv({ OPENCLAW_PACKAGE_SPEC: "openclaw@1.2.3" }, () => {
+    assert.equal(getOpenclawPackageSpec(), "openclaw@1.2.3");
+  });
 });

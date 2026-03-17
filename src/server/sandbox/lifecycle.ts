@@ -11,6 +11,7 @@ import { setupOpenClaw, CommandFailedError, waitForGatewayReady } from "@/server
 import {
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
+  OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
@@ -314,6 +315,41 @@ const WRITE_AI_GATEWAY_TOKEN_SCRIPT = [
   `chmod 600 ${OPENCLAW_AI_GATEWAY_API_KEY_PATH}`,
 ].join("\n");
 
+const WRITE_RESTORE_CREDENTIAL_FILES_SCRIPT = [
+  `install -d -m 700 ${OPENCLAW_STATE_DIR}`,
+  `printf '%s' "$1" > ${OPENCLAW_GATEWAY_TOKEN_PATH}`,
+  `chmod 600 ${OPENCLAW_GATEWAY_TOKEN_PATH}`,
+  `printf '%s' "$2" > ${OPENCLAW_AI_GATEWAY_API_KEY_PATH}`,
+  `chmod 600 ${OPENCLAW_AI_GATEWAY_API_KEY_PATH}`,
+].join("\n");
+
+export async function writeRestoreCredentialFiles(
+  sandbox: SandboxHandle,
+  options: { gatewayToken: string; apiKey?: string },
+): Promise<void> {
+  logInfo("sandbox.restore.write_credentials", {
+    sandboxId: sandbox.sandboxId,
+    hasApiKey: options.apiKey != null && options.apiKey.length > 0,
+  });
+
+  const result = await sandbox.runCommand("sh", [
+    "-c",
+    WRITE_RESTORE_CREDENTIAL_FILES_SCRIPT,
+    "--",
+    options.gatewayToken,
+    options.apiKey ?? "",
+  ]);
+
+  if (result.exitCode !== 0) {
+    const output = await result.output("both");
+    throw new CommandFailedError({
+      command: "write-restore-credential-files",
+      exitCode: result.exitCode,
+      output,
+    });
+  }
+}
+
 const RESTART_OPENCLAW_GATEWAY_SCRIPT = [
   `pkill -f 'openclaw gateway' || true`,
   `bash ${OPENCLAW_STARTUP_SCRIPT_PATH}`,
@@ -380,7 +416,9 @@ export type ProbeResult = {
   error?: string;
 };
 
-export async function probeGatewayReady(): Promise<ProbeResult> {
+export async function probeGatewayReady(
+  options?: { timeoutMs?: number },
+): Promise<ProbeResult> {
   const meta = await getInitializedMeta();
   if (!meta.sandboxId || !["running", "setup", "booting"].includes(meta.status)) {
     return { ready: false };
@@ -395,7 +433,7 @@ export async function probeGatewayReady(): Promise<ProbeResult> {
         Accept: "text/html",
         Authorization: `Bearer ${meta.gatewayToken}`,
       },
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(options?.timeoutMs ?? 5_000),
     });
     const body = await response.text();
     const markerFound = body.includes("openclaw-app");
@@ -414,6 +452,35 @@ export async function probeGatewayReady(): Promise<ProbeResult> {
     logWarn("sandbox.probe_failed", { error: message });
     return { ready: false, error: message };
   }
+}
+
+export async function waitForPublicGatewayReady(options?: {
+  maxAttempts?: number;
+  delayMs?: number;
+  timeoutMs?: number;
+  probe?: (timeoutMs: number) => Promise<ProbeResult>;
+}): Promise<void> {
+  const maxAttempts = options?.maxAttempts ?? 20;
+  const delayMs = options?.delayMs ?? 250;
+  const timeoutMs = options?.timeoutMs ?? 1_000;
+  const probe =
+    options?.probe ??
+    ((budgetMs: number) => probeGatewayReady({ timeoutMs: budgetMs }));
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const result = await probe(timeoutMs);
+    if (result.ready) {
+      logInfo("sandbox.public_gateway_ready", { attempt, timeoutMs });
+      return;
+    }
+    if (attempt < maxAttempts - 1) {
+      await wait(delayMs);
+    }
+  }
+
+  throw new Error(
+    `Gateway became locally ready but never became publicly reachable within ${maxAttempts} attempts.`,
+  );
 }
 
 export type SandboxHealthStatus = "ready" | "recovering" | "unreachable";
@@ -654,26 +721,18 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
       meta.portUrls = resolvePortUrls(sandbox);
     });
 
-    // Write a fresh AI Gateway token before starting — the snapshot's
-    // baked-in key file contains a stale OIDC token.
+    // Write both credential files atomically — the snapshot's baked-in
+    // copies contain stale tokens.  When no fresh OIDC token is available
+    // the AI key file is truncated to empty so the startup script does not
+    // silently reuse a stale credential.
     const tokenWriteStart = Date.now();
     const freshApiKey = await getAiGatewayBearerTokenOptional();
-    if (freshApiKey) {
-      const writeTokenResult = await sandbox.runCommand("sh", [
-        "-c",
-        WRITE_AI_GATEWAY_TOKEN_SCRIPT,
-        "--",
-        freshApiKey,
-      ]);
-      if (writeTokenResult.exitCode !== 0) {
-        const output = await writeTokenResult.output("both");
-        throw new CommandFailedError({
-          command: "write-ai-gateway-token",
-          exitCode: writeTokenResult.exitCode,
-          output,
-        });
-      }
-    }
+    const latest = await getInitializedMeta();
+
+    await writeRestoreCredentialFiles(sandbox, {
+      gatewayToken: latest.gatewayToken,
+      apiKey: freshApiKey ?? undefined,
+    });
     const tokenWriteMs = Date.now() - tokenWriteStart;
 
     // Sync restore assets — skip static files when the manifest hash matches.
@@ -735,30 +794,15 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
     logInfo("sandbox.restore.local_ready", { localReadyMs, sandboxId: sandbox.sandboxId });
 
     // Short public probe — once the gateway is locally healthy the public
-    // route should come up quickly.  If it never does, something is wrong
-    // with the proxy/DNS layer, not the sandbox itself.
+    // route should come up quickly.  Uses a tight 1s per-probe timeout
+    // instead of the default 5s to avoid accumulating tail latency.
     const publicReadyStart = Date.now();
-    let publicReady = false;
-    for (let i = 0; i < 20; i++) {
-      const probe = await probeGatewayReady();
-      if (probe.ready) {
-        publicReady = true;
-        break;
-      }
-      await wait(250);
-    }
+    await waitForPublicGatewayReady({
+      maxAttempts: 20,
+      delayMs: 250,
+      timeoutMs: 1_000,
+    });
     const publicReadyMs = Date.now() - publicReadyStart;
-
-    if (!publicReady) {
-      logError("sandbox.restore_public_gateway_timeout", {
-        sandboxId: sandbox.sandboxId,
-        localReadyMs,
-        publicReadyMs,
-      });
-      throw new Error(
-        "Gateway became locally ready but never became publicly reachable after restore.",
-      );
-    }
 
     const totalMs = Date.now() - restoreStartedAt;
 
