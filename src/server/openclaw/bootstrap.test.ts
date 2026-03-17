@@ -658,6 +658,41 @@ test("waitForGatewayReady issues exactly maxAttempts curl commands on connection
   }
 });
 
+test("waitForGatewayReady logs openclaw.gateway_wait_exhausted with diagnostic fields", async () => {
+  const { _resetLogBuffer, getServerLogs } = await import("@/server/log");
+  const h = createScenarioHarness();
+  try {
+    _resetLogBuffer();
+    const handle = await createHandle(h);
+
+    handle.responders.push((cmd, args) => {
+      if (cmd === "curl" && args?.some((a) => a.includes("localhost:3000"))) {
+        return { exitCode: 7, output: async () => "" };
+      }
+      return undefined;
+    });
+
+    await assert.rejects(
+      () => waitForGatewayReady(handle, { maxAttempts: 2, delayMs: 0 }),
+      /Gateway never became ready/,
+    );
+
+    const exhausted = getServerLogs().filter(
+      (e) => e.message === "openclaw.gateway_wait_exhausted",
+    );
+    assert.equal(exhausted.length, 1, "expected single exhaustion error log");
+    const data = exhausted[0]!.data as Record<string, unknown>;
+    assert.equal(data.sandboxId, handle.sandboxId);
+    assert.equal(data.maxAttempts, 2);
+    assert.ok(typeof data.httpProbe === "string");
+    assert.ok(typeof data.openclawLogs === "string");
+    assert.ok(typeof data.portsAndProcesses === "string");
+    assert.ok(data.lastProbe && typeof data.lastProbe === "object");
+  } finally {
+    h.teardown();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Failure-path: writeFiles failure then retry recovery
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { logInfo } from "@/server/log";
+import { logError, logInfo, logWarn } from "@/server/log";
 import { getOpenclawPackageSpec } from "@/server/env";
 import {
   buildForcePairScript,
@@ -215,6 +215,70 @@ export async function setupOpenClaw(
   return { startupScript, openclawVersion, runtime };
 }
 
+const GATEWAY_DIAG_MAX_CHARS = 7000;
+
+/**
+ * Best-effort sandbox introspection when the gateway readiness probe exhausts.
+ * Emits structured fields for Vercel function logs (ring buffer + stderr).
+ */
+async function collectGatewayWaitFailureDiagnostics(
+  sandbox: SandboxHandle,
+): Promise<Record<string, string>> {
+  const cap = (s: string) => s.replace(/\r/g, "").slice(0, GATEWAY_DIAG_MAX_CHARS);
+  const diag: Record<string, string> = {};
+
+  try {
+    const r = await sandbox.runCommand("bash", [
+      "-c",
+      [
+        "echo '=== GET http://127.0.0.1:3000/ (no -f, stderr merged) ==='",
+        "curl -sS --max-time 8 -w '\\n__http_code:%{http_code}\\n' http://127.0.0.1:3000/ 2>&1 | head -c 4000",
+      ].join("\n"),
+    ]);
+    diag.httpProbe = cap(await r.output("both"));
+  } catch (e) {
+    diag.httpProbe = `error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+
+  try {
+    const r = await sandbox.runCommand("bash", [
+      "-c",
+      [
+        "echo '=== openclaw log files (tail) ==='",
+        "found=0",
+        "for f in /tmp/openclaw/openclaw-*.log; do",
+        '  [ -f "$f" ] || continue',
+        "  found=1",
+        '  echo "--- $f ---"',
+        '  tail -n 50 "$f"',
+        "done",
+        '[ "$found" = 0 ] && echo "(no /tmp/openclaw/openclaw-*.log)"',
+      ].join("\n"),
+    ]);
+    diag.openclawLogs = cap(await r.output("both"));
+  } catch (e) {
+    diag.openclawLogs = `error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+
+  try {
+    const r = await sandbox.runCommand("bash", [
+      "-c",
+      [
+        "echo '=== listeners :3000 ==='",
+        "(command -v ss >/dev/null 2>&1 && ss -tlnp 2>/dev/null | grep 3000) || true",
+        "(netstat -tlnp 2>/dev/null | grep 3000) || true",
+        "echo '=== node / openclaw processes ==='",
+        "ps aux 2>/dev/null | grep -E '[n]ode|[o]penclaw' | head -20 || true",
+      ].join("\n"),
+    ]);
+    diag.portsAndProcesses = cap(await r.output("both"));
+  } catch (e) {
+    diag.portsAndProcesses = `error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+
+  return diag;
+}
+
 export async function waitForGatewayReady(
   sandbox: SandboxHandle,
   options?: { maxAttempts?: number; delayMs?: number },
@@ -222,8 +286,15 @@ export async function waitForGatewayReady(
   const maxAttempts = options?.maxAttempts ?? 60;
   const delayMs = options?.delayMs ?? 1000;
 
+  logInfo("openclaw.gateway_wait_start", {
+    sandboxId: sandbox.sandboxId,
+    maxAttempts,
+    delayMs,
+  });
+
+  let lastProbe: Record<string, unknown> = {};
+
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    await sleep(delayMs);
     try {
       const result = await sandbox.runCommand("curl", [
         "-s",
@@ -233,13 +304,56 @@ export async function waitForGatewayReady(
         "http://localhost:3000/",
       ]);
       const body = await result.output("stdout");
+      let stderr = "";
+      try {
+        stderr = await result.output("stderr");
+      } catch {
+        // Some test doubles only implement a single output stream.
+      }
+      lastProbe = {
+        exitCode: result.exitCode,
+        bodyBytes: body.length,
+        bodyHead: body.slice(0, 500),
+        stderrHead: stderr.slice(0, 400),
+        hasOpenclawMarker: body.includes("openclaw-app"),
+      };
       if (result.exitCode === 0 && body.includes("openclaw-app")) {
+        logInfo("openclaw.gateway_wait_ok", {
+          sandboxId: sandbox.sandboxId,
+          attempts: attempt + 1,
+        });
         return;
       }
-    } catch {
-      // Continue probing.
+    } catch (err) {
+      lastProbe = {
+        probeThrew: true,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    const n = attempt + 1;
+    if (n % 30 === 0) {
+      logWarn("openclaw.gateway_wait_pending", {
+        sandboxId: sandbox.sandboxId,
+        attempt: n,
+        maxAttempts,
+        lastProbe,
+      });
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await sleep(delayMs);
     }
   }
+
+  const diagnostics = await collectGatewayWaitFailureDiagnostics(sandbox);
+  logError("openclaw.gateway_wait_exhausted", {
+    sandboxId: sandbox.sandboxId,
+    maxAttempts,
+    delayMs,
+    lastProbe,
+    ...diagnostics,
+  });
 
   throw new Error(`Gateway never became ready within ${maxAttempts} attempts.`);
 }

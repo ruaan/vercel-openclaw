@@ -176,6 +176,46 @@ Statuses:
 
 If you change lifecycle behavior, keep the waiting-page flow intact. The proxy depends on it.
 
+### Restore fast path
+
+`src/server/openclaw/restore-assets.ts` owns the restore asset split:
+
+- **static files**: startup script, force-pair script, skill markdown, skill scripts, and the built-in image-gen override
+- **dynamic files**: `openclaw.json` (rewritten with the current proxy origin and API key)
+
+On snapshot restore, dynamic files are always rewritten. Static files are only rewritten when `${OPENCLAW_STATE_DIR}/.restore-assets-manifest.json` has a different `sha256`. This manifest-based skipping avoids redundant uploads on repeat restores when the app version has not changed.
+
+Readiness is checked in two stages:
+
+1. **local-first readiness** — `curl http://localhost:3000/` inside the sandbox
+2. **public readiness** — fetch through the proxied route URL
+
+This separates sandbox boot failures from proxy/DNS failures and keeps restores fast.
+
+### `lastRestoreMetrics`
+
+`SingleMeta.lastRestoreMetrics` records per-phase timings using this shape:
+
+```ts
+type RestorePhaseMetrics = {
+  sandboxCreateMs: number;
+  tokenWriteMs: number;
+  assetSyncMs: number;
+  startupScriptMs: number;
+  forcePairMs: number;
+  firewallSyncMs: number;
+  localReadyMs: number;
+  publicReadyMs: number;
+  totalMs: number;
+  skippedStaticAssetSync: boolean;
+  assetSha256: string | null;
+  vcpus: number;
+  recordedAt: number;
+};
+```
+
+These metrics are stored on metadata after every restore and are visible via `/api/status`.
+
 ## OpenClaw bootstrap
 
 Main files:
@@ -191,6 +231,8 @@ Bootstrap responsibilities:
 - write the AI Gateway key file
 - write the restore startup script
 - wait for the gateway to become healthy
+
+On readiness timeout, `openclaw.gateway_wait_exhausted` is logged (Vercel function logs + admin log buffer) with last probe summary, HTTP probe without `-f`, OpenClaw log tail, and port/process snapshot.
 
 The startup script also installs shell hooks used for firewall learning.
 
@@ -408,7 +450,8 @@ These variables are checked by `buildDeploymentContract()` in `src/server/deploy
 | -------- | ------- | ------ |
 | `UPSTASH_REDIS_REST_URL` | All deployments | Required for persistent state. Provision via Vercel Marketplace. |
 | `UPSTASH_REDIS_REST_TOKEN` | All deployments | Required for persistent state. Paired with the URL above. |
-| `OPENCLAW_PACKAGE_SPEC` | All environments | Optional. Defaults to `openclaw@latest` when unset. Set to a pinned version like `openclaw@1.2.3` for deterministic builds. |
+| `OPENCLAW_PACKAGE_SPEC` | All environments | Optional. Defaults to `openclaw@latest` when unset. Set to a pinned version like `openclaw@1.2.3` for deterministic builds and comparable restore benchmarks. |
+| `OPENCLAW_SANDBOX_VCPUS` | All environments | Optional. vCPU count for sandbox create and snapshot restore (valid: 1, 2, 4, 8; default: 1). Keep this fixed during benchmarks so restore timings stay comparable. |
 | `NEXT_PUBLIC_VERCEL_APP_CLIENT_ID` | `sign-in-with-vercel` mode | Required for OAuth flow. |
 | `VERCEL_APP_CLIENT_SECRET` | `sign-in-with-vercel` mode | Required for OAuth flow. |
 | `SESSION_SECRET` | `sign-in-with-vercel` on Vercel | Required. Must be explicitly set — do not rely on silent derivation from the Upstash token. |
