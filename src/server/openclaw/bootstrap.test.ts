@@ -892,7 +892,7 @@ test("setupOpenClaw uses OPENCLAW_PACKAGE_SPEC when set", async () => {
   }
 });
 
-test("setupOpenClaw throws when OPENCLAW_PACKAGE_SPEC is missing on Vercel", async () => {
+test("setupOpenClaw falls back to openclaw@latest when OPENCLAW_PACKAGE_SPEC is unset on Vercel", async () => {
   const h = createScenarioHarness();
   const origSpec = process.env.OPENCLAW_PACKAGE_SPEC;
   const origVercel = process.env.VERCEL;
@@ -901,19 +901,23 @@ test("setupOpenClaw throws when OPENCLAW_PACKAGE_SPEC is missing on Vercel", asy
     process.env.VERCEL = "1";
     const handle = await createHandle(h);
 
-    await assert.rejects(
-      () => setupOpenClaw(handle, {
-        gatewayToken: "tok",
-        proxyOrigin: "https://proxy.test",
-      }),
-      (err: Error) => {
-        assert.ok(
-          err.message.includes("OPENCLAW_PACKAGE_SPEC"),
-          `Error should reference OPENCLAW_PACKAGE_SPEC, got: ${err.message}`,
-        );
-        return true;
-      },
-    );
+    handle.responders.push((cmd) => {
+      if (cmd === OPENCLAW_BIN) {
+        return { exitCode: 0, output: async () => "1.0.0" };
+      }
+      return undefined;
+    });
+
+    const result = await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    // npm install should use openclaw@latest as the fallback
+    assert.deepEqual(handle.commands[0].args, [
+      "install", "-g", "openclaw@latest", "--ignore-scripts",
+    ]);
+    assert.equal(result.runtime.packageSpec, "openclaw@latest");
   } finally {
     if (origSpec === undefined) {
       delete process.env.OPENCLAW_PACKAGE_SPEC;

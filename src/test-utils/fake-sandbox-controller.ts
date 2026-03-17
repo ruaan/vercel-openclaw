@@ -111,6 +111,15 @@ export class FakeSandboxHandle implements SandboxHandle {
     });
   }
 
+  async readFileToBuffer(file: { path: string }): Promise<Buffer | null> {
+    for (let i = this.writtenFiles.length - 1; i >= 0; i--) {
+      if (this.writtenFiles[i].path === file.path) {
+        return this.writtenFiles[i].content;
+      }
+    }
+    return null;
+  }
+
   domain(port: number): string {
     return `${this.portDomain}-${port}.fake.vercel.run`;
   }

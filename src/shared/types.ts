@@ -148,6 +148,22 @@ export type FirewallReport = {
   policyHash: string;
 };
 
+export type RestorePhaseMetrics = {
+  sandboxCreateMs: number;
+  tokenWriteMs: number;
+  assetSyncMs: number;
+  startupScriptMs: number;
+  forcePairMs: number;
+  firewallSyncMs: number;
+  localReadyMs: number;
+  publicReadyMs: number;
+  totalMs: number;
+  skippedStaticAssetSync: boolean;
+  assetSha256: string | null;
+  vcpus: number;
+  recordedAt: number;
+};
+
 export type SingleMeta = {
   _schemaVersion: number;
   version: number;
@@ -167,6 +183,7 @@ export type SingleMeta = {
   lastTokenRefreshAt: number | null;
   channels: ChannelConfigs;
   snapshotHistory: SnapshotRecord[];
+  lastRestoreMetrics: RestorePhaseMetrics | null;
 };
 
 export const CURRENT_SCHEMA_VERSION = 3;
@@ -208,6 +225,7 @@ export function createDefaultMeta(now: number, gatewayToken: string): SingleMeta
     lastTokenRefreshAt: null,
     channels: createDefaultChannelConfigs(),
     snapshotHistory: [],
+    lastRestoreMetrics: null,
   };
 }
 
@@ -313,6 +331,11 @@ export function ensureMetaShape(input: unknown): SingleMeta | null {
     snapshotHistory: Array.isArray((raw as Record<string, unknown>).snapshotHistory)
       ? ((raw as Record<string, unknown>).snapshotHistory as unknown[]).filter(isSnapshotRecord)
       : [],
+    lastRestoreMetrics: isRestorePhaseMetrics(
+      (raw as Record<string, unknown>).lastRestoreMetrics,
+    )
+      ? ((raw as Record<string, unknown>).lastRestoreMetrics as RestorePhaseMetrics)
+      : null,
   };
 }
 
@@ -394,6 +417,26 @@ function isFirewallSyncOutcome(value: unknown): value is FirewallSyncOutcome {
     typeof v.policyHash === "string" &&
     typeof v.applied === "boolean" &&
     typeof v.reason === "string"
+  );
+}
+
+function isRestorePhaseMetrics(value: unknown): value is RestorePhaseMetrics {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.sandboxCreateMs === "number" &&
+    typeof v.tokenWriteMs === "number" &&
+    typeof v.assetSyncMs === "number" &&
+    typeof v.startupScriptMs === "number" &&
+    typeof v.forcePairMs === "number" &&
+    typeof v.firewallSyncMs === "number" &&
+    typeof v.localReadyMs === "number" &&
+    typeof v.publicReadyMs === "number" &&
+    typeof v.totalMs === "number" &&
+    typeof v.skippedStaticAssetSync === "boolean" &&
+    (v.assetSha256 === null || typeof v.assetSha256 === "string") &&
+    typeof v.vcpus === "number" &&
+    typeof v.recordedAt === "number"
   );
 }
 

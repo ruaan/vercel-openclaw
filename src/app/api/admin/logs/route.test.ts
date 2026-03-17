@@ -165,6 +165,7 @@ test("GET /api/admin/logs: sandbox log parsing prefers top-level source over ctx
           async updateNetworkPolicy() {
             return "allow-all";
           },
+          async readFileToBuffer() { return null; },
         } satisfies SandboxHandle;
       },
     };

@@ -107,7 +107,7 @@ Full reference:
 | `NEXT_PUBLIC_VERCEL_APP_CLIENT_ID` | Sign-in mode | OAuth client ID |
 | `VERCEL_APP_CLIENT_SECRET` | Sign-in mode | OAuth client secret |
 | `SESSION_SECRET` | Sign-in mode | Cookie encryption secret |
-| `OPENCLAW_PACKAGE_SPEC` | Vercel | Pinned OpenClaw version (e.g. `openclaw@1.2.3`) |
+| `OPENCLAW_PACKAGE_SPEC` | No | OpenClaw version to install (defaults to `openclaw@latest`) |
 | `VERCEL_AUTOMATION_BYPASS_SECRET` | No | Appended to webhook URLs to pass Deployment Protection |
 | `CRON_SECRET` | No | Enables `/api/cron/drain-channels` diagnostic backstop |
 | `NEXT_PUBLIC_APP_URL` | No | Base origin override |

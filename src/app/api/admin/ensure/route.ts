@@ -65,6 +65,7 @@ export async function POST(request: Request): Promise<Response> {
             markerFound: probe.markerFound,
             error: probe.error,
           },
+          restoreMetrics: meta.lastRestoreMetrics ?? undefined,
         },
         { status: 200 },
       );

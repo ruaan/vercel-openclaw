@@ -96,6 +96,7 @@ function installFailingSandboxSync(): {
           updateCalls += 1;
           throw new Error("sandbox policy update failed");
         },
+        async readFileToBuffer() { return null; },
       };
     },
   };
@@ -264,6 +265,7 @@ function installSucceedingSandboxController(opts?: {
           appliedPolicies.push(policy);
           return policy;
         },
+        async readFileToBuffer() { return null; },
       } satisfies SandboxHandle;
     },
   };

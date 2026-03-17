@@ -1,6 +1,5 @@
 import { logInfo } from "@/server/log";
-import { getOpenclawPackageSpec, isVercelDeployment } from "@/server/env";
-import { isPinnedPackageSpec } from "@/server/deployment-contract";
+import { getOpenclawPackageSpec } from "@/server/env";
 import {
   buildForcePairScript,
   buildGatewayConfig,
@@ -99,20 +98,6 @@ export async function setupOpenClaw(
   const startupScript = buildStartupScript();
 
   const packageSpec = getOpenclawPackageSpec();
-  if (!packageSpec) {
-    // Same wording as deployment-contract checkOpenclawPackageSpec for consistency.
-    throw new Error(
-      "OPENCLAW_PACKAGE_SPEC is required on Vercel deployments. " +
-      "Set OPENCLAW_PACKAGE_SPEC to a pinned version such as openclaw@1.2.3 and redeploy.",
-    );
-  }
-
-  if (isVercelDeployment() && !isPinnedPackageSpec(packageSpec)) {
-    throw new Error(
-      `OPENCLAW_PACKAGE_SPEC must be a pinned version on Vercel (got "${packageSpec}"). ` +
-      "Set OPENCLAW_PACKAGE_SPEC to a pinned version such as openclaw@1.2.3 and redeploy.",
-    );
-  }
 
   logInfo("openclaw.setup.start", { sandboxId: sandbox.sandboxId, packageSpec });
 

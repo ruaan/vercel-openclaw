@@ -2,46 +2,28 @@ import { randomUUID } from "node:crypto";
 
 import { pollUntil } from "@/server/async/poll";
 import { ApiError } from "@/shared/http";
-import type { SingleMeta } from "@/shared/types";
+import type { RestorePhaseMetrics, SingleMeta } from "@/shared/types";
 import { getAiGatewayBearerTokenOptional } from "@/server/env";
 import { syncFirewallPolicyIfRunning } from "@/server/firewall/state";
 import { applyFirewallPolicyToSandbox } from "@/server/firewall/policy";
 import { logError, logInfo, logWarn } from "@/server/log";
-import { setupOpenClaw, CommandFailedError } from "@/server/openclaw/bootstrap";
+import { setupOpenClaw, CommandFailedError, waitForGatewayReady } from "@/server/openclaw/bootstrap";
 import {
-  buildForcePairScript,
-  buildGatewayConfig,
-  buildImageGenScript,
-  buildImageGenSkill,
-  buildStartupScript,
-  buildWebSearchSkill,
-  buildWebSearchScript,
-  buildVisionSkill,
-  buildVisionScript,
-  buildTtsSkill,
-  buildTtsScript,
-  buildStructuredExtractSkill,
-  buildStructuredExtractScript,
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
-  OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
-  OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
-  OPENCLAW_CONFIG_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
-  OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
-  OPENCLAW_IMAGE_GEN_SKILL_PATH,
-  OPENCLAW_WEB_SEARCH_SKILL_PATH,
-  OPENCLAW_WEB_SEARCH_SCRIPT_PATH,
-  OPENCLAW_VISION_SKILL_PATH,
-  OPENCLAW_VISION_SCRIPT_PATH,
-  OPENCLAW_TTS_SKILL_PATH,
-  OPENCLAW_TTS_SCRIPT_PATH,
-  OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
-  OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
+import {
+  OPENCLAW_RESTORE_ASSET_MANIFEST_PATH,
+  buildDynamicRestoreFiles,
+  buildRestoreAssetManifest,
+  buildStaticRestoreFiles,
+  type RestoreAssetManifest,
+} from "@/server/openclaw/restore-assets";
 import { getSandboxController } from "@/server/sandbox/controller";
 import type { SandboxHandle } from "@/server/sandbox/controller";
+import { getSandboxVcpus } from "@/server/sandbox/resources";
 import {
   getStore,
   getInitializedMeta,
@@ -593,14 +575,15 @@ async function createAndBootstrapSandbox(origin: string): Promise<SingleMeta> {
       meta.snapshotId = null;
     });
 
+    const vcpus = getSandboxVcpus();
     const sandbox = await getSandboxController().create({
       ports: SANDBOX_PORTS,
       timeout: DEFAULT_TIMEOUT_MS,
-      resources: { vcpus: 1 },
+      resources: { vcpus },
       ...(await buildRuntimeEnv()),
     });
 
-    logInfo("sandbox.status_transition", { from: "creating", to: "setup", sandboxId: sandbox.sandboxId });
+    logInfo("sandbox.status_transition", { from: "creating", to: "setup", sandboxId: sandbox.sandboxId, vcpus });
     await mutateMeta((meta) => {
       meta.status = "setup";
       meta.sandboxId = sandbox.sandboxId;
@@ -644,22 +627,27 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
       return createAndBootstrapSandbox(origin);
     }
 
+    const restoreStartedAt = Date.now();
+    const vcpus = getSandboxVcpus();
+
     logInfo("sandbox.status_transition", { from: current.status, to: "restoring", snapshotId: current.snapshotId });
     await mutateMeta((meta) => {
       meta.status = "restoring";
       meta.lastError = null;
     });
 
+    const sandboxCreateStart = Date.now();
     const sandbox = await getSandboxController().create({
       ports: SANDBOX_PORTS,
       timeout: DEFAULT_TIMEOUT_MS,
-      resources: { vcpus: 1 },
+      resources: { vcpus },
       source: {
         type: "snapshot",
         snapshotId: current.snapshotId,
       },
       ...(await buildRuntimeEnv()),
     });
+    const sandboxCreateMs = Date.now() - sandboxCreateStart;
 
     await mutateMeta((meta) => {
       meta.sandboxId = sandbox.sandboxId;
@@ -668,6 +656,7 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
 
     // Write a fresh AI Gateway token before starting — the snapshot's
     // baked-in key file contains a stale OIDC token.
+    const tokenWriteStart = Date.now();
     const freshApiKey = await getAiGatewayBearerTokenOptional();
     if (freshApiKey) {
       const writeTokenResult = await sandbox.runCommand("sh", [
@@ -685,72 +674,21 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
         });
       }
     }
+    const tokenWriteMs = Date.now() - tokenWriteStart;
 
-    // Re-write config, startup script, skill files, and force-pair script so
-    // snapshots taken before code changes still get the latest versions.
-    await sandbox.writeFiles([
-      {
-        path: OPENCLAW_CONFIG_PATH,
-        content: Buffer.from(buildGatewayConfig(freshApiKey, origin)),
-      },
-      {
-        path: OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
-        content: Buffer.from(buildForcePairScript()),
-      },
-      {
-        path: OPENCLAW_STARTUP_SCRIPT_PATH,
-        content: Buffer.from(buildStartupScript()),
-      },
-      {
-        path: OPENCLAW_IMAGE_GEN_SKILL_PATH,
-        content: Buffer.from(buildImageGenSkill()),
-      },
-      {
-        path: OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
-        content: Buffer.from(buildImageGenScript()),
-      },
-      {
-        path: OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
-        content: Buffer.from(buildImageGenSkill()),
-      },
-      {
-        path: OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
-        content: Buffer.from(buildImageGenScript()),
-      },
-      {
-        path: OPENCLAW_WEB_SEARCH_SKILL_PATH,
-        content: Buffer.from(buildWebSearchSkill()),
-      },
-      {
-        path: OPENCLAW_WEB_SEARCH_SCRIPT_PATH,
-        content: Buffer.from(buildWebSearchScript()),
-      },
-      {
-        path: OPENCLAW_VISION_SKILL_PATH,
-        content: Buffer.from(buildVisionSkill()),
-      },
-      {
-        path: OPENCLAW_VISION_SCRIPT_PATH,
-        content: Buffer.from(buildVisionScript()),
-      },
-      {
-        path: OPENCLAW_TTS_SKILL_PATH,
-        content: Buffer.from(buildTtsSkill()),
-      },
-      {
-        path: OPENCLAW_TTS_SCRIPT_PATH,
-        content: Buffer.from(buildTtsScript()),
-      },
-      {
-        path: OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
-        content: Buffer.from(buildStructuredExtractSkill()),
-      },
-      {
-        path: OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
-        content: Buffer.from(buildStructuredExtractScript()),
-      },
-    ]);
+    // Sync restore assets — skip static files when the manifest hash matches.
+    const assetSyncStart = Date.now();
+    const assetSyncResult = await syncRestoreAssetsIfNeeded(sandbox, {
+      origin,
+      apiKey: freshApiKey,
+    });
+    const assetSyncMs = Date.now() - assetSyncStart;
+    logInfo("sandbox.restore.asset_sync", {
+      skippedStaticAssetSync: assetSyncResult.skippedStaticAssetSync,
+      assetSha256: assetSyncResult.assetSha256,
+    });
 
+    const startupScriptStart = Date.now();
     const restoreResult = await sandbox.runCommand("bash", [
       OPENCLAW_STARTUP_SCRIPT_PATH,
     ]);
@@ -762,9 +700,11 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
         output,
       });
     }
+    const startupScriptMs = Date.now() - startupScriptStart;
 
     // Force-pair the device identity so the gateway doesn't require
     // manual pairing after restore (the startup script clears paired.json).
+    const forcePairStart = Date.now();
     try {
       await sandbox.runCommand("node", [
         OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
@@ -773,6 +713,7 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
     } catch {
       // Best-effort only — matches setupOpenClaw behavior.
     }
+    const forcePairMs = Date.now() - forcePairStart;
 
     const next = await mutateMeta((meta) => {
       meta.status = "booting";
@@ -782,35 +723,111 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
       meta.lastError = null;
     });
 
+    const firewallSyncStart = Date.now();
     await applyFirewallPolicyToSandbox(sandbox, next);
+    const firewallSyncMs = Date.now() - firewallSyncStart;
 
-    // Poll for gateway readiness — matches moltbot's waitForGatewayReady pattern.
-    // Without this loop the function returns with status "booting" after a single
-    // probe and never retries, leaving the sandbox permanently stuck if the
-    // gateway isn't ready on the first check.
-    const maxAttempts = 60;
-    let ready = false;
-    for (let i = 0; i < maxAttempts; i++) {
+    // Local-first readiness: curl inside the sandbox is much faster than
+    // going through the public proxy/DNS path.
+    const localReadyStart = Date.now();
+    await waitForGatewayReady(sandbox, { maxAttempts: 120, delayMs: 250 });
+    const localReadyMs = Date.now() - localReadyStart;
+    logInfo("sandbox.restore.local_ready", { localReadyMs, sandboxId: sandbox.sandboxId });
+
+    // Short public probe — once the gateway is locally healthy the public
+    // route should come up quickly.  If it never does, something is wrong
+    // with the proxy/DNS layer, not the sandbox itself.
+    const publicReadyStart = Date.now();
+    let publicReady = false;
+    for (let i = 0; i < 20; i++) {
       const probe = await probeGatewayReady();
       if (probe.ready) {
-        ready = true;
+        publicReady = true;
         break;
       }
-      if (i > 0 && i % 10 === 0) {
-        logInfo("sandbox.restore_gateway_poll", { attempt: i, maxAttempts });
-      }
-      await wait(1_000);
+      await wait(250);
+    }
+    const publicReadyMs = Date.now() - publicReadyStart;
+
+    if (!publicReady) {
+      logError("sandbox.restore_public_gateway_timeout", {
+        sandboxId: sandbox.sandboxId,
+        localReadyMs,
+        publicReadyMs,
+      });
+      throw new Error(
+        "Gateway became locally ready but never became publicly reachable after restore.",
+      );
     }
 
-    if (!ready) {
-      const msg = `Gateway did not become ready within ${maxAttempts} seconds after restore`;
-      logError("sandbox.restore_gateway_timeout", { sandboxId: sandbox.sandboxId });
-      throw new Error(msg);
-    }
+    const totalMs = Date.now() - restoreStartedAt;
+
+    const metrics: RestorePhaseMetrics = {
+      sandboxCreateMs,
+      tokenWriteMs,
+      assetSyncMs,
+      startupScriptMs,
+      forcePairMs,
+      firewallSyncMs,
+      localReadyMs,
+      publicReadyMs,
+      totalMs,
+      skippedStaticAssetSync: assetSyncResult.skippedStaticAssetSync,
+      assetSha256: assetSyncResult.assetSha256,
+      vcpus,
+      recordedAt: Date.now(),
+    };
+
+    logInfo("sandbox.restore.metrics", metrics as unknown as Record<string, unknown>);
+
+    await mutateMeta((meta) => {
+      meta.lastRestoreMetrics = metrics;
+    });
 
     await syncFirewallPolicyIfRunning();
     return getInitializedMeta();
   });
+}
+
+async function syncRestoreAssetsIfNeeded(
+  sandbox: SandboxHandle,
+  options: { origin: string; apiKey?: string },
+): Promise<{ skippedStaticAssetSync: boolean; assetSha256: string }> {
+  const manifest = buildRestoreAssetManifest();
+  const existing = await sandbox.readFileToBuffer({
+    path: OPENCLAW_RESTORE_ASSET_MANIFEST_PATH,
+  });
+
+  let existingSha: string | null = null;
+  if (existing) {
+    try {
+      existingSha = (JSON.parse(existing.toString("utf8")) as RestoreAssetManifest).sha256;
+    } catch {
+      existingSha = null;
+    }
+  }
+
+  const files = buildDynamicRestoreFiles({
+    proxyOrigin: options.origin,
+    apiKey: options.apiKey,
+  });
+
+  const skippedStaticAssetSync = existingSha === manifest.sha256;
+
+  if (!skippedStaticAssetSync) {
+    files.push(...buildStaticRestoreFiles());
+    files.push({
+      path: OPENCLAW_RESTORE_ASSET_MANIFEST_PATH,
+      content: Buffer.from(JSON.stringify(manifest) + "\n"),
+    });
+  }
+
+  await sandbox.writeFiles(files);
+
+  return {
+    skippedStaticAssetSync,
+    assetSha256: manifest.sha256,
+  };
 }
 
 function recordSnapshotMetadata(

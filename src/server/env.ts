@@ -148,18 +148,13 @@ export function requiresDurableStore(): boolean {
  * Resolve the openclaw npm package spec to install in the sandbox.
  *
  * Resolution order:
- * 1. `OPENCLAW_PACKAGE_SPEC` env var (e.g. "openclaw@1.2.3", "openclaw@^1.0.0")
- * 2. Falls back to "openclaw@latest" in non-Vercel environments.
- * 3. On Vercel deployments, a missing `OPENCLAW_PACKAGE_SPEC` returns `null`
- *    so callers can fail fast with a clear error.
+ * 1. `OPENCLAW_PACKAGE_SPEC` env var (e.g. "openclaw@1.2.3", "openclaw@latest")
+ * 2. Falls back to "openclaw@latest" when unset (all environments).
  */
-export function getOpenclawPackageSpec(): string | null {
+export function getOpenclawPackageSpec(): string {
   const explicit = process.env.OPENCLAW_PACKAGE_SPEC?.trim();
   if (explicit) {
     return explicit;
-  }
-  if (isVercelDeployment()) {
-    return null;
   }
   return "openclaw@latest";
 }

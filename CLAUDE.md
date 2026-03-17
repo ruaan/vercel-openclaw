@@ -408,7 +408,7 @@ These variables are checked by `buildDeploymentContract()` in `src/server/deploy
 | -------- | ------- | ------ |
 | `UPSTASH_REDIS_REST_URL` | All deployments | Required for persistent state. Provision via Vercel Marketplace. |
 | `UPSTASH_REDIS_REST_TOKEN` | All deployments | Required for persistent state. Paired with the URL above. |
-| `OPENCLAW_PACKAGE_SPEC` | Vercel deployments | Required. Must be a pinned version like `openclaw@1.2.3`. Local dev falls back to `openclaw@latest` when unset. |
+| `OPENCLAW_PACKAGE_SPEC` | All environments | Optional. Defaults to `openclaw@latest` when unset. Set to a pinned version like `openclaw@1.2.3` for deterministic builds. |
 | `NEXT_PUBLIC_VERCEL_APP_CLIENT_ID` | `sign-in-with-vercel` mode | Required for OAuth flow. |
 | `VERCEL_APP_CLIENT_SECRET` | `sign-in-with-vercel` mode | Required for OAuth flow. |
 | `SESSION_SECRET` | `sign-in-with-vercel` on Vercel | Required. Must be explicitly set — do not rely on silent derivation from the Upstash token. |

@@ -41,6 +41,7 @@ export interface SandboxHandle {
   writeFiles(
     files: { path: string; content: Buffer }[],
   ): Promise<void>;
+  readFileToBuffer(file: { path: string; cwd?: string }): Promise<Buffer | null>;
   domain(port: number): string;
   snapshot(): Promise<SnapshotResult>;
   extendTimeout(duration: number): Promise<void>;
@@ -72,6 +73,13 @@ function wrapSandbox(sandbox: Sandbox): SandboxHandle {
     },
     async writeFiles(files) {
       await sandbox.writeFiles(files);
+    },
+    async readFileToBuffer(file) {
+      try {
+        return await sandbox.readFileToBuffer(file);
+      } catch {
+        return null;
+      }
     },
     domain(port) {
       return sandbox.domain(port);

@@ -81,11 +81,28 @@ class FakeSandboxHandle implements SandboxHandle {
     if (command === OPENCLAW_BIN && args?.[0] === "--version") {
       return { exitCode: 0, output: async () => "openclaw 1.2.3" };
     }
+    // Respond to the local curl readiness probe used by waitForGatewayReady
+    if (command === "curl" && args?.some((a) => a.includes("localhost:3000"))) {
+      return {
+        exitCode: 0,
+        output: async () => '<html><body><div id="openclaw-app">ready</div></body></html>',
+      };
+    }
     return { exitCode: 0, output: async () => "" };
   }
 
   async writeFiles(files: { path: string; content: Buffer }[]): Promise<void> {
     this.writtenFiles.push(...files);
+  }
+
+  async readFileToBuffer(file: { path: string }): Promise<Buffer | null> {
+    // Return the last written content for the requested path, or null.
+    for (let i = this.writtenFiles.length - 1; i >= 0; i--) {
+      if (this.writtenFiles[i].path === file.path) {
+        return this.writtenFiles[i].content;
+      }
+    }
+    return null;
   }
 
   domain(port: number): string {
@@ -637,7 +654,7 @@ async function triggerRestore(
   }
 }
 
-test("restoreSandboxFromSnapshot writes config, startup, force-pair, and all skill files via writeFiles", async () => {
+test("restoreSandboxFromSnapshot writes all files + manifest on first restore (no existing manifest)", async () => {
   const fake = new FakeSandboxController();
   const originalFetch = globalThis.fetch;
 
@@ -665,10 +682,134 @@ test("restoreSandboxFromSnapshot writes config, startup, force-pair, and all ski
       assert.ok(writtenPaths.includes(OPENCLAW_IMAGE_GEN_SCRIPT_PATH), "Should write image-gen script");
       assert.ok(writtenPaths.includes(OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH), "Should write builtin image-gen skill");
       assert.ok(writtenPaths.includes(OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH), "Should write builtin image-gen script");
-      // 15 total: config + force-pair + startup + image-gen (4) + web-search (2) + vision (2) + tts (2) + structured-extract (2)
-      assert.equal(handle.writtenFiles.length, 15, "Should write exactly 15 files");
+      // 16 total: 1 dynamic (config) + 14 static + 1 manifest
+      assert.equal(handle.writtenFiles.length, 16, "Should write exactly 16 files (dynamic + static + manifest)");
+
+      // Verify manifest was written
+      const manifestPath = writtenPaths.find((p) => p.includes(".restore-assets-manifest.json"));
+      assert.ok(manifestPath, "Should write restore-assets manifest");
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("restoreSandboxFromSnapshot skips static files on second restore when manifest hash matches", async () => {
+  const fake = new FakeSandboxController();
+  const originalFetch = globalThis.fetch;
+
+  await withTestEnv(fake, async () => {
+    await mutateMeta((meta) => {
+      meta.status = "stopped";
+      meta.snapshotId = "snap-restore-first";
+      meta.gatewayToken = "test-gw-token";
+    });
+
+    globalThis.fetch = async () =>
+      new Response('<div id="openclaw-app"></div>', { status: 200 });
+
+    try {
+      // First restore — writes all files
+      const { handle: firstHandle } = await triggerRestore(fake, {
+        tokenOverride: "test-ai-key",
+      });
+      assert.equal(firstHandle.writtenFiles.length, 16, "First restore should write 16 files");
+
+      // Snapshot the sandbox so we can restore again
+      const snap = await firstHandle.snapshot();
+
+      // Reset meta to stopped with the new snapshot, simulating a second restore
+      await mutateMeta((meta) => {
+        meta.status = "stopped";
+        meta.snapshotId = snap.snapshotId;
+        meta.sandboxId = null;
+        meta.portUrls = null;
+      });
+
+      // Second restore — the new sandbox handle will have the manifest from
+      // the first restore's written files because FakeSandboxHandle.readFileToBuffer
+      // reads from writtenFiles. Since the controller creates a new handle,
+      // we need to pre-populate it with the manifest.
+      // The new handle won't have the manifest, so we use a custom controller.
+      const manifestFile = firstHandle.writtenFiles.find((f) =>
+        f.path.includes(".restore-assets-manifest.json"),
+      );
+      assert.ok(manifestFile, "Manifest should exist from first restore");
+
+      // Override the controller to return a handle pre-populated with the manifest
+      const secondFake = new FakeSandboxController();
+      secondFake.commandHandler = fake.commandHandler;
+      _setSandboxControllerForTesting(secondFake);
+
+      const { handle: secondHandle } = await triggerRestore(secondFake, {
+        tokenOverride: "test-ai-key",
+      });
+
+      // Pre-populate the manifest before the restore reads it —
+      // but the handle is already created by triggerRestore. The fake
+      // readFileToBuffer returns null for a fresh handle, so the second
+      // restore will also write all files. To properly test the skip,
+      // we need to seed the handle with the manifest before restore runs.
+
+      // Instead, let's verify the contract: on a fresh handle (no manifest),
+      // we get all 16 files. This is correct because the snapshot sandbox
+      // image would have the manifest file baked in.
+      assert.equal(secondHandle.writtenFiles.length, 16, "Second restore on fresh handle writes 16 files");
+
+      // Now test the actual skip path: manually seed a handle with the manifest
+      // and trigger a restore that reads it back.
+      const seededHandle = new FakeSandboxHandle("sbx-seeded");
+      // Write the manifest so readFileToBuffer will find it
+      seededHandle.writtenFiles.push(manifestFile);
+
+      // Create a controller that returns the seeded handle
+      const seededFake = new FakeSandboxController();
+      seededFake.commandHandler = (cmd, args) => {
+        // Handle the local curl readiness probe used by waitForGatewayReady
+        if (cmd === "curl" && args?.some((a) => a.includes("localhost:3000"))) {
+          return { exitCode: 0, output: '<html><body><div id="openclaw-app">ready</div></body></html>' };
+        }
+        return { exitCode: 0, output: "" };
+      };
+      // Override create to return the seeded handle
+      const origCreate = seededFake.create.bind(seededFake);
+      seededFake.create = async (params) => {
+        const h = await origCreate(params);
+        // Copy the manifest file to the newly created handle
+        const fh = seededFake.created[seededFake.created.length - 1];
+        fh.writtenFiles.push(manifestFile);
+        return h;
+      };
+
+      _setSandboxControllerForTesting(seededFake);
+
+      await mutateMeta((meta) => {
+        meta.status = "stopped";
+        meta.snapshotId = "snap-seeded";
+        meta.sandboxId = null;
+        meta.portUrls = null;
+      });
+
+      const { handle: seededResult } = await triggerRestore(seededFake, {
+        tokenOverride: "test-ai-key",
+      });
+
+      // The seeded handle already had 1 file (manifest). The restore should
+      // write only dynamic files (1 config) = total writtenFiles should be 2
+      // (1 pre-seeded manifest + 1 dynamic config)
+      const newWrites = seededResult.writtenFiles.filter(
+        (f) => !f.path.includes(".restore-assets-manifest.json"),
+      );
+      assert.equal(newWrites.length, 1, "Second restore with matching manifest should write only 1 dynamic file (config)");
+
+      // Verify restore metrics reflect the skip
+      const meta = await getInitializedMeta();
+      assert.ok(meta.lastRestoreMetrics, "Should have restore metrics");
+      assert.equal(meta.lastRestoreMetrics.skippedStaticAssetSync, true, "Should report skipped static asset sync");
+      assert.ok(typeof meta.lastRestoreMetrics.assetSha256 === "string", "Should report asset sha256");
+    } finally {
+      globalThis.fetch = originalFetch;
+      _setSandboxControllerForTesting(null);
     }
   });
 });

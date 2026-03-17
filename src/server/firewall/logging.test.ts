@@ -91,6 +91,7 @@ function installSucceedingSandboxController(
           appliedPolicies.push(policy);
           return policy;
         },
+        async readFileToBuffer() { return null; },
       } satisfies SandboxHandle;
     },
   };
