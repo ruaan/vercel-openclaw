@@ -70,7 +70,7 @@ export class FakeSandboxHandle implements SandboxHandle {
     this.eventLog = eventLog;
   }
 
-  async runCommand(command: string, args?: string[]): Promise<CommandResult> {
+  async runCommand(command: string, args?: string[], _opts?: { signal?: AbortSignal }): Promise<CommandResult> {
     this.commands.push({ cmd: command, args });
     this.eventLog.push({
       kind: "command",

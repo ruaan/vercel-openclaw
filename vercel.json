@@ -4,6 +4,9 @@
     { "path": "/api/cron/watchdog", "schedule": "*/5 * * * *" }
   ],
   "functions": {
+    "src/app/api/admin/ssh/route.ts": {
+      "maxDuration": 60
+    },
     "src/app/api/queues/channels/slack/route.ts": {
       "maxDuration": 300,
       "experimentalTriggers": [

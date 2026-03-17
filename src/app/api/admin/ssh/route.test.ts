@@ -38,9 +38,9 @@ patchNextServerAfter();
 // ---------------------------------------------------------------------------
 
 const SUGGESTED_COMMANDS = [
-  { label: "Tail OpenClaw log", value: "tail -f /tmp/openclaw/openclaw-*.log" },
+  { label: "Tail OpenClaw log", value: "tail -n 200 /tmp/openclaw/openclaw-*.log" },
   { label: "List OpenClaw logs", value: "ls -la /tmp/openclaw/" },
-  { label: "Tail sandbox logs", value: "tail -f /vercel/sandbox/.logs" },
+  { label: "Tail sandbox logs", value: "tail -n 200 /vercel/sandbox/.logs" },
   { label: "View config", value: "cat /etc/openclaw/openclaw.json" },
   { label: "Running processes", value: "ps aux" },
   { label: "Disk usage", value: "df -h" },
@@ -244,6 +244,80 @@ for (const cmd of SUGGESTED_COMMANDS) {
     });
   });
 }
+
+// ===========================================================================
+// Timeout handling
+// ===========================================================================
+
+test("POST /api/admin/ssh: returns 408 when command times out via AbortSignal", async () => {
+  await withTestEnv(async () => {
+    const controller = new FakeSandboxController();
+    _setSandboxControllerForTesting(controller);
+
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-timeout";
+    });
+
+    const responder: CommandResponder = (c, a) => {
+      if (c === "sh" && a?.[0] === "-c") {
+        const error = new Error("The operation was aborted");
+        error.name = "TimeoutError";
+        throw error;
+      }
+      return undefined;
+    };
+
+    const handle = await controller.get({ sandboxId: "sbx-timeout" });
+    (handle as import("@/test-utils/fake-sandbox-controller").FakeSandboxHandle)
+      .responders.push(responder);
+
+    const route = getAdminSshRoute();
+    const request = buildAuthPostRequest(
+      "/api/admin/ssh",
+      JSON.stringify({ command: "tail -f /some/file" }),
+    );
+    const result = await callRoute(route.POST!, request);
+
+    assert.equal(result.status, 408);
+    const body = result.json as { error: string; message: string };
+    assert.equal(body.error, "COMMAND_TIMEOUT");
+    assert.ok(body.message.includes("timed out"));
+  });
+});
+
+test("POST /api/admin/ssh: returns 408 for AbortError", async () => {
+  await withTestEnv(async () => {
+    const controller = new FakeSandboxController();
+    _setSandboxControllerForTesting(controller);
+
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-abort";
+    });
+
+    const responder: CommandResponder = () => {
+      const error = new Error("The operation was aborted");
+      error.name = "AbortError";
+      throw error;
+    };
+
+    const handle = await controller.get({ sandboxId: "sbx-abort" });
+    (handle as import("@/test-utils/fake-sandbox-controller").FakeSandboxHandle)
+      .responders.push(responder);
+
+    const route = getAdminSshRoute();
+    const request = buildAuthPostRequest(
+      "/api/admin/ssh",
+      JSON.stringify({ command: "some-slow-cmd" }),
+    );
+    const result = await callRoute(route.POST!, request);
+
+    assert.equal(result.status, 408);
+    const body = result.json as { error: string; message: string };
+    assert.equal(body.error, "COMMAND_TIMEOUT");
+  });
+});
 
 // ===========================================================================
 // Shell execution verification

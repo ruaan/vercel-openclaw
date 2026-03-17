@@ -19,9 +19,9 @@ type SshPanelProps = {
 };
 
 const SUGGESTED_COMMANDS = [
-  { label: "Tail OpenClaw log", value: "tail -f /tmp/openclaw/openclaw-*.log" },
+  { label: "Tail OpenClaw log", value: "tail -n 200 /tmp/openclaw/openclaw-*.log" },
   { label: "List OpenClaw logs", value: "ls -la /tmp/openclaw/" },
-  { label: "Tail sandbox logs", value: "tail -f /vercel/sandbox/.logs" },
+  { label: "Tail sandbox logs", value: "tail -n 200 /vercel/sandbox/.logs" },
   { label: "View config", value: "cat /etc/openclaw/openclaw.json" },
   { label: "Running processes", value: "ps aux" },
   { label: "Disk usage", value: "df -h" },

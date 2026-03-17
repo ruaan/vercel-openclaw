@@ -36,6 +36,7 @@ export interface SandboxHandle {
   runCommand(
     command: string,
     args?: string[],
+    opts?: { signal?: AbortSignal },
   ): Promise<CommandResult>;
   writeFiles(
     files: { path: string; content: Buffer }[],
@@ -62,8 +63,8 @@ export interface SandboxController {
 function wrapSandbox(sandbox: Sandbox): SandboxHandle {
   return {
     sandboxId: sandbox.sandboxId,
-    async runCommand(command, args) {
-      const result = await sandbox.runCommand(command, args ?? []);
+    async runCommand(command, args, opts) {
+      const result = await sandbox.runCommand(command, args ?? [], opts);
       return {
         exitCode: result.exitCode,
         output: (stream) => result.output(stream),
