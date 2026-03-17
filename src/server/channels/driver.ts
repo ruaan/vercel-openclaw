@@ -433,7 +433,7 @@ export async function processChannelJob<
 
       logInfo("channels.gateway_response_received", {
         channel: options.channel,
-        replyTextLength: reply.text.length,
+        replyTextLength: replyText.length,
         imageCount,
         imageKinds: reply.images?.map((img) => img.kind) ?? [],
         usingSendReplyRich: Boolean(adapter.sendReplyRich),
@@ -527,6 +527,11 @@ async function forwardToGateway(options: {
   if (!body) {
     throw new RetryableChannelError("gateway_empty_response");
   }
+
+  logInfo("channels.gateway_raw_response", {
+    status: response.status,
+    bodyLength: body.length,
+  });
 
   let payload: unknown;
   try {
