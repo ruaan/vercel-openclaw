@@ -79,6 +79,7 @@ Channel phases (`channelRoundTrip`, `channelWakeFromSleep`) read signing secrets
 | `/api/admin/ensure` | Trigger sandbox create or restore |
 | `/api/admin/stop` | Snapshot and stop the sandbox |
 | `/api/admin/snapshot` | Snapshot and stop (same as stop for now) |
+| `/api/admin/snapshots/delete` | Delete a past snapshot from Vercel and local history (cannot delete current restore target) |
 | `/api/admin/channel-secrets` | Expose signing secrets for smoke-test webhook construction |
 | `/api/queues/channels/slack` | Private Vercel Queues consumer for Slack delivery (not publicly reachable on Vercel) |
 | `/api/queues/channels/telegram` | Private Vercel Queues consumer for Telegram delivery (not publicly reachable on Vercel) |

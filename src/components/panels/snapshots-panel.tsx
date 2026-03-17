@@ -6,10 +6,14 @@ import { ConfirmDialog, useConfirm } from "@/components/ui/confirm-dialog";
 import type { SnapshotRecord } from "@/shared/types";
 import type { StatusPayload, RunAction, RequestJson } from "@/components/admin-types";
 
+/** How this snapshot was created (stored on each history row). */
 const REASON_LABELS: Record<string, string> = {
+  /** "Take snapshot" on this page */
   manual: "Manual",
   auto: "Auto",
   bootstrap: "Bootstrap",
+  /** Status → Stop (or POST /api/admin/stop / snapshot) — not a button here */
+  stop: "Saved on stop",
 };
 
 function relativeTime(timestamp: number): string {
@@ -96,12 +100,42 @@ export function SnapshotsPanel({
     }
   };
 
+  const handleDelete = async (snapshotId: string) => {
+    const ok = await confirm({
+      title: "Delete snapshot?",
+      description: `Permanently delete ${snapshotId.slice(0, 12)}... from Vercel? This cannot be undone. You cannot delete the snapshot you would restore from (current).`,
+      confirmLabel: "Delete",
+      variant: "danger",
+    });
+    if (!ok) return;
+
+    const result = await requestJson<{ ok: boolean }>("/api/admin/snapshots/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ snapshotId }),
+      label: `Delete ${snapshotId.slice(0, 12)}...`,
+    });
+    if (result?.ok) {
+      toast.success("Snapshot deleted");
+      await fetchSnapshots();
+    }
+  };
+
   return (
     <article className="panel-card">
       <div className="panel-head">
         <div>
           <p className="eyebrow">Snapshots</p>
           <h2>Snapshot history</h2>
+          <p
+            className="event-meta"
+            style={{ marginTop: 6, maxWidth: 520, lineHeight: 1.45 }}
+          >
+            The tag after Current/Available is{" "}
+            <strong>how it was saved</strong>:{" "}
+            <em>Saved on stop</em> means the sandbox was stopped from Status (or
+            Stop elsewhere); <em>Manual</em> means you used Take snapshot here.
+          </p>
         </div>
         <button
           type="button"
@@ -162,6 +196,14 @@ export function SnapshotsPanel({
                 </p>
               </div>
               <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  className="button ghost"
+                  disabled={busy || isCurrent}
+                  onClick={() => void handleDelete(snap.snapshotId)}
+                >
+                  Delete
+                </button>
                 <button
                   type="button"
                   className="button ghost"

@@ -2044,6 +2044,12 @@ a[href]:focus-visible {
   color: var(--foreground-muted);
 }
 
+.snapshot-reason-stop {
+  border-color: rgba(245, 166, 35, 0.25);
+  background: var(--warning-surface);
+  color: var(--warning);
+}
+
 /* ────── Skeleton loading ────── */
 
 @keyframes skeleton-pulse {
