@@ -3,7 +3,7 @@ import { enqueueChannelJob } from "@/server/channels/driver";
 import { channelDedupKey } from "@/server/channels/keys";
 import { publishToChannelQueue } from "@/server/channels/queue";
 import { isTelegramWebhookSecretValid } from "@/server/channels/telegram/adapter";
-import { logInfo } from "@/server/log";
+import { logError, logInfo } from "@/server/log";
 import { getInitializedMeta, getStore } from "@/server/store/store";
 
 function extractUpdateId(payload: unknown): string | null {
@@ -38,24 +38,32 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ ok: true });
   }
 
-  const updateId = extractUpdateId(payload);
-  if (updateId) {
-    const accepted = await getStore().acquireLock(channelDedupKey("telegram", updateId), 24 * 60 * 60);
-    if (!accepted) {
-      return Response.json({ ok: true });
+  // Always return 200 to Telegram — any failure here must not cause Telegram
+  // to back off and stop delivering webhooks.
+  try {
+    const updateId = extractUpdateId(payload);
+    if (updateId) {
+      const accepted = await getStore().acquireLock(channelDedupKey("telegram", updateId), 24 * 60 * 60);
+      if (!accepted) {
+        return Response.json({ ok: true });
+      }
     }
-  }
 
-  const job = {
-    payload,
-    receivedAt: Date.now(),
-    origin: getPublicOrigin(request),
-  };
+    const job = {
+      payload,
+      receivedAt: Date.now(),
+      origin: getPublicOrigin(request),
+    };
 
-  const { queued } = await publishToChannelQueue("telegram", job);
-  if (!queued) {
-    await enqueueChannelJob("telegram", job);
-    logInfo("channels.telegram_webhook_fallback_enqueue", { receivedAt: job.receivedAt });
+    const { queued } = await publishToChannelQueue("telegram", job);
+    if (!queued) {
+      await enqueueChannelJob("telegram", job);
+      logInfo("channels.telegram_webhook_fallback_enqueue", { receivedAt: job.receivedAt });
+    }
+  } catch (error) {
+    logError("channels.telegram_webhook_enqueue_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   return Response.json({ ok: true });

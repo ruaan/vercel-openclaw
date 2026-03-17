@@ -133,7 +133,6 @@ export async function setWebhook(
     url,
     secret_token: secretToken,
     allowed_updates: ["message", "edited_message", "callback_query"],
-    drop_pending_updates: true,
   });
 }
 
