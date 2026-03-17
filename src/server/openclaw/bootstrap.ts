@@ -7,6 +7,14 @@ import {
   buildImageGenScript,
   buildImageGenSkill,
   buildStartupScript,
+  buildWebSearchSkill,
+  buildWebSearchScript,
+  buildVisionSkill,
+  buildVisionScript,
+  buildTtsSkill,
+  buildTtsScript,
+  buildStructuredExtractSkill,
+  buildStructuredExtractScript,
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   OPENCLAW_BIN,
   OPENCLAW_CONFIG_PATH,
@@ -16,6 +24,14 @@ import {
   OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
   OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
   OPENCLAW_IMAGE_GEN_SKILL_PATH,
+  OPENCLAW_WEB_SEARCH_SKILL_PATH,
+  OPENCLAW_WEB_SEARCH_SCRIPT_PATH,
+  OPENCLAW_VISION_SKILL_PATH,
+  OPENCLAW_VISION_SCRIPT_PATH,
+  OPENCLAW_TTS_SKILL_PATH,
+  OPENCLAW_TTS_SCRIPT_PATH,
+  OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
+  OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
@@ -146,6 +162,38 @@ export async function setupOpenClaw(
     {
       path: OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
       content: Buffer.from(buildImageGenScript()),
+    },
+    {
+      path: OPENCLAW_WEB_SEARCH_SKILL_PATH,
+      content: Buffer.from(buildWebSearchSkill()),
+    },
+    {
+      path: OPENCLAW_WEB_SEARCH_SCRIPT_PATH,
+      content: Buffer.from(buildWebSearchScript()),
+    },
+    {
+      path: OPENCLAW_VISION_SKILL_PATH,
+      content: Buffer.from(buildVisionSkill()),
+    },
+    {
+      path: OPENCLAW_VISION_SCRIPT_PATH,
+      content: Buffer.from(buildVisionScript()),
+    },
+    {
+      path: OPENCLAW_TTS_SKILL_PATH,
+      content: Buffer.from(buildTtsSkill()),
+    },
+    {
+      path: OPENCLAW_TTS_SCRIPT_PATH,
+      content: Buffer.from(buildTtsScript()),
+    },
+    {
+      path: OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
+      content: Buffer.from(buildStructuredExtractSkill()),
+    },
+    {
+      path: OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
+      content: Buffer.from(buildStructuredExtractScript()),
     },
   ]);
 

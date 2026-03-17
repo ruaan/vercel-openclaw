@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 
 import type { TelegramChannelConfig } from "@/shared/channels";
+import { startKeepAlive } from "@/server/channels/core/processing-indicator";
 import { RetryableSendError } from "@/server/channels/core/types";
 import type { PlatformAdapter } from "@/server/channels/core/types";
 import {
@@ -112,6 +113,12 @@ export function createTelegramAdapter(
           chatId,
         },
       } as const;
+    },
+
+    async startProcessingIndicator(message) {
+      return startKeepAlive(async () => {
+        await sendChatAction(config.botToken, Number(message.chatId), "typing");
+      }, 4_000);
     },
 
     async sendTypingIndicator(message) {

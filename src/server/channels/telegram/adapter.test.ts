@@ -52,6 +52,43 @@ test("createTelegramAdapter extracts chat text updates", async () => {
   assert.equal(result.message.chatId, "42");
 });
 
+test("createTelegramAdapter startProcessingIndicator triggers chat action immediately and stops cleanly", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify({ ok: true, result: true }), {
+      status: 200,
+    });
+  };
+
+  try {
+    const adapter = createTelegramAdapter({
+      botToken: "bot-token",
+      webhookSecret: "secret",
+      webhookUrl: "https://example.com/api/channels/telegram/webhook",
+      botUsername: "openclaw_bot",
+      configuredAt: Date.now(),
+    });
+
+    const indicator = await adapter.startProcessingIndicator?.({
+      text: "hello telegram",
+      chatId: "42",
+    });
+
+    assert.ok(indicator, "startProcessingIndicator should return an indicator");
+    assert.equal(calls.length, 1, "should fire first pulse immediately");
+    assert.ok(
+      calls[0]?.includes("sendChatAction"),
+      "should call sendChatAction",
+    );
+
+    await indicator.stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("createTelegramAdapter sendReply throws RetryableSendError when Telegram rate limits", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>

@@ -149,6 +149,42 @@ test("createDiscordAdapter getSessionKey scopes history to channel and user", ()
   );
 });
 
+test("createDiscordAdapter startProcessingIndicator triggers typing immediately and stops cleanly", async () => {
+  const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  const fetchFn: typeof fetch = async (input, init) => {
+    fetchCalls.push({ input, init });
+    return new Response(null, { status: 204 });
+  };
+
+  const adapter = createDiscordAdapter(
+    {
+      publicKey: "a".repeat(64),
+      applicationId: "app-123",
+      botToken: "bot-token",
+      configuredAt: Date.now(),
+    },
+    { fetchFn },
+  );
+
+  const indicator = await adapter.startProcessingIndicator?.({
+    text: "hello",
+    interactionId: "interaction-1",
+    interactionToken: "interaction-token",
+    applicationId: "app-123",
+    channelId: "channel-1",
+    userId: "user-1",
+  });
+
+  assert.ok(indicator, "startProcessingIndicator should return an indicator");
+  assert.equal(fetchCalls.length, 1, "should fire first pulse immediately");
+  assert.ok(
+    String(fetchCalls[0]?.input).includes("channels/channel-1/typing"),
+    "should call triggerTyping for the correct channel",
+  );
+
+  await indicator.stop();
+});
+
 test("createDiscordAdapter sendReply throws RetryableSendError when Discord rate limits", async () => {
   const adapter = createDiscordAdapter(
     {

@@ -97,16 +97,22 @@ export function _setAiGatewayTokenOverrideForTesting(value: string | undefined |
 }
 
 /**
- * Resolve an AI Gateway bearer token via OIDC.
+ * Resolve an AI Gateway bearer token.
  *
- * The token comes from `@vercel/oidc` — automatically provided on Vercel
- * deployments and available locally after `vercel link && vercel env pull`.
+ * Priority:
+ *  1. Static `AI_GATEWAY_API_KEY` env var (local dev / explicit override)
+ *  2. Vercel OIDC token (`@vercel/oidc` — available in Vercel Functions)
  *
- * Returns `undefined` when OIDC is unavailable.
+ * Returns `undefined` when no credential is available.
  */
 export async function getAiGatewayBearerTokenOptional(): Promise<string | undefined> {
   if (_aiGatewayTokenOverride !== null) {
     return _aiGatewayTokenOverride;
+  }
+
+  const staticKey = process.env.AI_GATEWAY_API_KEY?.trim();
+  if (staticKey) {
+    return staticKey;
   }
 
   try {

@@ -13,6 +13,15 @@ import {
   buildGatewayConfig,
   buildImageGenScript,
   buildImageGenSkill,
+  buildStartupScript,
+  buildWebSearchSkill,
+  buildWebSearchScript,
+  buildVisionSkill,
+  buildVisionScript,
+  buildTtsSkill,
+  buildTtsScript,
+  buildStructuredExtractSkill,
+  buildStructuredExtractScript,
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
   OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
@@ -20,6 +29,14 @@ import {
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
   OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
   OPENCLAW_IMAGE_GEN_SKILL_PATH,
+  OPENCLAW_WEB_SEARCH_SKILL_PATH,
+  OPENCLAW_WEB_SEARCH_SCRIPT_PATH,
+  OPENCLAW_VISION_SKILL_PATH,
+  OPENCLAW_VISION_SCRIPT_PATH,
+  OPENCLAW_TTS_SKILL_PATH,
+  OPENCLAW_TTS_SCRIPT_PATH,
+  OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
+  OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
@@ -669,8 +686,8 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
       }
     }
 
-    // Re-write config, skill files, and force-pair script so snapshots
-    // taken before code changes still get the latest versions.
+    // Re-write config, startup script, skill files, and force-pair script so
+    // snapshots taken before code changes still get the latest versions.
     await sandbox.writeFiles([
       {
         path: OPENCLAW_CONFIG_PATH,
@@ -679,6 +696,10 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
       {
         path: OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
         content: Buffer.from(buildForcePairScript()),
+      },
+      {
+        path: OPENCLAW_STARTUP_SCRIPT_PATH,
+        content: Buffer.from(buildStartupScript()),
       },
       {
         path: OPENCLAW_IMAGE_GEN_SKILL_PATH,
@@ -695,6 +716,38 @@ async function restoreSandboxFromSnapshot(origin: string): Promise<SingleMeta> {
       {
         path: OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
         content: Buffer.from(buildImageGenScript()),
+      },
+      {
+        path: OPENCLAW_WEB_SEARCH_SKILL_PATH,
+        content: Buffer.from(buildWebSearchSkill()),
+      },
+      {
+        path: OPENCLAW_WEB_SEARCH_SCRIPT_PATH,
+        content: Buffer.from(buildWebSearchScript()),
+      },
+      {
+        path: OPENCLAW_VISION_SKILL_PATH,
+        content: Buffer.from(buildVisionSkill()),
+      },
+      {
+        path: OPENCLAW_VISION_SCRIPT_PATH,
+        content: Buffer.from(buildVisionScript()),
+      },
+      {
+        path: OPENCLAW_TTS_SKILL_PATH,
+        content: Buffer.from(buildTtsSkill()),
+      },
+      {
+        path: OPENCLAW_TTS_SCRIPT_PATH,
+        content: Buffer.from(buildTtsScript()),
+      },
+      {
+        path: OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
+        content: Buffer.from(buildStructuredExtractSkill()),
+      },
+      {
+        path: OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
+        content: Buffer.from(buildStructuredExtractScript()),
       },
     ]);
 

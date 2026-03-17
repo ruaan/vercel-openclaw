@@ -8,6 +8,14 @@ export const OPENCLAW_AI_GATEWAY_API_KEY_PATH = `${OPENCLAW_STATE_DIR}/.ai-gatew
 export const OPENCLAW_FORCE_PAIR_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/.force-pair.mjs`;
 export const OPENCLAW_IMAGE_GEN_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/openai-image-gen/SKILL.md`;
 export const OPENCLAW_IMAGE_GEN_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/openai-image-gen/scripts/gen.mjs`;
+export const OPENCLAW_WEB_SEARCH_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/web-search/SKILL.md`;
+export const OPENCLAW_WEB_SEARCH_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/web-search/scripts/search.mjs`;
+export const OPENCLAW_VISION_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/vision/SKILL.md`;
+export const OPENCLAW_VISION_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/vision/scripts/analyze.mjs`;
+export const OPENCLAW_TTS_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/tts/SKILL.md`;
+export const OPENCLAW_TTS_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/tts/scripts/speak.mjs`;
+export const OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/structured-extract/SKILL.md`;
+export const OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/structured-extract/scripts/extract.mjs`;
 
 // The built-in skill shipped with the openclaw npm package uses a Python
 // gen.py script that requires a direct sk-* OPENAI_API_KEY.  We overwrite
@@ -76,8 +84,35 @@ export function buildGatewayConfig(
           primary: "vercel-ai-gateway/openai/gpt-5.3-chat",
           fallbacks: [
             "vercel-ai-gateway/anthropic/claude-haiku-4.5",
+            "vercel-ai-gateway/anthropic/claude-sonnet-4.6",
+            "vercel-ai-gateway/openai/gpt-5.2",
             "vercel-ai-gateway/google/gemini-2.5-flash",
           ],
+        },
+        models: {
+          // Anthropic
+          "vercel-ai-gateway/anthropic/claude-opus-4.6": { alias: "Claude Opus 4.6" },
+          "vercel-ai-gateway/anthropic/claude-sonnet-4.6": { alias: "Claude Sonnet 4.6" },
+          "vercel-ai-gateway/anthropic/claude-haiku-4.5": { alias: "Claude Haiku 4.5" },
+          // OpenAI
+          "vercel-ai-gateway/openai/gpt-5.3-chat": { alias: "GPT-5.3 Chat" },
+          "vercel-ai-gateway/openai/gpt-5.2": { alias: "GPT-5.2" },
+          "vercel-ai-gateway/openai/gpt-5-mini": { alias: "GPT-5 Mini" },
+          "vercel-ai-gateway/openai/o3": { alias: "o3" },
+          "vercel-ai-gateway/openai/o4-mini": { alias: "o4-mini" },
+          // Google
+          "vercel-ai-gateway/google/gemini-2.5-pro": { alias: "Gemini 2.5 Pro" },
+          "vercel-ai-gateway/google/gemini-2.5-flash": { alias: "Gemini 2.5 Flash" },
+          "vercel-ai-gateway/google/gemini-3-flash": { alias: "Gemini 3 Flash" },
+          "vercel-ai-gateway/google/gemini-3.1-flash-image-preview": { alias: "Gemini 3.1 Flash Image" },
+          // DeepSeek
+          "vercel-ai-gateway/deepseek/deepseek-v3.2": { alias: "DeepSeek V3.2" },
+          "vercel-ai-gateway/deepseek/deepseek-v3.2-thinking": { alias: "DeepSeek V3.2 Thinking" },
+          // xAI
+          "vercel-ai-gateway/xai/grok-4": { alias: "Grok 4" },
+          // Mistral
+          "vercel-ai-gateway/mistral/mistral-large-3": { alias: "Mistral Large 3" },
+          "vercel-ai-gateway/mistral/devstral-2": { alias: "Devstral 2" },
         },
       },
     };
@@ -89,10 +124,12 @@ export function buildGatewayConfig(
           apiKey: "sk-placeholder",
           api: "openai-completions",
           models: [
-            { id: "gpt-4o", name: "GPT-4o", input: ["text", "image"] },
             { id: "gpt-image-1", name: "GPT Image 1" },
             { id: "dall-e-3", name: "DALL-E 3" },
+            { id: "gpt-4o", name: "GPT-4o", input: ["text", "image"] },
             { id: "gpt-4o-mini-tts", name: "GPT-4o Mini TTS" },
+            { id: "text-embedding-3-small", name: "Text Embedding 3 Small" },
+            { id: "text-embedding-3-large", name: "Text Embedding 3 Large" },
           ],
         },
       },
@@ -419,5 +456,553 @@ if (isGemini) {
 
 if (saved.length === 0) { console.error("No images were saved"); process.exit(1); }
 for (const f of saved) console.log(f);
+`;
+}
+
+export function buildWebSearchSkill(): string {
+  return `---
+name: web-search
+description: Search the web via Vercel AI Gateway chat completions function calling
+user-invocable: true
+metadata:
+  openclaw:
+    emoji: "🔎"
+    requires:
+      bins: ["node"]
+      env: ["AI_GATEWAY_API_KEY"]
+    primaryEnv: AI_GATEWAY_API_KEY
+---
+
+# Web Search (Vercel AI Gateway)
+
+Search the web by calling the chat completions endpoint with a \`web_search\` function tool.
+
+## Run
+
+\`\`\`bash
+node {baseDir}/scripts/search.mjs --query "LATEST AI NEWS"
+\`\`\`
+
+Flags:
+
+\`\`\`bash
+node {baseDir}/scripts/search.mjs --query "best ramen in nyc"
+node {baseDir}/scripts/search.mjs "vercel sandbox network policy docs"
+node {baseDir}/scripts/search.mjs --query "openclaw setup" --model gpt-4o
+\`\`\`
+
+## Parameters
+
+- \`--query\` (required): Search query text. Positional args are also accepted.
+- \`--model\`: Chat model ID (default: gpt-4o)
+
+## Output
+
+Prints the requested search query and any model reasoning text.
+`;
+}
+
+export function buildWebSearchScript(): string {
+  return `import { readFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
+
+const { values, positionals } = parseArgs({
+  options: {
+    query: { type: "string" },
+    model: { type: "string", default: "gpt-4o" },
+  },
+  allowPositionals: true,
+});
+
+const query = (values.query ?? positionals.join(" ")).trim();
+if (!query) {
+  console.error("Usage: node search.mjs --query \\"query text\\" [--model MODEL]");
+  process.exit(1);
+}
+
+const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
+if (!apiKey) {
+  console.error("No AI Gateway API key found");
+  process.exit(1);
+}
+
+const response = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey },
+  body: JSON.stringify({
+    model: values.model,
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "web_search",
+          description: "Search the web",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+            },
+            required: ["query"],
+          },
+        },
+      },
+    ],
+    tool_choice: "auto",
+    messages: [{ role: "user", content: query }],
+  }),
+});
+
+if (!response.ok) {
+  const text = await response.text();
+  console.error("Web search failed (" + response.status + "): " + text);
+  process.exit(1);
+}
+
+const payload = await response.json();
+const message = payload?.choices?.[0]?.message;
+
+function extractText(content) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (Array.isArray(content)) {
+    return content
+      .filter((part) => part && part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text.trim())
+      .filter(Boolean)
+      .join("\\n");
+  }
+  return "";
+}
+
+const reasoning = extractText(message?.content);
+const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+const webSearchCall = toolCalls.find(
+  (toolCall) => toolCall?.type === "function" && toolCall?.function?.name === "web_search"
+);
+
+if (webSearchCall) {
+  let searchedQuery = query;
+  const toolArgs = webSearchCall?.function?.arguments;
+  if (typeof toolArgs === "string" && toolArgs.trim()) {
+    try {
+      const parsed = JSON.parse(toolArgs);
+      if (typeof parsed?.query === "string" && parsed.query.trim()) {
+        searchedQuery = parsed.query.trim();
+      }
+    } catch {}
+  }
+
+  console.log("Tool: web_search");
+  console.log("Query: " + searchedQuery);
+  if (reasoning) {
+    console.log("Reasoning: " + reasoning);
+  }
+  process.exit(0);
+}
+
+if (reasoning) {
+  console.log(reasoning);
+  process.exit(0);
+}
+
+console.log(JSON.stringify(payload, null, 2));
+`;
+}
+
+export function buildVisionSkill(): string {
+  return `---
+name: vision
+description: Analyze an image via Vercel AI Gateway chat completions (gpt-4o)
+user-invocable: true
+metadata:
+  openclaw:
+    emoji: "👁️"
+    requires:
+      bins: ["node"]
+      env: ["AI_GATEWAY_API_KEY"]
+    primaryEnv: AI_GATEWAY_API_KEY
+---
+
+# Vision (Vercel AI Gateway)
+
+Analyze images by sending a text prompt plus image data URI content to \`/v1/chat/completions\`.
+
+## Run
+
+\`\`\`bash
+node {baseDir}/scripts/analyze.mjs --image /path/to/image.png
+\`\`\`
+
+Flags:
+
+\`\`\`bash
+node {baseDir}/scripts/analyze.mjs --image ./photo.jpg
+node {baseDir}/scripts/analyze.mjs ./photo.jpg --prompt "Summarize what is happening"
+node {baseDir}/scripts/analyze.mjs --image ./diagram.webp --prompt "Extract key details"
+\`\`\`
+
+## Parameters
+
+- \`--image\` (required): Path to the image file. First positional arg is also accepted.
+- \`--prompt\`: Analysis instruction (default: "Describe this image in detail.")
+- \`--model\`: Vision-capable model (default: gpt-4o)
+
+## Output
+
+Prints the model's text description/analysis.
+`;
+}
+
+export function buildVisionScript(): string {
+  return `import { readFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
+import path from "node:path";
+
+function toImageMimeType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+const { values, positionals } = parseArgs({
+  options: {
+    image: { type: "string" },
+    prompt: { type: "string", default: "Describe this image in detail." },
+    model: { type: "string", default: "gpt-4o" },
+  },
+  allowPositionals: true,
+});
+
+const imagePath = (values.image ?? positionals[0] ?? "").trim();
+if (!imagePath) {
+  console.error("Usage: node analyze.mjs --image /path/to/file.png [--prompt TEXT] [--model MODEL]");
+  process.exit(1);
+}
+
+const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
+if (!apiKey) {
+  console.error("No AI Gateway API key found");
+  process.exit(1);
+}
+
+const image = await readFile(imagePath);
+const imageDataUri = "data:" + toImageMimeType(imagePath) + ";base64," + image.toString("base64");
+const response = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey },
+  body: JSON.stringify({
+    model: values.model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: values.prompt },
+          { type: "image_url", image_url: { url: imageDataUri } },
+        ],
+      },
+    ],
+  }),
+});
+
+if (!response.ok) {
+  const text = await response.text();
+  console.error("Vision request failed (" + response.status + "): " + text);
+  process.exit(1);
+}
+
+const payload = await response.json();
+const content = payload?.choices?.[0]?.message?.content;
+
+if (typeof content === "string" && content.trim()) {
+  console.log(content.trim());
+  process.exit(0);
+}
+
+if (Array.isArray(content)) {
+  const text = content
+    .filter((part) => part && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join("\\n");
+  if (text) {
+    console.log(text);
+    process.exit(0);
+  }
+}
+
+console.log(JSON.stringify(payload, null, 2));
+`;
+}
+
+export function buildTtsSkill(): string {
+  return `---
+name: tts
+description: Generate speech audio via Vercel AI Gateway /v1/audio/speech
+user-invocable: true
+metadata:
+  openclaw:
+    emoji: "🔊"
+    requires:
+      bins: ["node"]
+      env: ["AI_GATEWAY_API_KEY"]
+    primaryEnv: AI_GATEWAY_API_KEY
+---
+
+# Text-to-Speech (Vercel AI Gateway)
+
+Convert text to speech using OpenAI's \`gpt-4o-mini-tts\` model through Vercel AI Gateway.
+
+## Run
+
+\`\`\`bash
+node {baseDir}/scripts/speak.mjs --text "Hello from OpenClaw"
+\`\`\`
+
+Flags:
+
+\`\`\`bash
+node {baseDir}/scripts/speak.mjs --text "Daily summary" --voice alloy
+node {baseDir}/scripts/speak.mjs "Ship it!" --output ./ship-it.mp3
+\`\`\`
+
+## Parameters
+
+- \`--text\` (required): Input text to synthesize. Positional args are also accepted.
+- \`--voice\`: Voice ID (default: alloy)
+- \`--output\`: Output file path (default: speech.mp3)
+
+## Output
+
+Writes an MP3 file and prints a single \`MEDIA:\` line with the absolute output path.
+`;
+}
+
+export function buildTtsScript(): string {
+  // NOTE: Uses ai-gateway.vercel.sh instead of api.openai.com (unlike moltbot)
+  // so that OIDC/gateway tokens work correctly.
+  return `import { readFile, writeFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
+import path from "node:path";
+
+const { values, positionals } = parseArgs({
+  options: {
+    text: { type: "string" },
+    voice: { type: "string", default: "alloy" },
+    output: { type: "string", default: "speech.mp3" },
+  },
+  allowPositionals: true,
+});
+
+const text = (values.text ?? positionals.join(" ")).trim();
+if (!text) {
+  console.error("Usage: node speak.mjs --text \\"hello world\\" [--voice VOICE] [--output FILE]");
+  process.exit(1);
+}
+
+const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
+if (!apiKey) {
+  console.error("No AI Gateway API key found");
+  process.exit(1);
+}
+
+const response = await fetch("https://ai-gateway.vercel.sh/v1/audio/speech", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey },
+  body: JSON.stringify({
+    model: "gpt-4o-mini-tts",
+    voice: values.voice,
+    input: text,
+    format: "mp3",
+  }),
+});
+
+if (!response.ok) {
+  const errorText = await response.text();
+  console.error("TTS request failed (" + response.status + "): " + errorText);
+  process.exit(1);
+}
+
+const resolvedOutputPath = path.resolve(values.output);
+const audio = Buffer.from(await response.arrayBuffer());
+await writeFile(resolvedOutputPath, audio);
+console.log("MEDIA:" + resolvedOutputPath);
+`;
+}
+
+export function buildStructuredExtractSkill(): string {
+  return `---
+name: structured-extract
+description: Deterministic JSON extraction via chat completions json_schema format
+user-invocable: true
+metadata:
+  openclaw:
+    emoji: "🧩"
+    requires:
+      bins: ["node"]
+      env: ["AI_GATEWAY_API_KEY"]
+    primaryEnv: AI_GATEWAY_API_KEY
+---
+
+# Structured Extract (Vercel AI Gateway)
+
+Extract deterministic JSON from text using \`response_format: { type: "json_schema" }\`.
+
+## Run
+
+\`\`\`bash
+node {baseDir}/scripts/extract.mjs --text "Invoice 123 total is $45.67" --schema '{"type":"object","properties":{"invoice":{"type":"string"},"total":{"type":"number"}},"required":["invoice","total"],"additionalProperties":false}'
+\`\`\`
+
+Flags:
+
+\`\`\`bash
+node {baseDir}/scripts/extract.mjs --text "..." --schema '{...}'
+node {baseDir}/scripts/extract.mjs --text "..." --schema-file ./schema.json
+node {baseDir}/scripts/extract.mjs --text "..." --schema-file ./schema.json --model gpt-4o-mini
+\`\`\`
+
+## Parameters
+
+- \`--text\` (required): Source text to extract from.
+- \`--schema\`: JSON schema as an inline JSON string.
+- \`--schema-file\`: Path to a JSON schema file.
+- \`--model\`: Chat model ID (default: gpt-4o)
+
+## Output
+
+Prints parsed structured JSON matching the provided schema.
+`;
+}
+
+export function buildStructuredExtractScript(): string {
+  return `import { readFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
+
+function parseSchema(input) {
+  try {
+    return JSON.parse(input);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error("Invalid JSON schema: " + reason);
+  }
+}
+
+function extractTextContent(content) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .filter((part) => part && typeof part === "object")
+    .map((part) => {
+      if (part.type === "text" && typeof part.text === "string") {
+        return part.text.trim();
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\\n")
+    .trim();
+}
+
+const { values } = parseArgs({
+  options: {
+    text: { type: "string" },
+    schema: { type: "string" },
+    "schema-file": { type: "string" },
+    model: { type: "string", default: "gpt-4o" },
+  },
+});
+
+const inputText = (values.text ?? "").trim();
+if (!inputText) {
+  console.error("Usage: node extract.mjs --text \\"source text\\" (--schema '{...}' | --schema-file ./schema.json) [--model MODEL]");
+  process.exit(1);
+}
+
+if (!values.schema && !values["schema-file"]) {
+  console.error("Either --schema or --schema-file is required");
+  process.exit(1);
+}
+
+const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
+if (!apiKey) {
+  console.error("No AI Gateway API key found");
+  process.exit(1);
+}
+
+const schemaSource = values.schema ?? await readFile(values["schema-file"], "utf8");
+let schema;
+try {
+  schema = parseSchema(schemaSource);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+
+const response = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey },
+  body: JSON.stringify({
+    model: values.model,
+    messages: [
+      {
+        role: "system",
+        content: "Extract structured data from user text and only return valid JSON matching the provided schema.",
+      },
+      {
+        role: "user",
+        content: inputText,
+      },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "extraction",
+        schema,
+      },
+    },
+  }),
+});
+
+if (!response.ok) {
+  const errorText = await response.text();
+  console.error("Structured extract request failed (" + response.status + "): " + errorText);
+  process.exit(1);
+}
+
+const payload = await response.json();
+const content = payload?.choices?.[0]?.message?.content;
+const contentText = extractTextContent(content);
+
+if (!contentText) {
+  console.error("Structured extract response missing content");
+  process.exit(1);
+}
+
+try {
+  const parsed = JSON.parse(contentText);
+  console.log(JSON.stringify(parsed, null, 2));
+} catch (error) {
+  const reason = error instanceof Error ? error.message : String(error);
+  console.error("Structured extract response was not valid JSON: " + reason);
+  process.exit(1);
+}
 `;
 }

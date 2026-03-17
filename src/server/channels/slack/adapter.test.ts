@@ -8,6 +8,7 @@ import {
   getSlackUrlVerificationChallenge,
   isValidSlackSignature,
 } from "@/server/channels/slack/adapter";
+import type { SlackExtractedMessage } from "@/server/channels/slack/adapter";
 import {
   _resetLogBuffer,
   getFilteredServerLogs,
@@ -112,6 +113,133 @@ test("createSlackAdapter sendReply throws RetryableSendError when Slack rate lim
       return true;
     },
   );
+});
+
+test("createSlackAdapter startProcessingIndicator posts and deletes a thinking placeholder", async () => {
+  const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+
+  const adapter = createSlackAdapter(
+    {
+      signingSecret: "secret",
+      botToken: "xoxb-token",
+    },
+    {
+      fetchFn: async (input, init) => {
+        fetchCalls.push({ input, init });
+
+        if (String(input).includes("chat.postMessage")) {
+          return new Response(JSON.stringify({ ok: true, ts: "999.01" }), {
+            status: 200,
+          });
+        }
+
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+        });
+      },
+    },
+  );
+
+  const message: SlackExtractedMessage = {
+    text: "hello from slack",
+    channel: "C123",
+    threadTs: "123.45",
+    ts: "123.45",
+  };
+
+  const indicator = await adapter.startProcessingIndicator?.(message);
+
+  assert.equal(message.processingPlaceholderTs, "999.01");
+  assert.equal(fetchCalls.length, 1);
+  assert.ok(String(fetchCalls[0].input).includes("chat.postMessage"));
+
+  const postBody = JSON.parse(fetchCalls[0].init?.body as string);
+  assert.equal(postBody.text, "_Thinking..._");
+  assert.equal(postBody.channel, "C123");
+  assert.equal(postBody.thread_ts, "123.45");
+
+  await indicator?.stop();
+
+  assert.equal(message.processingPlaceholderTs, undefined);
+  assert.equal(fetchCalls.length, 2);
+  assert.ok(String(fetchCalls[1].input).includes("chat.delete"));
+
+  const deleteBody = JSON.parse(fetchCalls[1].init?.body as string);
+  assert.equal(deleteBody.channel, "C123");
+  assert.equal(deleteBody.ts, "999.01");
+});
+
+test("createSlackAdapter startProcessingIndicator stop() tolerates message_not_found", async () => {
+  const adapter = createSlackAdapter(
+    {
+      signingSecret: "secret",
+      botToken: "xoxb-token",
+    },
+    {
+      fetchFn: async (input) => {
+        if (String(input).includes("chat.postMessage")) {
+          return new Response(JSON.stringify({ ok: true, ts: "999.02" }), {
+            status: 200,
+          });
+        }
+
+        return new Response(
+          JSON.stringify({ ok: false, error: "message_not_found" }),
+          { status: 200 },
+        );
+      },
+    },
+  );
+
+  const message: SlackExtractedMessage = {
+    text: "hello",
+    channel: "C123",
+    threadTs: "123.45",
+    ts: "123.45",
+  };
+
+  const indicator = await adapter.startProcessingIndicator?.(message);
+  // Should not throw despite message_not_found
+  await indicator?.stop();
+  assert.equal(message.processingPlaceholderTs, undefined);
+});
+
+test("createSlackAdapter startProcessingIndicator stop() is idempotent", async () => {
+  let deleteCalls = 0;
+
+  const adapter = createSlackAdapter(
+    {
+      signingSecret: "secret",
+      botToken: "xoxb-token",
+    },
+    {
+      fetchFn: async (input) => {
+        if (String(input).includes("chat.postMessage")) {
+          return new Response(JSON.stringify({ ok: true, ts: "999.03" }), {
+            status: 200,
+          });
+        }
+        if (String(input).includes("chat.delete")) {
+          deleteCalls += 1;
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+    },
+  );
+
+  const message: SlackExtractedMessage = {
+    text: "hello",
+    channel: "C123",
+    threadTs: "123.45",
+    ts: "123.45",
+  };
+
+  const indicator = await adapter.startProcessingIndicator?.(message);
+  await indicator?.stop();
+  await indicator?.stop();
+  // Second stop() should be a no-op since processingPlaceholderTs was cleared
+  assert.equal(deleteCalls, 1);
 });
 
 test("createSlackAdapter extractMessage returns empty history and logs when thread fetch fails", async () => {

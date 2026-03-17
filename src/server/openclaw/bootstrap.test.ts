@@ -11,6 +11,14 @@ import {
   OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
   OPENCLAW_IMAGE_GEN_SKILL_PATH,
+  OPENCLAW_WEB_SEARCH_SKILL_PATH,
+  OPENCLAW_WEB_SEARCH_SCRIPT_PATH,
+  OPENCLAW_VISION_SKILL_PATH,
+  OPENCLAW_VISION_SCRIPT_PATH,
+  OPENCLAW_TTS_SKILL_PATH,
+  OPENCLAW_TTS_SCRIPT_PATH,
+  OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
+  OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
@@ -103,6 +111,14 @@ test("setupOpenClaw writes all required config files", async () => {
       OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
       OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
       OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
+      OPENCLAW_WEB_SEARCH_SKILL_PATH,
+      OPENCLAW_WEB_SEARCH_SCRIPT_PATH,
+      OPENCLAW_VISION_SKILL_PATH,
+      OPENCLAW_VISION_SCRIPT_PATH,
+      OPENCLAW_TTS_SKILL_PATH,
+      OPENCLAW_TTS_SCRIPT_PATH,
+      OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
+      OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
     ];
 
     for (const p of expectedPaths) {
@@ -937,4 +953,100 @@ test("detectDrift returns true for range spec", () => {
 
 test("detectDrift returns true when installedVersion is null", () => {
   assert.equal(detectDrift("openclaw@1.2.3", null), true);
+});
+
+// ---------------------------------------------------------------------------
+// setupOpenClaw — new skill file contents
+// ---------------------------------------------------------------------------
+
+test("setupOpenClaw writes web-search skill and script with expected content", async () => {
+  const h = createScenarioHarness();
+  try {
+    const handle = await createHandle(h);
+
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      apiKey: "ak",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    const skill = handle.writtenFiles.find((f) => f.path === OPENCLAW_WEB_SEARCH_SKILL_PATH);
+    assert.ok(skill, "web-search skill file not written");
+    assert.ok(skill.content.toString().includes("name: web-search"));
+
+    const script = handle.writtenFiles.find((f) => f.path === OPENCLAW_WEB_SEARCH_SCRIPT_PATH);
+    assert.ok(script, "web-search script file not written");
+    assert.ok(script.content.toString().includes("web_search"));
+  } finally {
+    h.teardown();
+  }
+});
+
+test("setupOpenClaw writes vision skill and script with expected content", async () => {
+  const h = createScenarioHarness();
+  try {
+    const handle = await createHandle(h);
+
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      apiKey: "ak",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    const skill = handle.writtenFiles.find((f) => f.path === OPENCLAW_VISION_SKILL_PATH);
+    assert.ok(skill, "vision skill file not written");
+    assert.ok(skill.content.toString().includes("name: vision"));
+
+    const script = handle.writtenFiles.find((f) => f.path === OPENCLAW_VISION_SCRIPT_PATH);
+    assert.ok(script, "vision script file not written");
+    assert.ok(script.content.toString().includes("Describe this image in detail."));
+  } finally {
+    h.teardown();
+  }
+});
+
+test("setupOpenClaw writes tts skill and script with expected content", async () => {
+  const h = createScenarioHarness();
+  try {
+    const handle = await createHandle(h);
+
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      apiKey: "ak",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    const skill = handle.writtenFiles.find((f) => f.path === OPENCLAW_TTS_SKILL_PATH);
+    assert.ok(skill, "tts skill file not written");
+    assert.ok(skill.content.toString().includes("name: tts"));
+
+    const script = handle.writtenFiles.find((f) => f.path === OPENCLAW_TTS_SCRIPT_PATH);
+    assert.ok(script, "tts script file not written");
+    assert.ok(script.content.toString().includes("MEDIA:"));
+  } finally {
+    h.teardown();
+  }
+});
+
+test("setupOpenClaw writes structured-extract skill and script with expected content", async () => {
+  const h = createScenarioHarness();
+  try {
+    const handle = await createHandle(h);
+
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      apiKey: "ak",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    const skill = handle.writtenFiles.find((f) => f.path === OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH);
+    assert.ok(skill, "structured-extract skill file not written");
+    assert.ok(skill.content.toString().includes("name: structured-extract"));
+
+    const script = handle.writtenFiles.find((f) => f.path === OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH);
+    assert.ok(script, "structured-extract script file not written");
+    assert.ok(script.content.toString().includes("json_schema"));
+  } finally {
+    h.teardown();
+  }
 });

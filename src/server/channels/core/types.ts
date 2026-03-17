@@ -61,6 +61,7 @@ export interface PlatformAdapter<
     message: TMessage,
   ): Promise<GatewayMessage[]> | GatewayMessage[];
   getSessionKey?(message: TMessage): string;
+  startProcessingIndicator?(message: TMessage): Promise<import("@/server/channels/core/processing-indicator").ProcessingIndicator>;
   sendTypingIndicator?(message: TMessage): Promise<void>;
   clearTypingIndicator?(message: TMessage): Promise<void>;
 }

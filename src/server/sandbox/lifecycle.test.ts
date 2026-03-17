@@ -637,7 +637,7 @@ async function triggerRestore(
   }
 }
 
-test("restoreSandboxFromSnapshot writes config, force-pair, image-gen-skill, image-gen-script, builtin-image-gen-skill, builtin-image-gen-script (6 files via writeFiles)", async () => {
+test("restoreSandboxFromSnapshot writes config, startup, force-pair, and all skill files via writeFiles", async () => {
   const fake = new FakeSandboxController();
   const originalFetch = globalThis.fetch;
 
@@ -660,11 +660,13 @@ test("restoreSandboxFromSnapshot writes config, force-pair, image-gen-skill, ima
       const writtenPaths = handle.writtenFiles.map((f) => f.path);
       assert.ok(writtenPaths.includes(OPENCLAW_CONFIG_PATH), "Should write config");
       assert.ok(writtenPaths.includes(OPENCLAW_FORCE_PAIR_SCRIPT_PATH), "Should write force-pair script");
+      assert.ok(writtenPaths.includes(OPENCLAW_STARTUP_SCRIPT_PATH), "Should write startup script");
       assert.ok(writtenPaths.includes(OPENCLAW_IMAGE_GEN_SKILL_PATH), "Should write image-gen skill");
       assert.ok(writtenPaths.includes(OPENCLAW_IMAGE_GEN_SCRIPT_PATH), "Should write image-gen script");
       assert.ok(writtenPaths.includes(OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH), "Should write builtin image-gen skill");
       assert.ok(writtenPaths.includes(OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH), "Should write builtin image-gen script");
-      assert.equal(handle.writtenFiles.length, 6, "Should write exactly 6 files");
+      // 15 total: config + force-pair + startup + image-gen (4) + web-search (2) + vision (2) + tts (2) + structured-extract (2)
+      assert.equal(handle.writtenFiles.length, 15, "Should write exactly 15 files");
     } finally {
       globalThis.fetch = originalFetch;
     }

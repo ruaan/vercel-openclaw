@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { ChannelName } from "@/shared/channels";
 import type { SingleMeta } from "@/shared/types";
 import { extractReply, toPlainText } from "@/server/channels/core/reply";
+import { startPlatformProcessingIndicator } from "@/server/channels/core/processing-indicator";
 import type {
   ExtractedChannelMessage,
   GatewayMessage,
@@ -25,6 +26,7 @@ import {
 } from "@/server/sandbox/lifecycle";
 import { getInitializedMeta, getStore } from "@/server/store/store";
 
+const CHANNEL_PROCESSING_INDICATOR_DELAY_MS = 800;
 const DRAIN_LOCK_TTL_SECONDS = 10 * 60;
 const CHANNEL_DEDUP_TTL_SECONDS = 5 * 60;
 const CHANNEL_VISIBILITY_TIMEOUT_SECONDS = 20 * 60;
@@ -331,20 +333,21 @@ export async function processChannelJob<
   const requestTimeoutMs =
     options.requestTimeoutMs ?? DEFAULT_CHANNEL_REQUEST_TIMEOUT_MS;
 
-  let typingStarted = false;
-  try {
-    if (adapter.sendTypingIndicator) {
-      try {
-        await adapter.sendTypingIndicator(message);
-        typingStarted = true;
-      } catch (typingError) {
-        logWarn("channels.typing_indicator_failed", {
+  const processingIndicator = await startPlatformProcessingIndicator(
+    adapter,
+    message,
+    {
+      delayMs: CHANNEL_PROCESSING_INDICATOR_DELAY_MS,
+      onError: (indicatorError) => {
+        logWarn("channels.processing_indicator_failed", {
           channel: options.channel,
-          error: formatError(typingError),
+          error: formatError(indicatorError),
         });
-      }
-    }
+      },
+    },
+  );
 
+  try {
     logInfo("channels.wake_requested", {
       channel: options.channel,
       sandboxReadyTimeoutMs,
@@ -399,9 +402,7 @@ export async function processChannelJob<
       await appendSessionHistory(options.channel, sessionKey, message.text, replyText);
     }
   } finally {
-    if (typingStarted && adapter.clearTypingIndicator) {
-      await adapter.clearTypingIndicator(message).catch(() => {});
-    }
+    await processingIndicator.stop().catch(() => {});
   }
 }
 

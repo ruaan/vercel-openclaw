@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 
 import type { DiscordChannelConfig } from "@/shared/channels";
+import { startKeepAlive } from "@/server/channels/core/processing-indicator";
 import { RetryableSendError } from "@/server/channels/core/types";
 import type {
   ExtractedChannelMessage,
@@ -447,6 +448,12 @@ export function createDiscordAdapter(
           userId,
         },
       } as const;
+    },
+
+    async startProcessingIndicator(message) {
+      return startKeepAlive(async () => {
+        await triggerTyping(message.channelId, config.botToken, { fetchFn });
+      }, 8_000);
     },
 
     async sendTypingIndicator(message) {
