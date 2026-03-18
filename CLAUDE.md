@@ -73,7 +73,7 @@ Channel phases (`channelRoundTrip`, `channelWakeFromSleep`) read signing secrets
 
 | Route | Purpose |
 | ----- | ------- |
-| `/api/admin/preflight` | Deploy-readiness report: public origin, webhook bypass, durable state, AI Gateway auth (config-only) |
+| `/api/admin/preflight` | Deploy-readiness report: public origin, webhook bypass, durable state, AI Gateway OIDC probe |
 | `/api/admin/launch-verify` | Full launch verification: preflight + queue delivery probe + sandbox ensure + chat completions + wake from sleep (destructive) |
 | `/api/queues/launch-verify` | Private Vercel Queues consumer for launch verification probes (not publicly reachable on Vercel) |
 | `/api/admin/ensure` | Trigger sandbox create or restore |
@@ -106,7 +106,7 @@ All channel webhook URL builders (`buildSlackWebhookUrl`, `buildTelegramWebhookU
 
 Machine-checkable config readiness report consumed by `/api/admin/preflight`.
 
-Checks: `public-origin`, `webhook-bypass`, `store`, `ai-gateway`, `drain-recovery` (always passes — Vercel Queues is the primary delivery mechanism).
+Checks: `public-origin`, `webhook-bypass` (always passes — admin-secret auth handles webhooks without bypass), `store`, `ai-gateway`, `drain-recovery` (always passes — Vercel Queues is the primary delivery mechanism), `openclaw-package-spec` (fail on Vercel when missing or unpinned), `auth-config` (fail when sign-in-with-vercel vars are missing).
 
 The authoritative readiness check is `POST /api/admin/launch-verify` (`src/app/api/admin/launch-verify/route.ts`), which runs preflight as its first phase and then verifies runtime behavior: Vercel Queue loopback delivery via `/api/queues/launch-verify`, sandbox ensure, gateway chat completions, and wake-from-sleep recovery (destructive mode). `scripts/check-deploy-readiness.mjs` consumes launch-verify by default.
 
@@ -121,7 +121,7 @@ Store requirement policy: missing Upstash is a hard fail (`status: "fail"`) on V
   publicOrigin: string | null;
   webhookBypassEnabled: boolean;
   storeBackend: "upstash" | "memory";
-  aiGatewayAuth: "oidc" | "api-key" | "unavailable";
+  aiGatewayAuth: "oidc" | "unavailable";
   cronSecretConfigured: boolean;
   publicOriginResolution: PublicOriginResolution | null;
   webhookDiagnostics: { slack, telegram, discord };
@@ -325,7 +325,7 @@ This writes the OIDC credentials that `@vercel/queue` needs for local `send` and
 Hard blockers (cause `canConnect: false`):
 
 - canonical public HTTPS webhook URL cannot be resolved
-- AI Gateway auth is not OIDC on a Vercel deployment (falls back to `api-key` or `unavailable`)
+- AI Gateway auth is not OIDC on a Vercel deployment (`unavailable`)
 - missing Upstash store on a Vercel deployment (durable state required for channel reliability)
 
 Warnings only (do not block connect):
@@ -453,13 +453,13 @@ These variables are checked by `buildDeploymentContract()` in `src/server/deploy
 | -------- | ------- | ------ |
 | `UPSTASH_REDIS_REST_URL` | All deployments | Required for persistent state. Provision via Vercel Marketplace. |
 | `UPSTASH_REDIS_REST_TOKEN` | All deployments | Required for persistent state. Paired with the URL above. |
-| `OPENCLAW_PACKAGE_SPEC` | All environments | Optional. Defaults to `openclaw@latest` when unset. Set to a pinned version like `openclaw@1.2.3` for deterministic builds and comparable restore benchmarks. |
+| `OPENCLAW_PACKAGE_SPEC` | All environments | Optional locally, **required on Vercel**. Defaults to `openclaw@latest` when unset in local dev. On Vercel deployments the deployment contract **fails** when unset or unpinned (e.g. `openclaw@latest`); the runtime still falls back to `openclaw@latest` with a warning log. Pin to an exact version like `openclaw@1.2.3` for deterministic sandbox restores. |
 | `OPENCLAW_SANDBOX_VCPUS` | All environments | Optional. vCPU count for sandbox create and snapshot restore (valid: 1, 2, 4, 8; default: 1). Keep this fixed during benchmarks so restore timings stay comparable. |
 | `NEXT_PUBLIC_VERCEL_APP_CLIENT_ID` | `sign-in-with-vercel` mode | Required for OAuth flow. |
 | `VERCEL_APP_CLIENT_SECRET` | `sign-in-with-vercel` mode | Required for OAuth flow. |
 | `SESSION_SECRET` | `sign-in-with-vercel` on Vercel | Required. Must be explicitly set — do not rely on silent derivation from the Upstash token. |
 
-`scripts/check-verifier-contract.mjs` enforces that every env name in the deployment contract also appears in `README.md`, `CLAUDE.md`, and `.env.example`.
+`scripts/check-verifier-contract.mjs` enforces that every env name in the deployment contract also appears in `README.md`, `CLAUDE.md`, `CONTRIBUTING.md`, and `.env.example`. It uses word-boundary matching so that e.g. `BASE_DOMAIN` is not falsely found inside `NEXT_PUBLIC_BASE_DOMAIN`.
 
 ## Current sharp edges
 

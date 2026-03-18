@@ -111,12 +111,13 @@ Full reference:
 | `NEXT_PUBLIC_VERCEL_APP_CLIENT_ID` | Sign-in mode | OAuth client ID |
 | `VERCEL_APP_CLIENT_SECRET` | Sign-in mode | OAuth client secret |
 | `SESSION_SECRET` | Sign-in mode | Cookie encryption secret |
-| `OPENCLAW_PACKAGE_SPEC` | No | OpenClaw version to install (defaults to `openclaw@latest`). Pin it for repeatable benchmark baselines. |
+| `OPENCLAW_PACKAGE_SPEC` | No | OpenClaw version to install (defaults to `openclaw@latest`). On Vercel the deployment contract **fails** when unset or unpinned (e.g. `openclaw@latest`); the runtime still falls back to `openclaw@latest` with a warning log. Pin to `openclaw@1.2.3` for deterministic restores and repeatable benchmarks. |
 | `OPENCLAW_SANDBOX_VCPUS` | No | vCPU count for sandbox create and snapshot restore (valid: 1, 2, 4, 8; default: 1). Keep fixed during benchmarks. |
 | `VERCEL_AUTOMATION_BYPASS_SECRET` | No | Appended to webhook URLs to pass Deployment Protection |
 | `CRON_SECRET` | No | Enables `/api/cron/drain-channels` diagnostic backstop |
 | `NEXT_PUBLIC_APP_URL` | No | Base origin override |
 | `NEXT_PUBLIC_BASE_DOMAIN` | No | Preferred external host for webhook URLs |
+| `BASE_DOMAIN` | No | Legacy alias for `NEXT_PUBLIC_BASE_DOMAIN` |
 | `KV_REST_API_URL` | No | Alias for Upstash REST URL |
 | `KV_REST_API_TOKEN` | No | Alias for Upstash REST token |
 

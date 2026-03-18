@@ -52,6 +52,25 @@ By default the app uses a simple admin secret. If you'd prefer OAuth login throu
 
 Set the OAuth callback URL to `https://<your-domain>/api/auth/callback`.
 
+## Optional: pin the OpenClaw version
+
+By default the app installs `openclaw@latest`, which is non-deterministic across deploys. On Vercel deployments the deployment contract **fails** when `OPENCLAW_PACKAGE_SPEC` is unset or unpinned (e.g. `openclaw@latest`). The runtime still falls back to `openclaw@latest` with a warning log, but the contract marks the deployment as unhealthy.
+
+| Variable | Purpose |
+| -------- | ------- |
+| `OPENCLAW_PACKAGE_SPEC` | Pin to an exact version like `openclaw@1.2.3` for deterministic sandbox restores and comparable benchmarks. When unset, the runtime falls back to `openclaw@latest` but the deployment contract fails on Vercel. |
+| `OPENCLAW_SANDBOX_VCPUS` | vCPU count for sandbox create/restore (1, 2, 4, or 8; default: 1). Keep fixed during benchmarks. |
+
+## Optional: override the public origin
+
+The app resolves its canonical public URL from Vercel system variables automatically. If you need to override it (e.g. custom domain, non-Vercel host), set one of:
+
+| Variable | Purpose |
+| -------- | ------- |
+| `NEXT_PUBLIC_APP_URL` | Full origin override, e.g. `https://my-app.example.com` |
+| `NEXT_PUBLIC_BASE_DOMAIN` | Preferred external host for webhook URLs |
+| `BASE_DOMAIN` | Legacy alias for `NEXT_PUBLIC_BASE_DOMAIN` |
+
 ## Local development
 
 ```bash
