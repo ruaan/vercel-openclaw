@@ -424,9 +424,12 @@ async function refreshAiGatewayToken(sandbox: SandboxHandle, sandboxId: string):
   logInfo("sandbox.token_refresh.token_written", { sandboxId });
 
   // Use the on-disk startup script which reads token files, kills old gateway,
-  // and starts a fresh one. This is the same script used during bootstrap.
-  const restartResult = await sandbox.runCommand("bash", [
-    OPENCLAW_STARTUP_SCRIPT_PATH,
+  // and starts a fresh one. Unset the baked-in AI_GATEWAY_API_KEY env var so the
+  // script reads the freshly-written file instead of the stale env var.
+  const restartResult = await sandbox.runCommand("env", [
+    "-u", "AI_GATEWAY_API_KEY",
+    "-u", "OPENAI_API_KEY",
+    "bash", OPENCLAW_STARTUP_SCRIPT_PATH,
   ]);
 
   const restartOutput = await restartResult.output("both").catch(() => "");
