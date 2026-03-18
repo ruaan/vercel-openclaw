@@ -2,16 +2,23 @@ import { randomBytes } from "node:crypto";
 
 import { requireMutationAuth, authJsonOk } from "@/server/auth/route-auth";
 import { ApiError, jsonError } from "@/shared/http";
-import { getInitializedMeta, mutateMeta } from "@/server/store/store";
-import { signSlackPayload } from "@/server/smoke/remote-crypto";
+import { getInitializedMeta, getStore, mutateMeta } from "@/server/store/store";
+import {
+  generateDiscordSmokeKeyPair,
+  signDiscordPayload,
+  signSlackPayload,
+} from "@/server/smoke/remote-crypto";
 import { logInfo, logWarn } from "@/server/log";
+
+const DISCORD_SMOKE_PRIVATE_KEY_STORE_KEY =
+  "smoke:discord:private-key-pkcs8-pem";
 
 /**
  * Smoke testing endpoint for channel webhooks.
  *
  * PUT  — Configure test channels with generated credentials (bypasses
- *        platform API validation). Sets up Slack and Telegram with
- *        random signing secrets so smoke webhooks can be sent.
+ *        platform API validation). Sets up Slack, Telegram, and Discord
+ *        with generated credentials so smoke webhooks can be sent.
  *
  * POST — Sign and send a webhook payload to the local webhook endpoint.
  *        Raw secrets never leave the server.
@@ -31,6 +38,7 @@ export async function PUT(request: Request): Promise<Response> {
     const now = Date.now();
     const slackSigningSecret = randomBytes(32).toString("hex");
     const telegramWebhookSecret = randomBytes(24).toString("base64url");
+    const discordKeys = generateDiscordSmokeKeyPair();
     const origin = new URL(request.url).origin;
 
     await mutateMeta((meta) => {
@@ -49,10 +57,27 @@ export async function PUT(request: Request): Promise<Response> {
         botUsername: "smoke_test_bot",
         configuredAt: now,
       };
+      meta.channels.discord = {
+        publicKey: discordKeys.publicKeyHex,
+        applicationId: "discord-smoke-app",
+        botToken: "discord-smoke-bot-token",
+        configuredAt: now,
+      };
     });
+    await getStore().setValue(
+      DISCORD_SMOKE_PRIVATE_KEY_STORE_KEY,
+      discordKeys.privateKeyPkcs8Pem,
+    );
 
-    logInfo("admin.smoke_channels_configured", { slack: true, telegram: true });
-    return authJsonOk({ configured: true, channels: ["slack", "telegram"] }, auth);
+    logInfo("admin.smoke_channels_configured", {
+      slack: true,
+      telegram: true,
+      discord: true,
+    });
+    return authJsonOk(
+      { configured: true, channels: ["slack", "telegram", "discord"] },
+      auth,
+    );
   } catch (error) {
     logWarn("admin.smoke_channels_configure_failed", {
       error: error instanceof Error ? error.message : String(error),
@@ -117,7 +142,45 @@ export async function POST(request: Request): Promise<Response> {
       return authJsonOk({ configured: true, sent: res.ok, status: res.status, channel }, auth);
     }
 
-    return jsonError(new ApiError(400, "UNSUPPORTED_CHANNEL", "Only slack and telegram are supported."));
+    if (channel === "discord") {
+      const config = meta.channels.discord;
+      if (!config) {
+        return authJsonOk({ configured: false, sent: false, channel }, auth);
+      }
+
+      const privateKeyPkcs8Pem = await getStore().getValue<string>(
+        DISCORD_SMOKE_PRIVATE_KEY_STORE_KEY,
+      );
+      if (!privateKeyPkcs8Pem) {
+        return jsonError(
+          new ApiError(
+            409,
+            "DISCORD_SMOKE_KEY_MISSING",
+            "Discord smoke signing key is not configured.",
+          ),
+        );
+      }
+
+      const headers = signDiscordPayload(privateKeyPkcs8Pem, payloadBody);
+      const res = await fetch(`${origin}/api/channels/discord/webhook`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: payloadBody,
+      });
+      logInfo("admin.smoke_webhook_sent", { channel, status: res.status });
+      return authJsonOk(
+        { configured: true, sent: res.ok, status: res.status, channel },
+        auth,
+      );
+    }
+
+    return jsonError(
+      new ApiError(
+        400,
+        "UNSUPPORTED_CHANNEL",
+        "Only slack, telegram, and discord are supported.",
+      ),
+    );
   } catch (error) {
     logWarn("admin.smoke_webhook_failed", {
       channel,
@@ -139,7 +202,9 @@ export async function DELETE(request: Request): Promise<Response> {
     await mutateMeta((meta) => {
       meta.channels.slack = null;
       meta.channels.telegram = null;
+      meta.channels.discord = null;
     });
+    await getStore().deleteValue(DISCORD_SMOKE_PRIVATE_KEY_STORE_KEY);
     logInfo("admin.smoke_channels_removed", {});
     return authJsonOk({ removed: true }, auth);
   } catch (error) {
