@@ -98,7 +98,7 @@ function contractRequirementToIssue(
 ): ChannelConnectabilityIssue {
   const label = CHANNEL_LABELS[channel];
   return {
-    id: requirement.id as ChannelConnectabilityIssue["id"],
+    id: requirement.id,
     status: requirement.status,
     message:
       requirement.status === "fail"
@@ -109,12 +109,21 @@ function contractRequirementToIssue(
   };
 }
 
+/**
+ * Contract requirements that affect determinism or benchmarking but do not
+ * prevent channels from functioning. These are excluded from channel
+ * connectability checks.
+ */
+const NON_CHANNEL_BLOCKING_REQUIREMENTS: Set<string> = new Set([
+  "openclaw-package-spec",
+]);
+
 function collectContractIssues(
   channel: ChannelName,
   contract: { requirements: DeploymentRequirement[] },
 ): ChannelConnectabilityIssue[] {
   return contract.requirements
-    .filter((r) => r.status !== "pass")
+    .filter((r) => r.status !== "pass" && !NON_CHANNEL_BLOCKING_REQUIREMENTS.has(r.id))
     .map((r) => contractRequirementToIssue(channel, r));
 }
 
@@ -181,11 +190,17 @@ export async function buildChannelPrerequisite(
     });
   }
 
+  // Log which contract requirement IDs were consumed/excluded so drift is inspectable.
+  const excludedContractIds = contract.requirements
+    .filter((r) => r.status !== "pass" && NON_CHANNEL_BLOCKING_REQUIREMENTS.has(r.id))
+    .map((r) => `${r.id}:${r.status}`);
+
   logInfo("channel_prerequisite.built", {
     channel,
     status: summarizeStatus(issues),
     issueCount: issues.length,
     issueIds: issues.map((i) => i.id),
+    excludedContractIds,
   });
 
   return buildResult(channel, webhookUrl, issues);

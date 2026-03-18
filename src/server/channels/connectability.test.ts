@@ -5,6 +5,7 @@ import {
   buildChannelConnectability,
   buildChannelPrerequisite,
 } from "@/server/channels/connectability";
+import { buildDeploymentContract } from "@/server/deployment-contract";
 import { _setAiGatewayTokenOverrideForTesting } from "@/server/env";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -253,7 +254,7 @@ test("connectability delegates to prerequisite (no launch-verification gate)", a
   );
 });
 
-test("Vercel deployment missing OPENCLAW_PACKAGE_SPEC does not block channels (check disabled)", async () => {
+test("Vercel deployment missing OPENCLAW_PACKAGE_SPEC does not block channels", async () => {
   process.env.VERCEL = "1";
   process.env.NEXT_PUBLIC_APP_URL = PUBLIC_ORIGIN;
   process.env.VERCEL_AUTOMATION_BYPASS_SECRET = "bypass";
@@ -270,7 +271,7 @@ test("Vercel deployment missing OPENCLAW_PACKAGE_SPEC does not block channels (c
 
   assert.equal(result.canConnect, true);
   const issue = result.issues.find((i) => i.id === "openclaw-package-spec");
-  assert.equal(issue, undefined, "openclaw-package-spec check is disabled");
+  assert.equal(issue, undefined, "openclaw-package-spec is excluded from channel-blocking issues");
 });
 
 test("Vercel deployment with pinned OPENCLAW_PACKAGE_SPEC passes channel connectability (check disabled)", async () => {
@@ -292,4 +293,170 @@ test("Vercel deployment with pinned OPENCLAW_PACKAGE_SPEC passes channel connect
   const issue = result.issues.find((i) => i.id === "openclaw-package-spec");
   assert.equal(issue, undefined, "should have no openclaw-package-spec issue");
 });
+
+// ---------------------------------------------------------------------------
+// Parity matrix: deployment contract ↔ channel connectability
+//
+// For the same env matrix, deployment-level blockers (public-origin, store,
+// ai-gateway) surfaced by channel connectability must match the canonical
+// statuses from buildDeploymentContract(). Channel-only blockers like
+// public-webhook-url must NOT appear in the contract.
+// ---------------------------------------------------------------------------
+
+/** IDs that the deployment contract owns and channels should mirror. */
+const CONTRACT_CHANNEL_IDS = new Set(["public-origin", "store", "ai-gateway"]);
+
+type ParityCase = {
+  name: string;
+  env: Record<string, string | undefined>;
+  oidc: string | undefined;
+};
+
+const PARITY_MATRIX: ParityCase[] = [
+  {
+    name: "Vercel: all configured",
+    env: {
+      VERCEL: "1",
+      NEXT_PUBLIC_APP_URL: PUBLIC_ORIGIN,
+      UPSTASH_REDIS_REST_URL: "https://upstash.example",
+      UPSTASH_REDIS_REST_TOKEN: "token",
+      OPENCLAW_PACKAGE_SPEC: "openclaw@1.0.0",
+    },
+    oidc: "oidc-token",
+  },
+  {
+    name: "Vercel: missing store",
+    env: {
+      VERCEL: "1",
+      NEXT_PUBLIC_APP_URL: PUBLIC_ORIGIN,
+      UPSTASH_REDIS_REST_URL: undefined,
+      UPSTASH_REDIS_REST_TOKEN: undefined,
+      KV_REST_API_URL: undefined,
+      KV_REST_API_TOKEN: undefined,
+      OPENCLAW_PACKAGE_SPEC: "openclaw@1.0.0",
+    },
+    oidc: "oidc-token",
+  },
+  {
+    name: "Vercel: missing OIDC",
+    env: {
+      VERCEL: "1",
+      NEXT_PUBLIC_APP_URL: PUBLIC_ORIGIN,
+      UPSTASH_REDIS_REST_URL: "https://upstash.example",
+      UPSTASH_REDIS_REST_TOKEN: "token",
+      AI_GATEWAY_API_KEY: undefined,
+      OPENCLAW_PACKAGE_SPEC: "openclaw@1.0.0",
+    },
+    oidc: undefined,
+  },
+  {
+    name: "Vercel: missing store + OIDC",
+    env: {
+      VERCEL: "1",
+      NEXT_PUBLIC_APP_URL: PUBLIC_ORIGIN,
+      UPSTASH_REDIS_REST_URL: undefined,
+      UPSTASH_REDIS_REST_TOKEN: undefined,
+      KV_REST_API_URL: undefined,
+      KV_REST_API_TOKEN: undefined,
+      AI_GATEWAY_API_KEY: undefined,
+      OPENCLAW_PACKAGE_SPEC: "openclaw@1.0.0",
+    },
+    oidc: undefined,
+  },
+  {
+    name: "non-Vercel: missing store (warn, not fail)",
+    env: {
+      VERCEL: undefined,
+      VERCEL_ENV: undefined,
+      VERCEL_URL: undefined,
+      VERCEL_PROJECT_PRODUCTION_URL: undefined,
+      NEXT_PUBLIC_APP_URL: PUBLIC_ORIGIN,
+      UPSTASH_REDIS_REST_URL: undefined,
+      UPSTASH_REDIS_REST_TOKEN: undefined,
+      KV_REST_API_URL: undefined,
+      KV_REST_API_TOKEN: undefined,
+    },
+    oidc: "oidc-token",
+  },
+  {
+    name: "non-Vercel: missing OIDC (warn, not fail)",
+    env: {
+      VERCEL: undefined,
+      VERCEL_ENV: undefined,
+      VERCEL_URL: undefined,
+      VERCEL_PROJECT_PRODUCTION_URL: undefined,
+      NEXT_PUBLIC_APP_URL: PUBLIC_ORIGIN,
+      UPSTASH_REDIS_REST_URL: "https://upstash.example",
+      UPSTASH_REDIS_REST_TOKEN: "token",
+      AI_GATEWAY_API_KEY: undefined,
+    },
+    oidc: undefined,
+  },
+];
+
+for (const { name, env, oidc } of PARITY_MATRIX) {
+  test(`parity: ${name}`, async () => {
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    _setAiGatewayTokenOverrideForTesting(oidc ?? null);
+
+    const request = makeRequest(PUBLIC_ORIGIN);
+    const contract = await buildDeploymentContract({ request });
+    const connectability = await buildChannelConnectability(
+      "slack",
+      request,
+      undefined,
+      { contract },
+    );
+
+    // Extract statuses for the shared IDs from each surface.
+    const contractStatuses = new Map(
+      contract.requirements
+        .filter((r) => CONTRACT_CHANNEL_IDS.has(r.id))
+        .map((r) => [r.id, r.status]),
+    );
+
+    const channelStatuses = new Map(
+      connectability.issues
+        .filter((i) => CONTRACT_CHANNEL_IDS.has(i.id))
+        .map((i) => [i.id, i.status]),
+    );
+
+    // Every non-pass contract requirement in the shared set must appear in
+    // channel issues with the same status.
+    for (const [id, status] of contractStatuses) {
+      if (status === "pass") {
+        assert.equal(
+          channelStatuses.has(id),
+          false,
+          `contract ${id}=pass should not appear as a channel issue`,
+        );
+      } else {
+        assert.equal(
+          channelStatuses.get(id),
+          status,
+          `contract ${id}=${status} must match channel issue status`,
+        );
+      }
+    }
+
+    // Channel-only issues must NOT appear in the contract.
+    const channelOnlyIssues = connectability.issues.filter(
+      (i) => i.id === "public-webhook-url" || i.id === "launch-verification",
+    );
+    for (const issue of channelOnlyIssues) {
+      const inContract = contract.requirements.some((r) => r.id === issue.id);
+      assert.equal(
+        inContract,
+        false,
+        `channel-only issue ${issue.id} must not appear in deployment contract`,
+      );
+    }
+  });
+}
 
