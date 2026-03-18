@@ -8,7 +8,7 @@ import {
   DEFAULT_CHANNEL_REQUEST_TIMEOUT_MS,
 } from "@/server/channels/driver";
 import { buildQueueConsumerRetry } from "@/server/channels/queue";
-import { reconcileTelegramWebhook } from "@/server/channels/telegram/reconcile";
+import { reconcileTelegramIntegration } from "@/server/channels/telegram/reconcile";
 import { createTelegramAdapter } from "@/server/channels/telegram/adapter";
 import { logInfo, logError, logWarn } from "@/server/log";
 
@@ -22,9 +22,9 @@ export const POST = handleCallback<QueuedChannelJob>(
     });
 
     try {
-      await reconcileTelegramWebhook();
+      await reconcileTelegramIntegration();
     } catch (err) {
-      logWarn("channels.telegram_webhook_reconcile_failed", {
+      logWarn("channels.telegram_integration_reconcile_failed", {
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -41,10 +41,8 @@ export const POST = handleCallback<QueuedChannelJob>(
         job,
       );
     } catch (error) {
-      // Force webhook re-registration so Telegram resumes delivery
-      // for future messages even if this one failed.
-      void reconcileTelegramWebhook({ force: true }).catch((err) => {
-        logWarn("channels.telegram_webhook_reconcile_on_error_failed", {
+      void reconcileTelegramIntegration({ force: true }).catch((err) => {
+        logWarn("channels.telegram_reconcile_on_error_failed", {
           error: err instanceof Error ? err.message : String(err),
         });
       });

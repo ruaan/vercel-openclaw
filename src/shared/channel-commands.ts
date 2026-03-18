@@ -30,6 +30,41 @@ const CHANNEL_COMMAND_DEFINITIONS = [
       ],
     },
   },
+  {
+    name: "help",
+    description: "Show available commands",
+    telegram: { enabled: true },
+  },
+  {
+    name: "status",
+    description: "Show current session status",
+    telegram: { enabled: true },
+  },
+  {
+    name: "model",
+    description: "Switch or view the current model",
+    telegram: { enabled: true },
+  },
+  {
+    name: "reset",
+    description: "Start a new conversation",
+    telegram: { enabled: true },
+  },
+  {
+    name: "think",
+    description: "Set thinking level (off, low, medium, high)",
+    telegram: { enabled: true },
+  },
+  {
+    name: "compact",
+    description: "Compact the conversation context",
+    telegram: { enabled: true },
+  },
+  {
+    name: "stop",
+    description: "Stop the current response",
+    telegram: { enabled: true },
+  },
 ] as const satisfies readonly ChannelCommandDefinition[];
 
 export function getChannelCommandDefinitions(): readonly ChannelCommandDefinition[] {

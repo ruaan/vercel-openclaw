@@ -53,7 +53,7 @@ test("Telegram sync-commands: syncs commands and stores success state", async ()
       const result = await callRoute(route.POST!, req);
 
       assert.equal(result.status, 200);
-      assert.deepEqual(result.json, { ok: true, commandCount: 1 });
+      assert.deepEqual(result.json, { ok: true, commandCount: 8 });
 
       const meta = await h.getMeta();
       assert.equal(meta.channels.telegram?.commandSyncStatus, "synced");
