@@ -8,34 +8,9 @@ import {
   DEFAULT_CHANNEL_REQUEST_TIMEOUT_MS,
 } from "@/server/channels/driver";
 import { buildQueueConsumerRetry } from "@/server/channels/queue";
+import { reconcileTelegramWebhook } from "@/server/channels/telegram/reconcile";
 import { createTelegramAdapter } from "@/server/channels/telegram/adapter";
-import { setWebhook } from "@/server/channels/telegram/bot-api";
 import { logInfo, logError, logWarn } from "@/server/log";
-import { getInitializedMeta, getStore } from "@/server/store/store";
-
-const WEBHOOK_RECONCILE_KEY = "telegram:webhook:last-reconciled-at";
-const WEBHOOK_RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
-
-async function reconcileTelegramWebhook(options?: {
-  force?: boolean;
-}): Promise<void> {
-  const meta = await getInitializedMeta();
-  const config = meta.channels.telegram;
-  if (!config) return;
-
-  if (!options?.force) {
-    const store = getStore();
-    const lastReconciledAt = await store.getValue<number>(WEBHOOK_RECONCILE_KEY);
-
-    if (lastReconciledAt && Date.now() - lastReconciledAt < WEBHOOK_RECONCILE_INTERVAL_MS) {
-      return;
-    }
-  }
-
-  await setWebhook(config.botToken, config.webhookUrl, config.webhookSecret);
-  await getStore().setValue(WEBHOOK_RECONCILE_KEY, Date.now());
-  logInfo("channels.telegram_webhook_reconciled", {});
-}
 
 export const POST = handleCallback<QueuedChannelJob>(
   async (job, metadata) => {
