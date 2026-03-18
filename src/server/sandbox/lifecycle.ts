@@ -387,6 +387,23 @@ async function refreshAiGatewayToken(sandbox: SandboxHandle, sandboxId: string):
     return;
   }
 
+  // Read the current token from the sandbox and skip if unchanged.
+  // This avoids killing and restarting the gateway unnecessarily.
+  try {
+    const existing = await sandbox.readFileToBuffer({
+      path: OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+    });
+    if (existing && existing.toString("utf8").trim() === freshToken) {
+      logInfo("sandbox.token_refresh.skipped_unchanged", { sandboxId });
+      await mutateMeta((next) => {
+        next.lastTokenRefreshAt = Date.now();
+      });
+      return;
+    }
+  } catch {
+    // File may not exist yet — proceed with write.
+  }
+
   logInfo("sandbox.token_refresh.start", { sandboxId });
 
   const writeResult = await sandbox.runCommand("sh", [

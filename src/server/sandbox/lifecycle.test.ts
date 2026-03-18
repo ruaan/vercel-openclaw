@@ -31,6 +31,7 @@ import {
 } from "@/server/store/store";
 import { _setAiGatewayTokenOverrideForTesting } from "@/server/env";
 import {
+  OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   OPENCLAW_BIN,
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
@@ -1873,6 +1874,47 @@ test("[lifecycle] ensureFreshGatewayToken: force=true bypasses throttle", async 
       assert.ok(
         handle.commands.length > cmdCountBefore,
         "Should have run commands after force refresh",
+      );
+    } finally {
+      _setAiGatewayTokenOverrideForTesting(null);
+    }
+  });
+});
+
+test("[lifecycle] ensureFreshGatewayToken: skips restart when token on disk matches fresh token", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    _setAiGatewayTokenOverrideForTesting("same-token");
+
+    try {
+      // Pre-create the handle with the same token already on disk
+      const handle = new FakeSandboxHandle("sbx-same-token");
+      handle.writtenFiles.push({
+        path: OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+        content: Buffer.from("same-token"),
+      });
+      fake.handlesByIds.set("sbx-same-token", handle);
+
+      await mutateMeta((meta) => {
+        meta.status = "running";
+        meta.sandboxId = "sbx-same-token";
+        meta.lastAccessedAt = null;
+        meta.lastTokenRefreshAt = Date.now() - 15 * 60 * 1000; // Stale
+      });
+
+      await ensureFreshGatewayToken();
+
+      // Should NOT have run the startup script (no gateway restart)
+      const restartCmd = handle.commands.find(
+        (c) => c.cmd === "bash" && c.args?.[0] === OPENCLAW_STARTUP_SCRIPT_PATH,
+      );
+      assert.equal(restartCmd, undefined, "Should not restart gateway when token unchanged");
+
+      // But lastTokenRefreshAt should still be updated
+      const meta = await getInitializedMeta();
+      assert.ok(
+        meta.lastTokenRefreshAt !== null && meta.lastTokenRefreshAt > Date.now() - 5000,
+        "lastTokenRefreshAt should be updated even when skipping restart",
       );
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);
