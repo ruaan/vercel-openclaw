@@ -1061,9 +1061,9 @@ export async function chatCompletions(baseUrl: string, opts?: PhaseOptions): Pro
 // Destructive phases (opt-in)
 // ---------------------------------------------------------------------------
 
-const POLL_INITIAL_DELAY_MS = 2_000;
-const POLL_MAX_DELAY_MS = 10_000;
-const POLL_BACKOFF_FACTOR = 1.5;
+const HEAL_POLL_INITIAL_MS = 2_000;
+const HEAL_POLL_MAX_MS = 10_000;
+const HEAL_POLL_BACKOFF = 1.5;
 
 async function pollUntilRunning(
   baseUrl: string,
@@ -1071,7 +1071,7 @@ async function pollUntilRunning(
   requestTimeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<{ running: boolean; lastBody: Record<string, unknown> | null }> {
   const deadline = Date.now() + timeoutMs;
-  let delay = POLL_INITIAL_DELAY_MS;
+  let delay = HEAL_POLL_INITIAL_MS;
   let lastBody: Record<string, unknown> | null = null;
 
   while (Date.now() < deadline) {
@@ -1091,7 +1091,7 @@ async function pollUntilRunning(
     } catch (err) {
       log("poll", "fetch-error", { error: errorMessage(err) });
     }
-    delay = Math.min(delay * POLL_BACKOFF_FACTOR, POLL_MAX_DELAY_MS);
+    delay = Math.min(delay * HEAL_POLL_BACKOFF, HEAL_POLL_MAX_MS);
   }
 
   return { running: false, lastBody };
@@ -1271,6 +1271,213 @@ export async function restoreFromSnapshot(
     return failFromHttp(phase, endpoint, res.status, `HTTP ${res.status}`, {
       durationMs: fetchMs, detail: { snapshotId: sid, ...body },
     });
+  } catch (err) {
+    return failFromError(phase, endpoint, err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Self-healing: corrupt gateway token → Telegram round-trip → verify recovery
+// ---------------------------------------------------------------------------
+
+// Matches OPENCLAW_AI_GATEWAY_API_KEY_PATH in src/server/openclaw/config.ts.
+const SANDBOX_AI_KEY_PATH = "/home/vercel-sandbox/.openclaw/.ai-gateway-api-key";
+
+const HEAL_GATEWAY_TIMEOUT_MS = 60_000;
+const HEAL_POST_KILL_SETTLE_MS = 3_000;
+const HEAL_DEAD_CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * Run a command on the sandbox via the admin SSH endpoint.
+ * The SSH endpoint is auth-gated (admin secret or session cookie)
+ * and only reachable with valid credentials.
+ */
+async function sshCommand(
+  baseUrl: string,
+  command: string,
+  timeoutMs: number,
+): Promise<{ stdout: string; stderr: string; exitCode: number } | null> {
+  try {
+    const hdrs = { ...authHeaders({ mutation: true }), "Content-Type": "application/json" };
+    const res = await fetchWithTimeout(
+      url(baseUrl, "/api/admin/ssh"),
+      { method: "POST", headers: hdrs, body: JSON.stringify({ command }) },
+      timeoutMs,
+    );
+    if (!res.ok) {
+      log("sshCommand", "error", { command: command.slice(0, 80), status: res.status });
+      return null;
+    }
+    return (await res.json()) as { stdout: string; stderr: string; exitCode: number };
+  } catch (err) {
+    log("sshCommand", "error", { command: command.slice(0, 80), error: String(err) });
+    return null;
+  }
+}
+
+/**
+ * Simulates OIDC token expiry by corrupting the AI gateway key file and
+ * killing the gateway process, then sends a Telegram smoke webhook and
+ * verifies the self-healing pipeline recovers:
+ *
+ *   1. Gateway call fails (503/500 — dead or stale-token gateway)
+ *   2. Pipeline force-refreshes the OIDC token on disk
+ *   3. Startup script restarts the gateway with the fresh token
+ *   4. Pipeline waits for gateway readiness, retries the gateway call
+ *   5. Reply is delivered (queue drains without dead-letter)
+ */
+export async function selfHealTokenRefresh(
+  baseUrl: string,
+  pollTimeoutMs: number,
+  opts?: PhaseOptions,
+): Promise<PhaseResult> {
+  const phase = "selfHealTokenRefresh";
+  const endpoint = "/api/admin/ssh";
+  const reqTimeout = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+
+  try {
+    // Step 1: Verify gateway is healthy before corrupting
+    const preCheck = await fetchWithTimeout(
+      url(baseUrl, "/gateway/v1/chat/completions"),
+      {
+        method: "POST",
+        headers: { ...authHeaders({ mutation: true }), "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "default", messages: [{ role: "user", content: "say smoke-ok" }], stream: false }),
+      },
+      HEAL_GATEWAY_TIMEOUT_MS,
+    );
+    if (!preCheck.ok) {
+      return {
+        phase, passed: false, durationMs: 0, endpoint,
+        error: `Gateway not healthy before corruption (HTTP ${preCheck.status})`,
+        errorCode: "PRE_CHECK_FAILED",
+        hint: "Ensure the sandbox is running before this phase",
+      };
+    }
+    log(phase, "pre-check-ok", { status: preCheck.status });
+
+    // Step 2: Corrupt the token file and kill the gateway process
+    const corruptCmd = `printf '%s' 'STALE-EXPIRED-TOKEN' > ${SANDBOX_AI_KEY_PATH}; kill -9 $(pgrep -f openclaw-gateway) 2>/dev/null || true`;
+    const corruptResult = await sshCommand(baseUrl, corruptCmd, reqTimeout);
+    if (!corruptResult) {
+      return {
+        phase, passed: false, durationMs: 0, endpoint,
+        error: "Failed to corrupt gateway token via SSH",
+        errorCode: "CORRUPT_FAILED",
+      };
+    }
+    log(phase, "gateway-corrupted");
+
+    // Step 3: Wait for the gateway process to exit
+    await sleep(HEAL_POST_KILL_SETTLE_MS);
+    const deadCheck = await fetchWithTimeout(
+      url(baseUrl, "/gateway/v1/chat/completions"),
+      {
+        method: "POST",
+        headers: { ...authHeaders({ mutation: true }), "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "default", messages: [{ role: "user", content: "test" }], stream: false }),
+      },
+      HEAL_DEAD_CHECK_TIMEOUT_MS,
+    ).catch(() => null);
+    const deadStatus = deadCheck?.status ?? 0;
+    if (deadCheck?.ok) {
+      return {
+        phase, passed: false, durationMs: 0, endpoint,
+        error: `Gateway still healthy after corruption (HTTP ${deadStatus}). Kill may have failed.`,
+        errorCode: "CORRUPT_VERIFY_FAILED",
+        hint: "The gateway process may not have been killed",
+      };
+    }
+    log(phase, "gateway-dead-confirmed", { status: deadStatus });
+
+    // Step 4: Read baseline queue state
+    const baselineSummary = await fetchChannelSummary(baseUrl, reqTimeout);
+    const baselineDL = baselineSummary?.telegram?.deadLetterCount ?? 0;
+
+    // Step 5: Send a Telegram smoke webhook
+    const telegramPayload = buildTelegramSmokePayload();
+    const sendResult = await sendSmokeWebhook(baseUrl, "telegram", telegramPayload, reqTimeout);
+    if (!sendResult?.sent) {
+      return {
+        phase, passed: false, durationMs: 0, endpoint,
+        error: "Failed to send Telegram smoke webhook",
+        errorCode: "WEBHOOK_SEND_FAILED",
+        detail: { sendResult },
+      };
+    }
+    log(phase, "webhook-sent");
+
+    // Step 6: Poll until queue drains (self-healing happens during processing)
+    const t0 = performance.now();
+    const deadline = Date.now() + pollTimeoutMs;
+    let delay = HEAL_POLL_INITIAL_MS;
+
+    while (Date.now() < deadline) {
+      await sleep(delay);
+      const summary = await fetchChannelSummary(baseUrl, reqTimeout);
+      if (!summary?.telegram || summary.telegram.queueDepth > 0) {
+        log(phase, "poll", { telegramQueue: summary?.telegram?.queueDepth });
+        delay = Math.min(delay * HEAL_POLL_BACKOFF, HEAL_POLL_MAX_MS);
+        continue;
+      }
+
+      // Queue drained — check for dead letters
+      const dlDelta = (summary.telegram.deadLetterCount ?? 0) - baselineDL;
+      const totalMs = Math.round(performance.now() - t0);
+
+      if (dlDelta > 0) {
+        log(phase, "drained-to-dead-letter", { dlDelta, totalMs });
+        return {
+          phase, passed: false, durationMs: totalMs, endpoint,
+          error: `Queue drained but message went to dead letter (delta: ${dlDelta})`,
+          errorCode: "DEAD_LETTER",
+          detail: { dlDelta, totalMs },
+          hint: "Self-healing did not recover in time — check gateway logs",
+        };
+      }
+
+      // Step 7: Verify gateway is healthy again
+      const postCheck = await fetchWithTimeout(
+        url(baseUrl, "/gateway/v1/chat/completions"),
+        {
+          method: "POST",
+          headers: { ...authHeaders({ mutation: true }), "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "default", messages: [{ role: "user", content: "say smoke-ok" }], stream: false }),
+        },
+        HEAL_GATEWAY_TIMEOUT_MS,
+      ).catch(() => null);
+
+      const gatewayRecovered = postCheck?.ok === true;
+      log(phase, gatewayRecovered ? "gateway-recovered" : "gateway-still-broken", {
+        status: postCheck?.status, totalMs,
+      });
+
+      return {
+        phase,
+        passed: gatewayRecovered,
+        durationMs: totalMs,
+        endpoint,
+        detail: {
+          gatewayRecovered,
+          postCheckStatus: postCheck?.status,
+          deadLetterDelta: dlDelta,
+          totalMs,
+        },
+        ...(!gatewayRecovered ? {
+          error: "Queue drained but gateway did not recover",
+          errorCode: "GATEWAY_NOT_RECOVERED",
+          hint: "Token refresh may have succeeded but gateway restart failed",
+        } : {}),
+      };
+    }
+
+    const totalMs = Math.round(performance.now() - t0);
+    return {
+      phase, passed: false, durationMs: totalMs, endpoint,
+      error: "Queue did not drain within timeout",
+      errorCode: "POLL_TIMEOUT",
+      hint: "Self-healing may be taking too long — increase --timeout",
+    };
   } catch (err) {
     return failFromError(phase, endpoint, err);
   }
