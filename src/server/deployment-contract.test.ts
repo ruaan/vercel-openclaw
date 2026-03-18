@@ -79,7 +79,7 @@ test("local dev without OPENCLAW_PACKAGE_SPEC does not fail contract", async () 
 // buildDeploymentContract — Vercel deployment
 // ---------------------------------------------------------------------------
 
-test("vercel deployment without OPENCLAW_PACKAGE_SPEC does not fail (check disabled)", async () => {
+test("vercel deployment without OPENCLAW_PACKAGE_SPEC fails contract", async () => {
   process.env.VERCEL = "1";
   delete process.env.OPENCLAW_PACKAGE_SPEC;
   _setAiGatewayTokenOverrideForTesting("test-token");
@@ -88,10 +88,15 @@ test("vercel deployment without OPENCLAW_PACKAGE_SPEC does not fail (check disab
   const specReq = contract.requirements.find(
     (r) => r.id === "openclaw-package-spec",
   );
-  assert.equal(specReq, undefined, "openclaw-package-spec check is disabled");
+  assert.ok(specReq, "expected openclaw-package-spec requirement");
+  assert.equal(specReq.status, "fail");
+  assert.ok(specReq.message.includes("not set"), "message should mention OPENCLAW_PACKAGE_SPEC is not set");
+  assert.ok(specReq.message.includes("deployment contract requires"), "message should reference the deployment contract");
+  assert.ok(specReq.env.includes("OPENCLAW_PACKAGE_SPEC"));
+  assert.equal(contract.ok, false, "missing package-spec on Vercel should fail contract");
 });
 
-test("vercel deployment with openclaw@latest does not fail (check disabled)", async () => {
+test("vercel deployment with openclaw@latest fails contract", async () => {
   process.env.VERCEL = "1";
   process.env.OPENCLAW_PACKAGE_SPEC = "openclaw@latest";
   _setAiGatewayTokenOverrideForTesting("test-token");
@@ -100,10 +105,13 @@ test("vercel deployment with openclaw@latest does not fail (check disabled)", as
   const specReq = contract.requirements.find(
     (r) => r.id === "openclaw-package-spec",
   );
-  assert.equal(specReq, undefined, "openclaw-package-spec check is disabled");
+  assert.ok(specReq, "expected openclaw-package-spec requirement");
+  assert.equal(specReq.status, "fail");
+  assert.ok(specReq.message.includes("not a pinned version"));
+  assert.equal(contract.ok, false, "unpinned package-spec on Vercel should fail contract");
 });
 
-test("vercel deployment with pinned openclaw version emits no requirement (check disabled)", async () => {
+test("vercel deployment with pinned openclaw version passes", async () => {
   process.env.VERCEL = "1";
   process.env.OPENCLAW_PACKAGE_SPEC = "openclaw@1.2.3";
   _setAiGatewayTokenOverrideForTesting("test-token");
@@ -112,7 +120,8 @@ test("vercel deployment with pinned openclaw version emits no requirement (check
   const specReq = contract.requirements.find(
     (r) => r.id === "openclaw-package-spec",
   );
-  assert.equal(specReq, undefined, "openclaw-package-spec check is disabled");
+  assert.ok(specReq, "expected openclaw-package-spec requirement");
+  assert.equal(specReq.status, "pass");
 });
 
 // ---------------------------------------------------------------------------
@@ -274,7 +283,7 @@ test("contract exposes expected metadata fields", async () => {
 // buildDeploymentContract — public-origin, webhook-bypass, store, ai-gateway
 // ---------------------------------------------------------------------------
 
-test("deployed protected env fails store and webhook bypass when missing", async () => {
+test("deployed protected env fails store when missing (pinned spec passes)", async () => {
   process.env.VERCEL = "1";
   process.env.VERCEL_AUTH_MODE = "admin-secret";
   process.env.NEXT_PUBLIC_APP_URL = "https://public-host.test";

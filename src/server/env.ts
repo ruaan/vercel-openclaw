@@ -1,4 +1,5 @@
 import { getVercelOidcToken } from "@vercel/oidc";
+import { logWarn } from "@/server/log";
 
 export type AuthMode = "admin-secret" | "sign-in-with-vercel";
 
@@ -150,11 +151,20 @@ export function requiresDurableStore(): boolean {
  * Resolution order:
  * 1. `OPENCLAW_PACKAGE_SPEC` env var (e.g. "openclaw@1.2.3", "openclaw@latest")
  * 2. Falls back to "openclaw@latest" when unset (all environments).
+ *
+ * On Vercel deployments the fallback is logged as a warning because it
+ * produces non-deterministic sandbox restores.
  */
 export function getOpenclawPackageSpec(): string {
   const explicit = process.env.OPENCLAW_PACKAGE_SPEC?.trim();
   if (explicit) {
     return explicit;
+  }
+  if (isVercelDeployment()) {
+    logWarn("env.openclaw_package_spec_fallback", {
+      resolved: "openclaw@latest",
+      reason: "OPENCLAW_PACKAGE_SPEC is not set on a Vercel deployment",
+    });
   }
   return "openclaw@latest";
 }

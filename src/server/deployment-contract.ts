@@ -5,23 +5,23 @@ import {
   getStoreEnv,
   isVercelDeployment,
 } from "@/server/env";
+import { logInfo } from "@/server/log";
 import { resolvePublicOrigin } from "@/server/public-url";
+
+// Re-export shared types so existing consumers keep working.
+export type {
+  DeploymentRequirementId,
+  DeploymentRequirementStatus,
+} from "@/shared/deployment-requirements";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type DeploymentRequirementId =
-  | "public-origin"
-  | "webhook-bypass"
-  | "store"
-  | "ai-gateway"
-  | "openclaw-package-spec"
-  | "oauth-client-id"
-  | "oauth-client-secret"
-  | "session-secret";
-
-export type DeploymentRequirementStatus = "pass" | "warn" | "fail";
+import type {
+  DeploymentRequirementId,
+  DeploymentRequirementStatus,
+} from "@/shared/deployment-requirements";
 
 export type DeploymentRequirement = {
   id: DeploymentRequirementId;
@@ -162,12 +162,34 @@ function checkAiGateway(
   };
 }
 
-// Disabled: the openclaw-package-spec check is temporarily bypassed.
-// Re-enable by restoring the original validation logic.
 function checkOpenclawPackageSpec(
-  _onVercel: boolean,
+  onVercel: boolean,
 ): DeploymentRequirement | null {
-  return null;
+  if (!onVercel) return null;
+
+  const spec = getOpenclawPackageSpec();
+
+  if (isPinnedPackageSpec(spec)) {
+    return {
+      id: "openclaw-package-spec",
+      status: "pass",
+      message: `OPENCLAW_PACKAGE_SPEC is pinned to ${spec}.`,
+      remediation: "",
+      env: ["OPENCLAW_PACKAGE_SPEC"],
+    };
+  }
+
+  const missing = !process.env.OPENCLAW_PACKAGE_SPEC?.trim();
+  return {
+    id: "openclaw-package-spec",
+    status: "fail",
+    message: missing
+      ? "OPENCLAW_PACKAGE_SPEC is not set. The deployment contract requires a pinned version on Vercel for deterministic sandbox restores."
+      : `OPENCLAW_PACKAGE_SPEC is set to "${spec}" which is not a pinned version. Restores are non-deterministic.`,
+    remediation:
+      'Set OPENCLAW_PACKAGE_SPEC to a pinned version like "openclaw@1.2.3" for deterministic sandbox restores.',
+    env: ["OPENCLAW_PACKAGE_SPEC"],
+  };
 }
 
 function checkOauthClientId(
@@ -279,6 +301,15 @@ export async function buildDeploymentContract(
   ].filter((value): value is DeploymentRequirement => value !== null);
 
   const ok = requirements.every((r) => r.status !== "fail");
+
+  logInfo("deployment_contract.built", {
+    ok,
+    authMode,
+    storeBackend,
+    aiGatewayAuth,
+    onVercel,
+    requirementIds: requirements.map((r) => `${r.id}:${r.status}`),
+  });
 
   return {
     ok,

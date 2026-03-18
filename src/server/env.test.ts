@@ -236,3 +236,43 @@ test("getOpenclawPackageSpec returns explicit value when set", () => {
     assert.equal(getOpenclawPackageSpec(), "openclaw@1.2.3");
   });
 });
+
+test("getOpenclawPackageSpec logs warning on Vercel when falling back to @latest", async () => {
+  const { _resetLogBuffer, getServerLogs } = await import("@/server/log");
+  _resetLogBuffer();
+  withEnv(
+    {
+      OPENCLAW_PACKAGE_SPEC: undefined,
+      VERCEL: "1",
+    },
+    () => {
+      const spec = getOpenclawPackageSpec();
+      assert.equal(spec, "openclaw@latest");
+      const warns = getServerLogs().filter(
+        (e) => e.message === "env.openclaw_package_spec_fallback",
+      );
+      assert.equal(warns.length, 1, "expected one fallback warning log");
+      const data = warns[0]!.data as Record<string, unknown>;
+      assert.equal(data.resolved, "openclaw@latest");
+    },
+  );
+});
+
+test("getOpenclawPackageSpec does not log when spec is explicitly set", async () => {
+  const { _resetLogBuffer, getServerLogs } = await import("@/server/log");
+  _resetLogBuffer();
+  withEnv(
+    {
+      OPENCLAW_PACKAGE_SPEC: "openclaw@2.0.0",
+      VERCEL: "1",
+    },
+    () => {
+      const spec = getOpenclawPackageSpec();
+      assert.equal(spec, "openclaw@2.0.0");
+      const warns = getServerLogs().filter(
+        (e) => e.message === "env.openclaw_package_spec_fallback",
+      );
+      assert.equal(warns.length, 0, "should not log when spec is set");
+    },
+  );
+});
