@@ -1176,7 +1176,20 @@ async function restoreSandboxFromSnapshot(
   options?: { skipPublicReady?: boolean },
 ): Promise<SingleMeta> {
   return withLifecycleLock(async () => {
+    const phaseTimings: Record<string, number> = {};
+    const markPhase = (label: string) => { phaseTimings[label] = Date.now(); };
+    const elapsedSince = (label: string) => {
+      const start = phaseTimings[label];
+      if (start === undefined) {
+        logWarn("sandbox.restore.timing.missing_mark", { label });
+        return 0;
+      }
+      return Date.now() - start;
+    };
+
+    markPhase("getMeta1");
     const current = await getInitializedMeta();
+    logInfo("sandbox.restore.timing", { phase: "getMeta1", ms: elapsedSince("getMeta1") });
     if (current.status === "running" && current.sandboxId) {
       return current;
     }
@@ -1185,7 +1198,9 @@ async function restoreSandboxFromSnapshot(
     }
 
     // Auth-required boot: on Vercel, require a usable AI Gateway credential.
+    markPhase("oidc");
     const credential = await resolveAiGatewayCredentialOptional();
+    logInfo("sandbox.restore.timing", { phase: "oidc", ms: elapsedSince("oidc") });
     if (isVercelDeployment() && !credential) {
       logError("sandbox.restore.no_ai_gateway_credential", {
         message: "Cannot restore sandbox on Vercel without AI Gateway credential. OIDC may be temporarily unavailable.",
@@ -1205,16 +1220,20 @@ async function restoreSandboxFromSnapshot(
     const sleepAfterMs = getSandboxSleepAfterMs();
 
     logInfo("sandbox.status_transition", { from: current.status, to: "restoring", snapshotId: current.snapshotId, sleepAfterMs });
+    markPhase("mutateMeta1");
     await mutateMeta((meta) => {
       meta.status = "restoring";
       meta.lastError = null;
     });
+    logInfo("sandbox.restore.timing", { phase: "mutateMeta_restoring", ms: elapsedSince("mutateMeta1") });
 
     // Build all payloads before Sandbox.create.  Config, credentials, and
     // firewall policy are resolved here so zero writeFiles() calls are
     // needed on the hot path.
     const freshApiKey = credential?.token;
+    markPhase("getMeta2");
     const latest = await getInitializedMeta();
+    logInfo("sandbox.restore.timing", { phase: "getMeta2", ms: elapsedSince("getMeta2") });
     const slackConfig = latest.channels.slack;
 
     // Config JSON for the gateway — passed via env, written locally by script.
@@ -1266,11 +1285,14 @@ async function restoreSandboxFromSnapshot(
       networkPolicy: firewallPolicy,
     });
     const sandboxCreateMs = Date.now() - sandboxCreateStart;
+    logInfo("sandbox.restore.timing", { phase: "sandboxCreate", ms: sandboxCreateMs });
 
+    markPhase("mutateMeta2");
     await mutateMeta((meta) => {
       meta.sandboxId = sandbox.sandboxId;
       meta.portUrls = resolvePortUrls(sandbox);
     });
+    logInfo("sandbox.restore.timing", { phase: "mutateMeta_sandboxId", ms: elapsedSince("mutateMeta2") });
 
     // Credentials go via env. Config file (openclaw.json) is skipped when
     // the snapshot's config hash matches (same channels, same deploy).
@@ -1304,6 +1326,7 @@ async function restoreSandboxFromSnapshot(
     }
     const assetSyncMs = Date.now() - assetSyncStart;
 
+    markPhase("mutateMeta3");
     const next = await mutateMeta((meta) => {
       meta.status = "booting";
       meta.sandboxId = sandbox.sandboxId;
@@ -1311,6 +1334,7 @@ async function restoreSandboxFromSnapshot(
       meta.lastAccessedAt = Date.now();
       meta.lastError = null;
     });
+    logInfo("sandbox.restore.timing", { phase: "mutateMeta_booting", ms: elapsedSince("mutateMeta3") });
 
     // Config, credentials, and firewall policy are all passed via create-time
     // env.  The fast-restore script reads them from env and writes locally.
