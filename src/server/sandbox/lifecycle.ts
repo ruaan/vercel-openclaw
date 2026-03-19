@@ -1342,11 +1342,10 @@ async function restoreSandboxFromSnapshot(
 
     // Host-side readiness probe + firewall sync run concurrently.
     // The gateway is already booting inside the sandbox.
-    await Promise.all([
+    const [, firewallResult] = await Promise.all([
       (async () => {
         const t0 = Date.now();
-        // Host-side HTTP probe via sandbox.domain(3000) — no runCommand overhead.
-        await waitForPublicGatewayReady({ maxAttempts: 120, delayMs: 250, timeoutMs: 2_000 });
+        await waitForGatewayReady(sandbox, { maxAttempts: 120, delayMs: 250 });
         localReadyMs = Date.now() - t0;
         logInfo("sandbox.restore.local_ready", { localReadyMs, sandboxId: sandbox.sandboxId });
       })(),
