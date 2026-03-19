@@ -1256,17 +1256,31 @@ async function restoreSandboxFromSnapshot(
     })();
     const tokenWriteMs = 0; // env-based — no blocking write on hot path
 
-    // Sync restore assets — skip static files when the manifest hash matches.
+    // Sync restore assets before boot.  Overlapping with boot was tested but
+    // the Vercel Sandbox API serializes requests per sandbox, so concurrent
+    // writeFiles + runCommand contends and slows boot by ~6s.  Keeping this
+    // serial is faster in practice.
     const assetSyncStart = Date.now();
     const slackConfig = latest.channels.slack;
-    const assetSyncResult = await syncRestoreAssetsIfNeeded(sandbox, {
-      origin,
-      apiKey: freshApiKey,
-      telegramBotToken: latest.channels.telegram?.botToken,
-      slackCredentials: slackConfig ? { botToken: slackConfig.botToken, signingSecret: slackConfig.signingSecret } : undefined,
-    });
+    let assetSyncResult: { skippedStaticAssetSync: boolean; assetSha256: string | null } = {
+      skippedStaticAssetSync: false,
+      assetSha256: null,
+    };
+    try {
+      assetSyncResult = await syncRestoreAssetsIfNeeded(sandbox, {
+        origin,
+        apiKey: freshApiKey,
+        telegramBotToken: latest.channels.telegram?.botToken,
+        slackCredentials: slackConfig ? { botToken: slackConfig.botToken, signingSecret: slackConfig.signingSecret } : undefined,
+      });
+    } catch (err) {
+      logWarn("sandbox.restore.asset_sync_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     const assetSyncMs = Date.now() - assetSyncStart;
     logInfo("sandbox.restore.asset_sync", {
+      assetSyncMs,
       skippedStaticAssetSync: assetSyncResult.skippedStaticAssetSync,
       assetSha256: assetSyncResult.assetSha256,
     });
@@ -1293,7 +1307,6 @@ async function restoreSandboxFromSnapshot(
     let firewallSyncMs = 0;
     let startupScriptMs = 0;
     let localReadyMs = 0;
-
     await Promise.all([
       // Persist credential files (non-blocking — gateway uses env tokens)
       credentialWritePromise.catch((err) => {
