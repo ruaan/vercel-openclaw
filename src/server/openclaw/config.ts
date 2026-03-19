@@ -1,6 +1,13 @@
 const OPENCLAW_PORT = 3000;
 
 export const OPENCLAW_BIN = "/home/vercel-sandbox/.global/npm/bin/openclaw";
+export const BUN_INSTALL_DIR = "/home/vercel-sandbox/.bun";
+export const BUN_BIN = `${BUN_INSTALL_DIR}/bin/bun`;
+export const BUN_VERSION = "1.3.11";
+// Direct binary download URL — avoids executing a remote installer script.
+// Recompute hash: curl -fsSL <URL> | sha256sum
+export const BUN_DOWNLOAD_URL = `https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip`;
+export const BUN_DOWNLOAD_SHA256 = "8611ba935af886f05a6f38740a15160326c15e5d5d07adef966130b4493607ed";
 export const OPENCLAW_STATE_DIR = "/home/vercel-sandbox/.openclaw";
 export const OPENCLAW_CONFIG_PATH = `${OPENCLAW_STATE_DIR}/openclaw.json`;
 export const OPENCLAW_GATEWAY_TOKEN_PATH = `${OPENCLAW_STATE_DIR}/.gateway-token`;
@@ -335,12 +342,42 @@ if [ -n "$tg_token" ]; then
   curl -sf "https://api.telegram.org/bot\${tg_token}/deleteWebhook?drop_pending_updates=false" >/dev/null 2>&1 || true
 fi
 echo '{"event":"fast_restore.kill_old_gateway"}' >&2
-pkill -f "openclaw.gateway" || true
+pkill -f "openclaw.gateway" 2>/dev/null || true
 echo '{"event":"fast_restore.start_gateway"}' >&2
-setsid ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &
-echo '{"event":"fast_restore.force_pair_inline"}' >&2
-node ${OPENCLAW_FORCE_PAIR_SCRIPT_PATH} ${OPENCLAW_STATE_DIR} >> ${OPENCLAW_LOG_FILE} 2>&1 || echo '{"event":"fast_restore.force_pair_failed"}' >&2
-echo '{"event":"fast_restore.complete"}' >&2
+if [ -x "${BUN_BIN}" ]; then
+  setsid ${BUN_BIN} ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &
+else
+  setsid ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &
+fi
+echo '{"event":"fast_restore.readiness_loop"}' >&2
+case "\${1:-}" in ''|*[!0-9]*) _ready_timeout=30 ;; *) _ready_timeout=\$1 ;; esac
+_ready_start=\$(date +%s%N 2>/dev/null || echo 0)
+_attempts=0
+_ready=0
+_deadline=\$(( \$(date +%s) + _ready_timeout ))
+while [ "\$(date +%s)" -lt "\$_deadline" ]; do
+  _attempts=\$((_attempts + 1))
+  if curl -s -f --max-time 1 http://localhost:${OPENCLAW_PORT}/ 2>/dev/null | grep -q 'openclaw-app'; then
+    _ready=1
+    break
+  fi
+  sleep 0.1
+done
+_ready_end=\$(date +%s%N 2>/dev/null || echo 0)
+_ready_ms=0
+if [ "\$_ready_start" != "0" ] && [ "\$_ready_end" != "0" ]; then
+  _ready_ms=\$(( (_ready_end - _ready_start) / 1000000 ))
+fi
+if [ "\$_ready" = "1" ]; then
+  echo '{"event":"fast_restore.force_pair_inline"}' >&2
+  node ${OPENCLAW_FORCE_PAIR_SCRIPT_PATH} ${OPENCLAW_STATE_DIR} >> ${OPENCLAW_LOG_FILE} 2>&1 || echo '{"event":"fast_restore.force_pair_failed"}' >&2
+  printf '{"ready":true,"attempts":%d,"readyMs":%d}\\n' "\$_attempts" "\$_ready_ms"
+  echo '{"event":"fast_restore.complete"}' >&2
+else
+  printf '{"ready":false,"attempts":%d,"readyMs":%d}\\n' "\$_attempts" "\$_ready_ms"
+  echo '{"event":"fast_restore.readiness_timeout"}' >&2
+  exit 1
+fi
 `;
 }
 

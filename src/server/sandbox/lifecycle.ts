@@ -31,6 +31,10 @@ import { getSandboxController } from "@/server/sandbox/controller";
 import type { SandboxHandle } from "@/server/sandbox/controller";
 import { getSandboxVcpus } from "@/server/sandbox/resources";
 import {
+  getSandboxSleepAfterMs,
+  getSandboxTouchThrottleMs,
+} from "@/server/sandbox/timeout";
+import {
   getStore,
   getInitializedMeta,
   mutateMeta,
@@ -38,10 +42,7 @@ import {
 } from "@/server/store/store";
 
 const OPENCLAW_PORT = 3000;
-const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const SANDBOX_PORTS = [OPENCLAW_PORT];
-const EXTEND_TIMEOUT_MS = 15 * 60 * 1000;
-const ACCESS_TOUCH_THROTTLE_MS = 30_000;
 const LIFECYCLE_LOCK_KEY = "openclaw-single:lock:lifecycle";
 const START_LOCK_KEY = "openclaw-single:lock:start";
 const TOKEN_REFRESH_LOCK_KEY = "openclaw-single:lock:token-refresh";
@@ -319,13 +320,41 @@ export async function touchRunningSandbox(): Promise<SingleMeta> {
   }
 
   const now = Date.now();
-  if (meta.lastAccessedAt && now - meta.lastAccessedAt < ACCESS_TOUCH_THROTTLE_MS) {
+  const throttleMs = getSandboxTouchThrottleMs();
+  if (meta.lastAccessedAt && now - meta.lastAccessedAt < throttleMs) {
     return meta;
   }
 
-  const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
+  let sandbox: SandboxHandle;
   try {
-    await sandbox.extendTimeout(EXTEND_TIMEOUT_MS);
+    sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return markSandboxUnavailable(`sandbox lookup failed: ${message}`);
+  }
+
+  const targetSleepAfterMs = getSandboxSleepAfterMs();
+
+  try {
+    const remainingMs = Math.max(0, sandbox.timeout);
+    const extendByMs = Math.max(0, targetSleepAfterMs - remainingMs);
+
+    if (extendByMs > 0) {
+      await sandbox.extendTimeout(extendByMs);
+      logInfo("sandbox.timeout_topped_up", {
+        sandboxId: meta.sandboxId,
+        remainingMs,
+        extendByMs,
+        targetSleepAfterMs,
+      });
+    } else {
+      logInfo("sandbox.timeout_top_up_skipped", {
+        sandboxId: meta.sandboxId,
+        remainingMs,
+        targetSleepAfterMs,
+        reason: "already-at-or-above-target",
+      });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes("sandbox_timeout_invalid")) {
@@ -335,8 +364,6 @@ export async function touchRunningSandbox(): Promise<SingleMeta> {
         sandboxId: meta.sandboxId,
         error: message,
       });
-      // Sandbox may be auto-suspended — mark unavailable so callers
-      // don't attempt a doomed proxy request.
       return markSandboxUnavailable(
         `extend timeout failed: ${message}`,
       );
@@ -346,6 +373,20 @@ export async function touchRunningSandbox(): Promise<SingleMeta> {
   return mutateMeta((next) => {
     next.lastAccessedAt = now;
   });
+}
+
+export async function getRunningSandboxTimeoutRemainingMs(): Promise<number | null> {
+  const meta = await getInitializedMeta();
+  if (!meta.sandboxId || meta.status !== "running") {
+    return null;
+  }
+
+  try {
+    const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
+    return Math.max(0, sandbox.timeout);
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +666,36 @@ export async function writeRestoreCredentialFiles(
       output,
     });
   }
+}
+
+/**
+ * Conditional credential write — reads existing values from the sandbox first
+ * and only issues a shell write when they differ.  Saves one `runCommand`
+ * round-trip on repeated restores from the same snapshot where tokens have
+ * not rotated.
+ */
+async function syncRestoreCredentialFilesIfNeeded(
+  sandbox: SandboxHandle,
+  options: { gatewayToken: string; apiKey?: string },
+): Promise<{ skipped: boolean }> {
+  const [existingGwToken, existingApiKey] = await Promise.all([
+    sandbox.readFileToBuffer({ path: OPENCLAW_GATEWAY_TOKEN_PATH }),
+    sandbox.readFileToBuffer({ path: OPENCLAW_AI_GATEWAY_API_KEY_PATH }),
+  ]);
+
+  const currentGwToken = existingGwToken?.toString("utf8") ?? "";
+  const currentApiKey = existingApiKey?.toString("utf8") ?? "";
+  const desiredApiKey = options.apiKey ?? "";
+
+  if (currentGwToken === options.gatewayToken && currentApiKey === desiredApiKey) {
+    logInfo("sandbox.restore.credentials_unchanged", {
+      sandboxId: sandbox.sandboxId,
+    });
+    return { skipped: true };
+  }
+
+  await writeRestoreCredentialFiles(sandbox, options);
+  return { skipped: false };
 }
 
 // Targeted gateway restart for token refresh — avoids re-running the full
@@ -1017,14 +1088,15 @@ async function createAndBootstrapSandbox(origin: string): Promise<SingleMeta> {
     });
 
     const vcpus = getSandboxVcpus();
+    const sleepAfterMs = getSandboxSleepAfterMs();
     const sandbox = await getSandboxController().create({
       ports: SANDBOX_PORTS,
-      timeout: DEFAULT_TIMEOUT_MS,
+      timeout: sleepAfterMs,
       resources: { vcpus },
       ...(await buildRuntimeEnv()),
     });
 
-    logInfo("sandbox.status_transition", { from: "creating", to: "setup", sandboxId: sandbox.sandboxId, vcpus });
+    logInfo("sandbox.status_transition", { from: "creating", to: "setup", sandboxId: sandbox.sandboxId, vcpus, sleepAfterMs });
     await mutateMeta((meta) => {
       meta.status = "setup";
       meta.sandboxId = sandbox.sandboxId;
@@ -1099,8 +1171,9 @@ async function restoreSandboxFromSnapshot(
     const skipPublicReady = options?.skipPublicReady ?? false;
     const restoreStartedAt = Date.now();
     const vcpus = getSandboxVcpus();
+    const sleepAfterMs = getSandboxSleepAfterMs();
 
-    logInfo("sandbox.status_transition", { from: current.status, to: "restoring", snapshotId: current.snapshotId });
+    logInfo("sandbox.status_transition", { from: current.status, to: "restoring", snapshotId: current.snapshotId, sleepAfterMs });
     await mutateMeta((meta) => {
       meta.status = "restoring";
       meta.lastError = null;
@@ -1109,7 +1182,7 @@ async function restoreSandboxFromSnapshot(
     const sandboxCreateStart = Date.now();
     const sandbox = await getSandboxController().create({
       ports: SANDBOX_PORTS,
-      timeout: DEFAULT_TIMEOUT_MS,
+      timeout: sleepAfterMs,
       resources: { vcpus },
       source: {
         type: "snapshot",
@@ -1124,19 +1197,20 @@ async function restoreSandboxFromSnapshot(
       meta.portUrls = resolvePortUrls(sandbox);
     });
 
-    // Write both credential files atomically — the snapshot's baked-in
-    // copies contain stale tokens.  When no fresh credential is available
-    // do NOT blank the existing .ai-gateway-api-key file — a stale token
-    // is better than no token at all during restore.
+    // Write credential files only when the snapshot's baked-in copies differ
+    // from the current values.  When no fresh credential is available do NOT
+    // blank the existing .ai-gateway-api-key file — a stale token is better
+    // than no token at all during restore.
     const tokenWriteStart = Date.now();
     const freshApiKey = credential?.token ?? (await getAiGatewayBearerTokenOptional());
     const latest = await getInitializedMeta();
 
     if (freshApiKey) {
-      await writeRestoreCredentialFiles(sandbox, {
+      const credSync = await syncRestoreCredentialFilesIfNeeded(sandbox, {
         gatewayToken: latest.gatewayToken,
         apiKey: freshApiKey,
       });
+      logInfo("sandbox.restore.credential_sync", { skipped: credSync.skipped });
     } else {
       // No fresh API key — only write the gateway token, preserve
       // whatever AI Gateway key the snapshot already has on disk.
@@ -1146,9 +1220,6 @@ async function restoreSandboxFromSnapshot(
       });
       await writeRestoreCredentialFiles(sandbox, {
         gatewayToken: latest.gatewayToken,
-        // Omit apiKey — writeRestoreCredentialFiles writes empty string,
-        // but we still need the gateway token written. Use separate write
-        // for gateway token only to avoid blanking the AI key.
       });
     }
     const tokenWriteMs = Date.now() - tokenWriteStart;
@@ -1168,26 +1239,7 @@ async function restoreSandboxFromSnapshot(
       assetSha256: assetSyncResult.assetSha256,
     });
 
-    // Use the dedicated fast-restore script which inlines force-pair and
-    // skips shell-hook setup already baked into the snapshot.  This replaces
-    // the previous two-step sequence of generic startup + separate force-pair.
-    const startupScriptStart = Date.now();
-    logInfo("sandbox.restore.fast_restore_start", { sandboxId: sandbox.sandboxId });
-    const restoreResult = await sandbox.runCommand("bash", [
-      OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
-    ]);
-    if (restoreResult.exitCode !== 0) {
-      const output = await restoreResult.output("both");
-      throw new CommandFailedError({
-        command: "fast-restore-script",
-        exitCode: restoreResult.exitCode,
-        output,
-      });
-    }
-    const startupScriptMs = Date.now() - startupScriptStart;
-    logInfo("sandbox.restore.fast_restore_complete", { startupScriptMs, sandboxId: sandbox.sandboxId });
-
-    // Force-pair is now inlined in the fast-restore script, so this phase
+    // Force-pair is inlined in the fast-restore script, so this phase
     // is always 0.  Kept for RestorePhaseMetrics backward compatibility.
     const forcePairMs = 0;
 
@@ -1199,31 +1251,59 @@ async function restoreSandboxFromSnapshot(
       meta.lastError = null;
     });
 
-    // Overlap firewall sync with local gateway readiness polling.
-    // Firewall policy application does not depend on the gateway being
-    // healthy, and gateway boot does not depend on firewall rules.
-    // Running them concurrently saves the full firewallSyncMs from the
-    // critical path.
+    // Overlap fast-restore (gateway start + force-pair + in-sandbox readiness
+    // polling) with firewall sync.  The fast-restore script now polls
+    // localhost internally instead of the host issuing ~120 separate
+    // sandbox.runCommand("curl") calls, eliminating per-attempt control-plane
+    // round-trip overhead.
+    const READINESS_TIMEOUT_SECONDS = 30;
     const bootOverlapStart = Date.now();
     let firewallSyncMs = 0;
+    let startupScriptMs = 0;
     let localReadyMs = 0;
 
     await Promise.all([
+      (async () => {
+        const t0 = Date.now();
+        logInfo("sandbox.restore.fast_restore_start", { sandboxId: sandbox.sandboxId });
+        const restoreResult = await sandbox.runCommand("bash", [
+          OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
+          String(READINESS_TIMEOUT_SECONDS),
+        ]);
+
+        startupScriptMs = Date.now() - t0;
+
+        if (restoreResult.exitCode !== 0) {
+          const output = await restoreResult.output("both");
+          throw new CommandFailedError({
+            command: "fast-restore-script",
+            exitCode: restoreResult.exitCode,
+            output,
+          });
+        }
+
+        // Parse the JSON readiness report from stdout.
+        const stdout = await restoreResult.output("stdout");
+        try {
+          const parsed = JSON.parse(stdout.trim());
+          localReadyMs = typeof parsed.readyMs === "number" ? parsed.readyMs : startupScriptMs;
+        } catch {
+          // Fallback: script exited 0 so gateway is ready.
+          localReadyMs = startupScriptMs;
+        }
+
+        logInfo("sandbox.restore.fast_restore_complete", {
+          startupScriptMs,
+          localReadyMs,
+          sandboxId: sandbox.sandboxId,
+        });
+      })(),
       (async () => {
         const t0 = Date.now();
         await applyFirewallPolicyToSandbox(sandbox, next);
         firewallSyncMs = Date.now() - t0;
         logInfo("sandbox.restore.firewall_sync_overlapped", {
           firewallSyncMs,
-          sandboxId: sandbox.sandboxId,
-        });
-      })(),
-      (async () => {
-        const t0 = Date.now();
-        await waitForGatewayReady(sandbox, { maxAttempts: 120, delayMs: 250 });
-        localReadyMs = Date.now() - t0;
-        logInfo("sandbox.restore.local_ready", {
-          localReadyMs,
           sandboxId: sandbox.sandboxId,
         });
       })(),

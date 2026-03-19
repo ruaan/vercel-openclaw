@@ -8,6 +8,7 @@ import {
   ensureFreshGatewayToken,
   ensureSandboxRunning,
   ensureSandboxReady,
+  getRunningSandboxTimeoutRemainingMs,
   probeGatewayReady,
   reconcileSandboxHealth,
   stopSandbox,
@@ -16,6 +17,9 @@ import {
   touchRunningSandbox,
   markSandboxUnavailable,
 } from "@/server/sandbox/lifecycle";
+import {
+  _resetSandboxSleepConfigCacheForTesting,
+} from "@/server/sandbox/timeout";
 import {
   _setSandboxControllerForTesting,
   type CommandResult,
@@ -67,9 +71,15 @@ class FakeSandboxHandle implements SandboxHandle {
   extendedTimeouts: number[] = [];
   snapshotCalled = false;
   commandHandler: CommandHandler | null = null;
+  private timeoutMs: number;
 
-  constructor(sandboxId: string) {
+  constructor(sandboxId: string, timeoutMs = 30 * 60 * 1000) {
     this.sandboxId = sandboxId;
+    this.timeoutMs = timeoutMs;
+  }
+
+  get timeout(): number {
+    return this.timeoutMs;
   }
 
   async runCommand(
@@ -83,6 +93,20 @@ class FakeSandboxHandle implements SandboxHandle {
     }
     if (command === OPENCLAW_BIN && args?.[0] === "--version") {
       return { exitCode: 0, output: async () => "openclaw 1.2.3" };
+    }
+    // Fast-restore script now includes readiness polling and outputs JSON
+    // on stdout.  Return stream-aware output so the caller can parse it.
+    if (command === "bash" && args?.[0] === OPENCLAW_FAST_RESTORE_SCRIPT_PATH) {
+      const stdoutJson = '{"ready":true,"attempts":3,"readyMs":150}';
+      const stderrEvents = '{"event":"fast_restore.complete"}';
+      return {
+        exitCode: 0,
+        output: async (stream?: "stdout" | "stderr" | "both") => {
+          if (stream === "stdout") return stdoutJson;
+          if (stream === "stderr") return stderrEvents;
+          return `${stdoutJson}\n${stderrEvents}`;
+        },
+      };
     }
     // Respond to the local curl readiness probe used by waitForGatewayReady
     if (command === "curl" && args?.some((a) => a.includes("localhost:3000"))) {
@@ -118,6 +142,7 @@ class FakeSandboxHandle implements SandboxHandle {
   }
 
   async extendTimeout(duration: number): Promise<void> {
+    this.timeoutMs += duration;
     this.extendedTimeouts.push(duration);
   }
 
@@ -146,7 +171,7 @@ class FakeSandboxController implements SandboxController {
     }
     this.counter += 1;
     const id = `sbx-fake-${this.counter}`;
-    const handle = new FakeSandboxHandle(id);
+    const handle = new FakeSandboxHandle(id, params.timeout);
     if (this.commandHandler) {
       handle.commandHandler = this.commandHandler;
     }
@@ -185,6 +210,7 @@ const ENV_OVERRIDES: Record<string, string | undefined> = {
   KV_REST_API_TOKEN: undefined,
   AI_GATEWAY_API_KEY: undefined,
   VERCEL_OIDC_TOKEN: undefined,
+  OPENCLAW_SANDBOX_SLEEP_AFTER_MS: undefined,
 };
 
 async function withTestEnv(
@@ -202,12 +228,14 @@ async function withTestEnv(
   }
 
   _setSandboxControllerForTesting(fake);
+  _resetSandboxSleepConfigCacheForTesting();
 
   try {
     await fn();
   } finally {
     _setSandboxControllerForTesting(null);
     _resetStoreForTesting();
+    _resetSandboxSleepConfigCacheForTesting();
     for (const key of Object.keys(originals)) {
       if (originals[key] === undefined) {
         delete process.env[key];
@@ -906,16 +934,23 @@ test("restoreSandboxFromSnapshot overlaps firewall sync with local readiness and
         "publicReadyMs should be 0 when skipped",
       );
 
-      // bootOverlapMs should be >= max(firewallSyncMs, localReadyMs)
-      // (wall-clock time for the overlapped phase)
+      // bootOverlapMs is the wall-clock time for Promise.all(fast-restore, firewall).
+      // localReadyMs is now an in-sandbox timing extracted from the script's JSON output,
+      // not a wall-clock duration of a Promise.all leg, so it may exceed bootOverlapMs.
+      // The correct invariant is: bootOverlapMs >= firewallSyncMs (firewall is one leg).
       const m = meta.lastRestoreMetrics;
       assert.ok(
         typeof m.bootOverlapMs === "number",
         "bootOverlapMs should be a number",
       );
       assert.ok(
-        m.bootOverlapMs! >= Math.max(m.firewallSyncMs, m.localReadyMs),
-        `bootOverlapMs (${m.bootOverlapMs}) should be >= max(firewallSyncMs=${m.firewallSyncMs}, localReadyMs=${m.localReadyMs})`,
+        m.bootOverlapMs! >= m.firewallSyncMs,
+        `bootOverlapMs (${m.bootOverlapMs}) should be >= firewallSyncMs (${m.firewallSyncMs})`,
+      );
+      // localReadyMs comes from the fast-restore script's readiness JSON
+      assert.ok(
+        typeof m.localReadyMs === "number" && m.localReadyMs >= 0,
+        "localReadyMs should be a non-negative number from script output",
       );
 
       // Firewall policy should have been applied to the sandbox
@@ -1014,11 +1049,12 @@ test("restoreSandboxFromSnapshot runs bash fast-restore-script and checks exit c
         tokenOverride: "test-key",
       });
 
-      // Should have a "bash" command with the fast-restore script path
+      // Should have a "bash" command with the fast-restore script path + timeout arg
       const bashCmd = handle.commands.find(
         (c) => c.cmd === "bash" && c.args?.[0] === OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
       );
       assert.ok(bashCmd, "Should run bash with fast-restore script path");
+      assert.ok(bashCmd?.args?.[1], "Should pass readiness timeout argument");
 
       // Should NOT have a separate force-pair step — it's inlined
       const forcePairCmd = handle.commands.find(
@@ -1718,8 +1754,9 @@ test("[lifecycle] touchRunningSandbox extend timeout throws -> marks sandbox una
       meta.lastAccessedAt = null;
     });
 
-    // Make the extendTimeout throw
-    const handle = new FakeSandboxHandle("sbx-extend-error");
+    // Make the extendTimeout throw — use a low timeout so the top-up logic
+    // actually attempts an extension (target - remaining > 0).
+    const handle = new FakeSandboxHandle("sbx-extend-error", 60_000);
     handle.extendTimeout = async () => {
       throw new Error("some network error");
     };
@@ -1746,7 +1783,7 @@ test("[lifecycle] touchRunningSandbox sandbox_timeout_invalid error -> silently 
       meta.lastAccessedAt = null;
     });
 
-    const handle = new FakeSandboxHandle("sbx-timeout-invalid");
+    const handle = new FakeSandboxHandle("sbx-timeout-invalid", 60_000);
     handle.extendTimeout = async () => {
       throw new Error("sandbox_timeout_invalid");
     };
@@ -2589,5 +2626,208 @@ test("reconcileSandboxHealth with 410-style unreachable sandbox repairs correctl
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lifecycle top-up timeout semantics (acceptance criteria)
+// ---------------------------------------------------------------------------
+
+test("touchRunningSandbox tops up by difference when remaining < target (300000 target, 120000 remaining -> extend 180000)", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    process.env.OPENCLAW_SANDBOX_SLEEP_AFTER_MS = "300000";
+    _resetSandboxSleepConfigCacheForTesting();
+
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-topup-math";
+      meta.lastAccessedAt = null;
+    });
+
+    // Pre-create handle with 120000ms remaining
+    const handle = new FakeSandboxHandle("sbx-topup-math", 120_000);
+    fake.handlesByIds.set("sbx-topup-math", handle);
+
+    const result = await touchRunningSandbox();
+    assert.equal(result.status, "running");
+    assert.equal(handle.extendedTimeouts.length, 1, "Should extend timeout exactly once");
+    assert.equal(handle.extendedTimeouts[0], 180_000, "Should extend by 300000 - 120000 = 180000");
+  });
+});
+
+test("touchRunningSandbox does not extend when remaining >= target (300000 target, 420000 remaining -> no extend)", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    process.env.OPENCLAW_SANDBOX_SLEEP_AFTER_MS = "300000";
+    _resetSandboxSleepConfigCacheForTesting();
+
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-topup-skip";
+      meta.lastAccessedAt = null;
+    });
+
+    // Pre-create handle with 420000ms remaining (above target)
+    const handle = new FakeSandboxHandle("sbx-topup-skip", 420_000);
+    fake.handlesByIds.set("sbx-topup-skip", handle);
+
+    const result = await touchRunningSandbox();
+    assert.equal(result.status, "running");
+    assert.equal(handle.extendedTimeouts.length, 0, "Should NOT extend timeout when remaining >= target");
+  });
+});
+
+test("touchRunningSandbox does not extend when remaining == target exactly", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    process.env.OPENCLAW_SANDBOX_SLEEP_AFTER_MS = "300000";
+    _resetSandboxSleepConfigCacheForTesting();
+
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-topup-exact";
+      meta.lastAccessedAt = null;
+    });
+
+    const handle = new FakeSandboxHandle("sbx-topup-exact", 300_000);
+    fake.handlesByIds.set("sbx-topup-exact", handle);
+
+    const result = await touchRunningSandbox();
+    assert.equal(result.status, "running");
+    assert.equal(handle.extendedTimeouts.length, 0, "Should NOT extend when remaining == target");
+  });
+});
+
+test("touchRunningSandbox marks sandbox unavailable when controller.get() fails", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-lookup-fail";
+      meta.lastAccessedAt = null;
+      meta.snapshotId = "snap-for-recovery";
+    });
+
+    // Override get() to throw
+    fake.get = async () => {
+      throw new Error("sandbox not found");
+    };
+
+    const result = await touchRunningSandbox();
+    assert.equal(result.status, "stopped", "Should transition to stopped (has snapshotId)");
+    assert.ok(result.lastError?.includes("sandbox lookup failed"), "lastError should mention lookup failure");
+    assert.equal(result.sandboxId, null, "sandboxId should be cleared");
+  });
+});
+
+test("create flow passes configured sleepAfterMs as timeout to controller.create()", async () => {
+  const fake = new FakeSandboxController();
+  const originalFetch = globalThis.fetch;
+
+  fake.commandHandler = (cmd) => {
+    if (cmd === "curl") {
+      return { exitCode: 0, output: '<div id="openclaw-app"></div>' };
+    }
+    return { exitCode: 0, output: "" };
+  };
+
+  await withTestEnv(fake, async () => {
+    process.env.OPENCLAW_SANDBOX_SLEEP_AFTER_MS = "300000";
+    _resetSandboxSleepConfigCacheForTesting();
+
+    globalThis.fetch = async () =>
+      new Response('<div id="openclaw-app"></div>', { status: 200 });
+
+    try {
+      let scheduledCallback: (() => Promise<void> | void) | null = null;
+
+      await ensureSandboxRunning({
+        origin: "https://test.example.com",
+        reason: "create-timeout-test",
+        schedule(cb) {
+          scheduledCallback = cb;
+        },
+      });
+
+      assert.ok(scheduledCallback);
+      await (scheduledCallback as () => Promise<void>)();
+
+      const handle = fake.created[0];
+      assert.ok(handle, "Should have created a sandbox");
+      // The handle's initial timeout should match the configured sleepAfterMs
+      // (FakeSandboxHandle stores the timeout passed via params.timeout)
+      // After create + bootstrap the handle may have had extendTimeout called,
+      // so check the initial timeout via the created params instead.
+      // Since our FakeSandboxHandle now receives params.timeout in constructor,
+      // the initial timeoutMs was 300000 and any extensions add to it.
+      const totalTimeout = handle.timeout;
+      const totalExtended = handle.extendedTimeouts.reduce((a, b) => a + b, 0);
+      const initialTimeout = totalTimeout - totalExtended;
+      assert.equal(initialTimeout, 300_000, "Create should pass sleepAfterMs=300000 as timeout");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("restore flow passes configured sleepAfterMs as timeout to controller.create()", async () => {
+  const fake = new FakeSandboxController();
+  const originalFetch = globalThis.fetch;
+
+  await withTestEnv(fake, async () => {
+    process.env.OPENCLAW_SANDBOX_SLEEP_AFTER_MS = "300000";
+    _resetSandboxSleepConfigCacheForTesting();
+
+    await mutateMeta((meta) => {
+      meta.status = "stopped";
+      meta.snapshotId = "snap-timeout-test";
+      meta.gatewayToken = "test-gw-token";
+    });
+
+    globalThis.fetch = async () =>
+      new Response('<div id="openclaw-app"></div>', { status: 200 });
+
+    try {
+      const { handle } = await triggerRestore(fake, {
+        tokenOverride: "test-ai-key",
+      });
+
+      const totalTimeout = handle.timeout;
+      const totalExtended = handle.extendedTimeouts.reduce((a, b) => a + b, 0);
+      const initialTimeout = totalTimeout - totalExtended;
+      assert.equal(initialTimeout, 300_000, "Restore should pass sleepAfterMs=300000 as timeout");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("getRunningSandboxTimeoutRemainingMs returns remaining ms for running sandbox", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-remaining";
+    });
+
+    const handle = new FakeSandboxHandle("sbx-remaining", 250_000);
+    fake.handlesByIds.set("sbx-remaining", handle);
+
+    const remaining = await getRunningSandboxTimeoutRemainingMs();
+    assert.equal(remaining, 250_000);
+  });
+});
+
+test("getRunningSandboxTimeoutRemainingMs returns null when not running", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    await mutateMeta((meta) => {
+      meta.status = "stopped";
+      meta.sandboxId = null;
+    });
+
+    const remaining = await getRunningSandboxTimeoutRemainingMs();
+    assert.equal(remaining, null);
   });
 });

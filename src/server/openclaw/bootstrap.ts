@@ -17,6 +17,10 @@ import {
   buildStructuredExtractSkill,
   buildStructuredExtractScript,
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+  BUN_BIN,
+  BUN_DOWNLOAD_SHA256,
+  BUN_DOWNLOAD_URL,
+  BUN_INSTALL_DIR,
   OPENCLAW_BIN,
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
@@ -126,6 +130,39 @@ export async function setupOpenClaw(
     "--ignore-scripts",
   ]);
   await assertCommandSuccess("npm install", installResult);
+
+  // Install Bun for faster gateway startup on snapshot restore.
+  // Bun's JSC engine loads the 577MB/10K-file openclaw package ~33% faster
+  // than Node.js v22 on 1 vCPU.  Best-effort — restore falls back to Node
+  // if Bun is missing.
+  //
+  // Downloads the pinned release binary directly from GitHub, verifies its
+  // SHA-256, and extracts to BUN_INSTALL_DIR.  No remote installer script
+  // is executed.
+  const bunInstall = await sandbox.runCommand("sh", [
+    "-c",
+    [
+      "set -e",
+      `curl -fsSL --max-time 60 --connect-timeout 10 -o /tmp/bun.zip ${JSON.stringify(BUN_DOWNLOAD_URL)}`,
+      `printf '%s  /tmp/bun.zip\\n' ${JSON.stringify(BUN_DOWNLOAD_SHA256)} | sha256sum -c`,
+      `mkdir -p ${JSON.stringify(BUN_INSTALL_DIR + "/bin")}`,
+      `unzip -o -j /tmp/bun.zip -d ${JSON.stringify(BUN_INSTALL_DIR + "/bin")}`,
+      `chmod +x ${JSON.stringify(BUN_BIN)}`,
+      `rm -f /tmp/bun.zip`,
+      `${JSON.stringify(BUN_BIN)} --version`,
+    ].join(" && "),
+  ]);
+  if (bunInstall.exitCode === 0) {
+    const bunVersion = (await bunInstall.output("stdout")).trim();
+    logInfo("openclaw.setup.bun_installed", { sandboxId: sandbox.sandboxId, bunVersion });
+  } else {
+    const stderr = (await bunInstall.output("stderr")).trim();
+    logWarn("openclaw.setup.bun_install_failed", {
+      sandboxId: sandbox.sandboxId,
+      exitCode: bunInstall.exitCode,
+      stderr: stderr.slice(-500),
+    });
+  }
 
   await sandbox.writeFiles([
     {
