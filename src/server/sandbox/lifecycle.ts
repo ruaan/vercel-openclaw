@@ -1221,24 +1221,22 @@ async function restoreSandboxFromSnapshot(
       meta.portUrls = resolvePortUrls(sandbox);
     });
 
-    // Write credential files only when the snapshot's baked-in copies differ
-    // from the current values.  When no fresh credential is available do NOT
-    // blank the existing .ai-gateway-api-key file — a stale token is better
-    // than no token at all during restore.
+    // Write credential files via writeFiles() — a single SDK call that writes
+    // both tokens in one round-trip.  This replaces the prior approach of
+    // runCommand("sh", ...) which was 2-3s per API call.
     //
-    // Reuse the credential resolved before sandbox.create() — calling
-    // getAiGatewayBearerTokenOptional() here would trigger a second OIDC
-    // round-trip (~5s), which was the main cost in tokenWriteMs.
+    // OIDC tokens rotate on every restore, so the read-then-compare
+    // optimization rarely helps and costs 2 extra API round-trips (~4-6s).
+    // Just write unconditionally via the batch file API.
     const tokenWriteStart = Date.now();
     const freshApiKey = credential?.token;
     const latest = await getInitializedMeta();
 
     if (freshApiKey) {
-      const credSync = await syncRestoreCredentialFilesIfNeeded(sandbox, {
-        gatewayToken: latest.gatewayToken,
-        apiKey: freshApiKey,
-      });
-      logInfo("sandbox.restore.credential_sync", { skipped: credSync.skipped });
+      await sandbox.writeFiles([
+        { path: OPENCLAW_GATEWAY_TOKEN_PATH, content: Buffer.from(latest.gatewayToken) },
+        { path: OPENCLAW_AI_GATEWAY_API_KEY_PATH, content: Buffer.from(freshApiKey) },
+      ]);
     } else {
       // No fresh API key — only write the gateway token, preserve
       // whatever AI Gateway key the snapshot already has on disk.
@@ -1246,9 +1244,9 @@ async function restoreSandboxFromSnapshot(
         sandboxId: sandbox.sandboxId,
         reason: "No fresh AI Gateway credential available",
       });
-      await writeRestoreCredentialFiles(sandbox, {
-        gatewayToken: latest.gatewayToken,
-      });
+      await sandbox.writeFiles([
+        { path: OPENCLAW_GATEWAY_TOKEN_PATH, content: Buffer.from(latest.gatewayToken) },
+      ]);
     }
     const tokenWriteMs = Date.now() - tokenWriteStart;
 

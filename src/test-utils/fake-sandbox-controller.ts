@@ -15,7 +15,6 @@ import type {
   SnapshotResult,
 } from "@/server/sandbox/controller";
 import {
-  OPENCLAW_BIN,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
 } from "@/server/openclaw/config";
 
@@ -68,6 +67,9 @@ export class FakeSandboxHandle implements SandboxHandle {
    */
   responders: CommandResponder[] = [];
 
+  /** Optional hook called before writeFiles completes.  Throw to simulate failure. */
+  writeFilesHook?: (files: { path: string; content: Buffer }[]) => void;
+
   private timeoutMs: number;
 
   constructor(sandboxId: string, eventLog: SandboxEvent[], timeoutMs = 5 * 60 * 1000) {
@@ -98,10 +100,6 @@ export class FakeSandboxHandle implements SandboxHandle {
       }
     }
 
-    // Default: openclaw --version
-    if (command === OPENCLAW_BIN && args?.[0] === "--version") {
-      return { exitCode: 0, output: async () => "openclaw 1.2.3" };
-    }
     // Default: fast-restore script with stream-aware output
     if (command === "bash" && args?.[0] === OPENCLAW_FAST_RESTORE_SCRIPT_PATH) {
       const stdoutJson = '{"ready":true,"attempts":3,"readyMs":150}';
@@ -130,6 +128,9 @@ export class FakeSandboxHandle implements SandboxHandle {
   }
 
   async writeFiles(files: { path: string; content: Buffer }[]): Promise<void> {
+    if (this.writeFilesHook) {
+      this.writeFilesHook(files);
+    }
     this.writtenFiles.push(...files);
     this.eventLog.push({
       kind: "write_files",
@@ -200,6 +201,9 @@ export class FakeSandboxController implements SandboxController {
   /** Default responders copied to every handle created by `create()`. */
   defaultResponders: CommandResponder[] = [];
 
+  /** Optional hook called before writeFiles completes.  Throw to simulate failure. */
+  onWriteFiles?: (files: { path: string; content: Buffer }[]) => void;
+
   private counter = 0;
   private delay: number;
   private _createFailure: Error | null = null;
@@ -227,6 +231,9 @@ export class FakeSandboxController implements SandboxController {
     const isRestore = params.source?.type === "snapshot";
     const handle = new FakeSandboxHandle(id, this.events, params.timeout);
     handle.responders.push(...this.defaultResponders);
+    if (this.onWriteFiles) {
+      handle.writeFilesHook = this.onWriteFiles;
+    }
     this.created.push(handle);
     this.handlesByIds.set(id, handle);
     this.events.push({

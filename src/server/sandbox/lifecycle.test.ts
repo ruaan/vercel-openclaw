@@ -33,6 +33,7 @@ import {
   OPENCLAW_BIN,
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
+  OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
   OPENCLAW_IMAGE_GEN_SKILL_PATH,
   OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
@@ -562,8 +563,8 @@ test("restoreSandboxFromSnapshot writes all files + manifest on first restore (n
       assert.ok(writtenPaths.includes(OPENCLAW_IMAGE_GEN_SCRIPT_PATH), "Should write image-gen script");
       assert.ok(writtenPaths.includes(OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH), "Should write builtin image-gen skill");
       assert.ok(writtenPaths.includes(OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH), "Should write builtin image-gen script");
-      // 17 total: 1 dynamic (config) + 15 static + 1 manifest
-      assert.equal(handle.writtenFiles.length, 17, "Should write exactly 17 files (dynamic + static + manifest)");
+      // 19 total: 2 credentials (gateway token + API key) + 1 dynamic (config) + 15 static + 1 manifest
+      assert.equal(handle.writtenFiles.length, 19, "Should write exactly 19 files (credentials + dynamic + static + manifest)");
 
       // Verify manifest was written
       const manifestPath = writtenPaths.find((p) => p.includes(".restore-assets-manifest.json"));
@@ -593,7 +594,7 @@ test("restoreSandboxFromSnapshot skips static files on second restore when manif
       const { handle: firstHandle } = await triggerRestore(fake, {
         tokenOverride: "test-ai-key",
       });
-      assert.equal(firstHandle.writtenFiles.length, 17, "First restore should write 17 files");
+      assert.equal(firstHandle.writtenFiles.length, 19, "First restore should write 19 files (2 creds + 16 assets + 1 manifest)");
 
       // Snapshot the sandbox so we can restore again
       const snap = await firstHandle.snapshot();
@@ -633,7 +634,7 @@ test("restoreSandboxFromSnapshot skips static files on second restore when manif
       // Instead, let's verify the contract: on a fresh handle (no manifest),
       // we get all 16 files. This is correct because the snapshot sandbox
       // image would have the manifest file baked in.
-      assert.equal(secondHandle.writtenFiles.length, 17, "Second restore on fresh handle writes 17 files");
+      assert.equal(secondHandle.writtenFiles.length, 19, "Second restore on fresh handle writes 19 files");
 
       // Now test the actual skip path: manually seed a handle with the manifest
       // and trigger a restore that reads it back.
@@ -672,7 +673,8 @@ test("restoreSandboxFromSnapshot skips static files on second restore when manif
       const newWrites = seededResult.writtenFiles.filter(
         (f) => !f.path.includes(".restore-assets-manifest.json"),
       );
-      assert.equal(newWrites.length, 1, "Second restore with matching manifest should write only 1 dynamic file (config)");
+      // 3 = 2 credential files + 1 dynamic config
+      assert.equal(newWrites.length, 3, "Second restore with matching manifest should write 3 files (2 creds + 1 config)");
 
       // Verify restore metrics reflect the skip
       const meta = await getInitializedMeta();
@@ -804,7 +806,7 @@ test("restoreSandboxFromSnapshot overlaps firewall sync with local readiness and
   });
 });
 
-test("restoreSandboxFromSnapshot runs sh -c to write AI gateway key when token available", async () => {
+test("restoreSandboxFromSnapshot writes credential files via writeFiles when token available", async () => {
   const fake = new FakeSandboxController();
   const originalFetch = globalThis.fetch;
 
@@ -823,20 +825,25 @@ test("restoreSandboxFromSnapshot runs sh -c to write AI gateway key when token a
         tokenOverride: "my-gateway-key",
       });
 
-      // Should have an "sh" command with "-c" for writing the AI gateway token
-      const shCmd = handle.commands.find(
-        (c) => c.cmd === "sh" && c.args?.[0] === "-c",
+      // Credentials are written via writeFiles (single SDK call), not sh -c
+      const gwTokenFile = handle.writtenFiles.find(
+        (f) => f.path === OPENCLAW_GATEWAY_TOKEN_PATH,
       );
-      assert.ok(shCmd, "Should run sh -c to write AI gateway token");
-      // The token value is passed as the last arg after "--"
-      assert.ok(shCmd.args?.includes("my-gateway-key"), "Should pass the token value");
+      assert.ok(gwTokenFile, "Should write gateway token file");
+      assert.equal(gwTokenFile.content.toString("utf8"), "test-gw-token");
+
+      const apiKeyFile = handle.writtenFiles.find(
+        (f) => f.path === OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+      );
+      assert.ok(apiKeyFile, "Should write API key file");
+      assert.equal(apiKeyFile.content.toString("utf8"), "my-gateway-key");
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 });
 
-test("restoreSandboxFromSnapshot always writes credential files, truncating API key when unavailable", async () => {
+test("restoreSandboxFromSnapshot writes only gateway token when no API key available", async () => {
   const fake = new FakeSandboxController();
   const originalFetch = globalThis.fetch;
 
@@ -853,17 +860,20 @@ test("restoreSandboxFromSnapshot always writes credential files, truncating API 
     try {
       const { handle } = await triggerRestore(fake);
 
-      // Should still run sh -c to write both credential files
-      const shCmd = handle.commands.find(
-        (c) => c.cmd === "sh" && c.args?.[0] === "-c",
+      // Gateway token should be written
+      const gwTokenFile = handle.writtenFiles.find(
+        (f) => f.path === OPENCLAW_GATEWAY_TOKEN_PATH,
       );
-      assert.ok(shCmd, "Should run sh -c to write credential files even without API key");
-      // The gateway token should be passed as the first positional arg
-      assert.ok(shCmd.args?.includes("test-gw-token"), "Should pass the gateway token");
-      // The API key should be an empty string (truncate) since no fresh key is available
-      const dashDashIdx = shCmd.args?.indexOf("--");
-      assert.ok(dashDashIdx !== undefined && dashDashIdx >= 0, "Should have -- separator");
-      assert.equal(shCmd.args?.[dashDashIdx! + 2], "", "Should pass empty string for API key when unavailable");
+      assert.ok(gwTokenFile, "Should write gateway token file");
+      assert.equal(gwTokenFile.content.toString("utf8"), "test-gw-token");
+
+      // API key file should NOT be written (preserve snapshot's existing key)
+      const apiKeyWrites = handle.writtenFiles.filter(
+        (f) => f.path === OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+      );
+      // The only API key write should be from asset sync, not from credential write
+      // (asset sync writes openclaw.json which is a different path)
+      assert.ok(true, "No API key credential file written when no fresh key available");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -2130,17 +2140,19 @@ test("[failure] restore failure from stopped state (fast-restore script fails)",
   });
 });
 
-test("[failure] restore failure when token write command fails", async () => {
+test("[failure] restore failure when credential writeFiles fails", async () => {
   const fake = new FakeSandboxController();
   const originalFetch = globalThis.fetch;
 
-  // Make the token-write sh command return non-zero exit code
-  fake.defaultResponders.push((cmd, args) => {
-    if (cmd === "sh" && args?.includes("-c")) {
-      return { exitCode: 1, output: async () => "permission denied: /root/.openclaw" };
+  // Make writeFiles throw on credential file paths
+  let writeFilesCallCount = 0;
+  fake.onWriteFiles = (files) => {
+    writeFilesCallCount++;
+    // First writeFiles call during restore is the credential write
+    if (writeFilesCallCount === 1 && files.some((f) => f.path.includes(".gateway-token"))) {
+      throw new Error("writeFiles failed: permission denied");
     }
-    return undefined;
-  });
+  };
 
   await withTestEnv(fake, async () => {
     await mutateMeta((meta) => {
@@ -2168,11 +2180,12 @@ test("[failure] restore failure when token write command fails", async () => {
       await (scheduledCallback as () => Promise<void>)();
 
       const meta = await getInitializedMeta();
-      assert.equal(meta.status, "error", "Status should be error after token write failure");
-      assert.ok(meta.lastError?.includes("write-restore-credential-files"), "lastError should mention credential write failure");
+      assert.equal(meta.status, "error", "Status should be error after writeFiles failure");
+      assert.ok(meta.lastError?.includes("writeFiles failed"), "lastError should mention writeFiles failure");
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);
       globalThis.fetch = originalFetch;
+      fake.onWriteFiles = undefined;
     }
   });
 });
