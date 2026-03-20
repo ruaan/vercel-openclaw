@@ -197,6 +197,156 @@ test("POST /api/status: heartbeat with CSRF returns ok when sandbox is running",
 // GET /api/status — configured sleep-after values
 // ===========================================================================
 
+// ===========================================================================
+// GET /api/status — lifecycle metadata
+// ===========================================================================
+
+test("GET /api/status: includes lifecycle metadata with restore metrics and token state", async () => {
+  await withTestEnv(async () => {
+    const now = Date.now();
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-lifecycle-test";
+      meta.lastRestoreMetrics = {
+        sandboxCreateMs: 100,
+        tokenWriteMs: 50,
+        assetSyncMs: 200,
+        startupScriptMs: 300,
+        forcePairMs: 150,
+        firewallSyncMs: 80,
+        localReadyMs: 500,
+        publicReadyMs: 600,
+        totalMs: 1980,
+        skippedStaticAssetSync: false,
+        assetSha256: "abc123",
+        vcpus: 2,
+        recordedAt: now,
+      };
+      meta.restoreHistory = [
+        {
+          sandboxCreateMs: 100,
+          tokenWriteMs: 50,
+          assetSyncMs: 200,
+          startupScriptMs: 300,
+          forcePairMs: 150,
+          firewallSyncMs: 80,
+          localReadyMs: 500,
+          publicReadyMs: 600,
+          totalMs: 1980,
+          skippedStaticAssetSync: false,
+          assetSha256: "abc123",
+          vcpus: 2,
+          recordedAt: now,
+        },
+      ];
+      meta.lastTokenRefreshAt = now - 60_000;
+      meta.lastTokenSource = "oidc";
+      meta.lastTokenExpiresAt = now + 300_000;
+      meta.lastTokenRefreshError = null;
+      meta.consecutiveTokenRefreshFailures = 0;
+      meta.breakerOpenUntil = null;
+    });
+
+    const route = getStatusRoute();
+    const request = buildAuthGetRequest("/api/status");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as {
+      lifecycle: {
+        lastRestoreMetrics: { totalMs: number; vcpus: number };
+        restoreHistory: Array<{ totalMs: number }>;
+        lastTokenRefreshAt: number;
+        lastTokenSource: string | null;
+        lastTokenExpiresAt: number | null;
+        lastTokenRefreshError: string | null;
+        consecutiveTokenRefreshFailures: number;
+        breakerOpenUntil: number | null;
+      };
+    };
+
+    assert.ok(body.lifecycle, "should include lifecycle block");
+    assert.equal(body.lifecycle.lastRestoreMetrics.totalMs, 1980);
+    assert.equal(body.lifecycle.lastRestoreMetrics.vcpus, 2);
+    assert.equal(body.lifecycle.restoreHistory.length, 1);
+    assert.equal(body.lifecycle.lastTokenSource, "oidc");
+    assert.equal(body.lifecycle.lastTokenRefreshError, null);
+    assert.equal(body.lifecycle.consecutiveTokenRefreshFailures, 0);
+    assert.equal(body.lifecycle.breakerOpenUntil, null);
+  });
+});
+
+test("GET /api/status: lifecycle block defaults to null/zero when no restore history exists", async () => {
+  await withTestEnv(async () => {
+    const route = getStatusRoute();
+    const request = buildAuthGetRequest("/api/status");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as {
+      lifecycle: {
+        lastRestoreMetrics: unknown;
+        restoreHistory: unknown[];
+        lastTokenRefreshAt: number | null;
+        lastTokenSource: string | null;
+        lastTokenExpiresAt: number | null;
+        lastTokenRefreshError: string | null;
+        consecutiveTokenRefreshFailures: number;
+        breakerOpenUntil: number | null;
+      };
+    };
+
+    assert.ok(body.lifecycle, "should include lifecycle block");
+    assert.equal(body.lifecycle.lastRestoreMetrics, null);
+    assert.deepEqual(body.lifecycle.restoreHistory, []);
+    assert.equal(body.lifecycle.lastTokenRefreshAt, null);
+    assert.equal(body.lifecycle.lastTokenSource, null);
+    assert.equal(body.lifecycle.consecutiveTokenRefreshFailures, 0);
+    assert.equal(body.lifecycle.breakerOpenUntil, null);
+  });
+});
+
+test("GET /api/status: lifecycle.restoreHistory is capped at 5 entries", async () => {
+  await withTestEnv(async () => {
+    const base = {
+      sandboxCreateMs: 100,
+      tokenWriteMs: 50,
+      assetSyncMs: 200,
+      startupScriptMs: 300,
+      forcePairMs: 150,
+      firewallSyncMs: 80,
+      localReadyMs: 500,
+      publicReadyMs: 600,
+      totalMs: 1980,
+      skippedStaticAssetSync: false,
+      assetSha256: "abc",
+      vcpus: 1,
+      recordedAt: Date.now(),
+    };
+    await mutateMeta((meta) => {
+      meta.restoreHistory = Array.from({ length: 10 }, (_, i) => ({
+        ...base,
+        totalMs: 1000 + i * 100,
+      }));
+    });
+
+    const route = getStatusRoute();
+    const request = buildAuthGetRequest("/api/status");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as {
+      lifecycle: { restoreHistory: Array<{ totalMs: number }> };
+    };
+    assert.equal(body.lifecycle.restoreHistory.length, 5);
+    assert.equal(body.lifecycle.restoreHistory[0]?.totalMs, 1000);
+  });
+});
+
+// ===========================================================================
+// GET /api/status — configured sleep-after values
+// ===========================================================================
+
 test("GET /api/status: returns configured sleep settings and timeout remaining", async () => {
   await withTestEnv(async () => {
     const controller = new FakeSandboxController();

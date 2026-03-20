@@ -11,7 +11,7 @@ import test from "node:test";
 
 import { _setSandboxControllerForTesting } from "@/server/sandbox/controller";
 import type { SandboxController, SandboxHandle } from "@/server/sandbox/controller";
-import { _resetLogBuffer } from "@/server/log";
+import { _resetLogBuffer, logInfo } from "@/server/log";
 import {
   _resetStoreForTesting,
   mutateMeta,
@@ -189,5 +189,145 @@ test("GET /api/admin/logs: sandbox log parsing prefers top-level source over ctx
     assert.equal(body.logs[0]?.source, "firewall");
     assert.equal(body.logs[0]?.message, "source-precedence-test");
     assert.equal(body.logs[0]?.data?.requestId, "req-top-level-source");
+  });
+});
+
+// ===========================================================================
+// GET /api/admin/logs — structured correlation filters
+// ===========================================================================
+
+test("GET /api/admin/logs: filters by opId", async () => {
+  await withTestEnv(async () => {
+    logInfo("channels.wake_requested", { opId: "op_abc123", channel: "slack" });
+    logInfo("channels.gateway_request_started", { opId: "op_abc123", channel: "slack" });
+    logInfo("channels.wake_requested", { opId: "op_other", channel: "telegram" });
+
+    const route = getAdminLogsRoute();
+    const request = buildAuthGetRequest("/api/admin/logs?opId=op_abc123");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as { logs: Array<{ message: string; data?: { opId?: string } }> };
+    assert.equal(body.logs.length, 2);
+    for (const log of body.logs) {
+      assert.equal(log.data?.opId, "op_abc123");
+    }
+  });
+});
+
+test("GET /api/admin/logs: opId filter also matches parentOpId", async () => {
+  await withTestEnv(async () => {
+    logInfo("sandbox.restore.started", { opId: "op_child", parentOpId: "op_parent" });
+    logInfo("channels.wake_requested", { opId: "op_parent" });
+    logInfo("channels.unrelated", { opId: "op_unrelated" });
+
+    const route = getAdminLogsRoute();
+    const request = buildAuthGetRequest("/api/admin/logs?opId=op_parent");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as { logs: Array<{ data?: { opId?: string; parentOpId?: string } }> };
+    assert.equal(body.logs.length, 2);
+  });
+});
+
+test("GET /api/admin/logs: filters by channel", async () => {
+  await withTestEnv(async () => {
+    logInfo("channels.delivery_success", { channel: "slack", opId: "op_1" });
+    logInfo("channels.delivery_success", { channel: "telegram", opId: "op_2" });
+    logInfo("channels.delivery_success", { channel: "discord", opId: "op_3" });
+
+    const route = getAdminLogsRoute();
+    const request = buildAuthGetRequest("/api/admin/logs?channel=slack");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as { logs: Array<{ data?: { channel?: string } }> };
+    assert.equal(body.logs.length, 1);
+    assert.equal(body.logs[0]?.data?.channel, "slack");
+  });
+});
+
+test("GET /api/admin/logs: filters by requestId", async () => {
+  await withTestEnv(async () => {
+    logInfo("channels.wake_requested", { requestId: "req-abc", opId: "op_1" });
+    logInfo("channels.wake_requested", { requestId: "req-def", opId: "op_2" });
+
+    const route = getAdminLogsRoute();
+    const request = buildAuthGetRequest("/api/admin/logs?requestId=req-abc");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as { logs: Array<{ data?: { requestId?: string } }> };
+    assert.equal(body.logs.length, 1);
+    assert.equal(body.logs[0]?.data?.requestId, "req-abc");
+  });
+});
+
+test("GET /api/admin/logs: filters by sandboxId", async () => {
+  await withTestEnv(async () => {
+    logInfo("sandbox.restore.started", { sandboxId: "sbx_123", opId: "op_1" });
+    logInfo("sandbox.restore.started", { sandboxId: "sbx_456", opId: "op_2" });
+
+    const route = getAdminLogsRoute();
+    const request = buildAuthGetRequest("/api/admin/logs?sandboxId=sbx_123");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as { logs: Array<{ data?: { sandboxId?: string } }> };
+    assert.equal(body.logs.length, 1);
+    assert.equal(body.logs[0]?.data?.sandboxId, "sbx_123");
+  });
+});
+
+test("GET /api/admin/logs: filters by messageId", async () => {
+  await withTestEnv(async () => {
+    logInfo("channels.queue_consumer_received", { messageId: "vq_111", channel: "slack" });
+    logInfo("channels.queue_consumer_received", { messageId: "vq_222", channel: "telegram" });
+
+    const route = getAdminLogsRoute();
+    const request = buildAuthGetRequest("/api/admin/logs?messageId=vq_111");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as { logs: Array<{ data?: { messageId?: string } }> };
+    assert.equal(body.logs.length, 1);
+    assert.equal(body.logs[0]?.data?.messageId, "vq_111");
+  });
+});
+
+test("GET /api/admin/logs: combines channel and opId filters", async () => {
+  await withTestEnv(async () => {
+    logInfo("channels.wake_requested", { opId: "op_combo", channel: "slack" });
+    logInfo("channels.gateway_request_started", { opId: "op_combo", channel: "slack" });
+    logInfo("channels.wake_requested", { opId: "op_combo", channel: "telegram" });
+    logInfo("channels.wake_requested", { opId: "op_other", channel: "slack" });
+
+    const route = getAdminLogsRoute();
+    const request = buildAuthGetRequest("/api/admin/logs?opId=op_combo&channel=slack");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as { logs: Array<{ data?: { opId?: string; channel?: string } }> };
+    assert.equal(body.logs.length, 2);
+    for (const log of body.logs) {
+      assert.equal(log.data?.opId, "op_combo");
+      assert.equal(log.data?.channel, "slack");
+    }
+  });
+});
+
+test("GET /api/admin/logs: ignores invalid channel param", async () => {
+  await withTestEnv(async () => {
+    logInfo("channels.wake_requested", { channel: "slack", opId: "op_1" });
+
+    const route = getAdminLogsRoute();
+    const request = buildAuthGetRequest("/api/admin/logs?channel=invalid");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as { logs: unknown[] };
+    // Invalid channel is ignored, so all logs are returned
+    assert.ok(body.logs.length >= 1);
   });
 });

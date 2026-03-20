@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { ChannelName } from "@/shared/channels";
-import type { OperationContext, SingleMeta } from "@/shared/types";
+import type { OperationContext, QueueStateSnapshot, SingleMeta } from "@/shared/types";
 import {
   createOperationContext,
   withOperationContext,
@@ -144,13 +144,20 @@ export async function enqueueChannelJob<TPayload>(
 }
 
 export async function getChannelQueueDepth(channel: ChannelName): Promise<number> {
+  const snapshot = await getChannelQueueSnapshot(channel);
+  return snapshot.queued + snapshot.processing;
+}
+
+export async function getChannelQueueSnapshot(
+  channel: ChannelName,
+): Promise<QueueStateSnapshot> {
   const store = getStore();
   const [queued, processing] = await Promise.all([
     store.getQueueLength(channelQueueKey(channel)),
     store.getQueueLength(channelProcessingKey(channel)),
   ]);
 
-  return queued + processing;
+  return { queued, processing };
 }
 
 export async function drainChannelQueue<

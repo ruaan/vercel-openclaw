@@ -54,6 +54,17 @@ export async function GET(request: Request): Promise<Response> {
       timeoutRemainingMs,
       firewall: { ...meta.firewall, wouldBlock: computeWouldBlock(meta.firewall) },
       channels: await getPublicChannelState(request, meta),
+      lifecycle: {
+        lastRestoreMetrics: meta.lastRestoreMetrics ?? null,
+        restoreHistory: (meta.restoreHistory ?? []).slice(0, 5),
+        lastTokenRefreshAt: meta.lastTokenRefreshAt,
+        lastTokenSource: meta.lastTokenSource ?? null,
+        lastTokenExpiresAt: meta.lastTokenExpiresAt ?? null,
+        lastTokenRefreshError: meta.lastTokenRefreshError ?? null,
+        consecutiveTokenRefreshFailures:
+          meta.consecutiveTokenRefreshFailures ?? 0,
+        breakerOpenUntil: meta.breakerOpenUntil ?? null,
+      },
       user: { sub: "admin", name: "Admin" },
     });
 

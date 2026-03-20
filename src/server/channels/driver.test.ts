@@ -6,6 +6,7 @@ import {
   enqueueChannelJob,
   drainChannelQueue,
   getChannelQueueDepth,
+  getChannelQueueSnapshot,
   runWithProcessingIndicator,
   type QueuedChannelJob,
   DEFAULT_CHANNEL_SANDBOX_READY_TIMEOUT_MS,
@@ -144,6 +145,37 @@ test("getChannelQueueDepth counts leased jobs in the processing queue", async ()
       true,
     );
     assert.equal(await getChannelQueueDepth(channel), 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getChannelQueueSnapshot — split queued vs processing
+// ---------------------------------------------------------------------------
+
+test("getChannelQueueSnapshot returns separate queued and processing counts", async () => {
+  await withEnv(TEST_ENV, async () => {
+    const channel: ChannelName = "slack";
+    const store = getStore();
+
+    await enqueueChannelJob(channel, createJob({ payload: { text: "msg-1" } }));
+    await enqueueChannelJob(channel, createJob({ payload: { text: "msg-2" } }));
+
+    // Both queued, none processing
+    let snapshot = await getChannelQueueSnapshot(channel);
+    assert.equal(snapshot.queued, 2);
+    assert.equal(snapshot.processing, 0);
+
+    // Lease one -> 1 queued, 1 processing
+    await store.leaseQueueItem(
+      channelQueueKey(channel),
+      channelProcessingKey(channel),
+      Date.now(),
+      60,
+    );
+
+    snapshot = await getChannelQueueSnapshot(channel);
+    assert.equal(snapshot.queued, 1);
+    assert.equal(snapshot.processing, 1);
   });
 });
 

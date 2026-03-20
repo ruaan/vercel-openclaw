@@ -94,12 +94,30 @@ export async function GET(request: Request): Promise<Response> {
   const levelParam = url.searchParams.get("level") ?? undefined;
   const sourceParam = url.searchParams.get("source") ?? undefined;
   const searchParam = url.searchParams.get("search") ?? undefined;
+  const opIdParam = url.searchParams.get("opId") ?? undefined;
+  const requestIdParam = url.searchParams.get("requestId") ?? undefined;
+  const channelParam = url.searchParams.get("channel") ?? undefined;
+  const sandboxIdParam = url.searchParams.get("sandboxId") ?? undefined;
+  const messageIdParam = url.searchParams.get("messageId") ?? undefined;
 
   const level = levelParam && isValidLevel(levelParam) ? levelParam : undefined;
   const source = sourceParam && isValidSource(sourceParam) ? sourceParam : undefined;
+  const channel =
+    channelParam === "slack" || channelParam === "telegram" || channelParam === "discord"
+      ? channelParam
+      : undefined;
 
   // Collect server-side structured logs from the ring buffer
-  const serverLogs = getFilteredServerLogs({ level, source, search: searchParam });
+  const serverLogs = getFilteredServerLogs({
+    level,
+    source,
+    search: searchParam,
+    opId: opIdParam,
+    requestId: requestIdParam,
+    channel,
+    sandboxId: sandboxIdParam,
+    messageId: messageIdParam,
+  });
 
   // Collect sandbox logs if running
   let sandboxLogs: LogEntry[] = [];
@@ -127,6 +145,11 @@ export async function GET(request: Request): Promise<Response> {
               (entry.data && JSON.stringify(entry.data).toLowerCase().includes(term));
             if (!matches) continue;
           }
+          if (opIdParam && entry.data?.opId !== opIdParam && entry.data?.parentOpId !== opIdParam) continue;
+          if (requestIdParam && entry.data?.requestId !== requestIdParam) continue;
+          if (channel && entry.data?.channel !== channel) continue;
+          if (sandboxIdParam && entry.data?.sandboxId !== sandboxIdParam) continue;
+          if (messageIdParam && entry.data?.messageId !== messageIdParam) continue;
           sandboxLogs.push(entry);
         }
       }
