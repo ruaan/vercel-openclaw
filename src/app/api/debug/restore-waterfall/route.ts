@@ -107,7 +107,7 @@ export async function POST(request: Request): Promise<Response> {
     const freshApiKey = credential?.token;
     const slackConfig = latest.channels.slack;
 
-    const configJson = stepSync("buildGatewayConfig", () =>
+    stepSync("buildGatewayConfig", () =>
       buildGatewayConfig(
         freshApiKey,
         origin,
@@ -117,7 +117,6 @@ export async function POST(request: Request): Promise<Response> {
           : undefined,
       ),
     );
-    const configJsonB64 = Buffer.from(configJson).toString("base64");
 
     stepSync("buildRestoreAssetManifest", () => buildRestoreAssetManifest());
 
@@ -131,7 +130,6 @@ export async function POST(request: Request): Promise<Response> {
     // Phase 6: Build restore env
     const restoreEnv: Record<string, string> = {
       OPENCLAW_GATEWAY_TOKEN: latest.gatewayToken,
-      OPENCLAW_CONFIG_JSON_B64: configJsonB64,
     };
     if (freshApiKey) {
       restoreEnv.AI_GATEWAY_API_KEY = freshApiKey;
