@@ -49,7 +49,11 @@ import { buildRestoreAssetManifest } from "@/server/openclaw/restore-assets";
 import {
   FakeSandboxController,
   FakeSandboxHandle,
+  type SandboxEvent,
 } from "@/test-utils/fake-sandbox-controller";
+import {
+  withHarness,
+} from "@/test-utils/harness";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -98,6 +102,48 @@ async function withTestEnv(
       }
     }
   }
+}
+
+const PRE_SNAPSHOT_CLEANUP_MARKERS = [
+  "rm -rf /tmp/openclaw || true",
+  "rm -rf /home/vercel-sandbox/.npm || true",
+  "rm -rf /root/.npm || true",
+  "rm -rf /tmp/openclaw-npm-cache || true",
+];
+
+function isPreSnapshotCleanupCommand(command: {
+  cmd: string;
+  args?: string[];
+}): boolean {
+  return (
+    command.cmd === "bash"
+    && command.args?.[0] === "-lc"
+    && PRE_SNAPSHOT_CLEANUP_MARKERS.every((marker) =>
+      command.args?.[1]?.includes(marker),
+    )
+  );
+}
+
+function findPreSnapshotCleanupCommand(handle: FakeSandboxHandle) {
+  return handle.commands.find(isPreSnapshotCleanupCommand);
+}
+
+function isPreSnapshotCleanupEvent(
+  event: SandboxEvent,
+  sandboxId: string,
+): boolean {
+  if (event.kind !== "command" || event.sandboxId !== sandboxId) {
+    return false;
+  }
+
+  const detail = event.detail as { command?: string; args?: string[] } | undefined;
+  return (
+    detail?.command === "bash"
+    && detail.args?.[0] === "-lc"
+    && PRE_SNAPSHOT_CLEANUP_MARKERS.every((marker) =>
+      detail.args?.[1]?.includes(marker),
+    )
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -166,9 +212,7 @@ test("stopSandbox runs best-effort pre-snapshot cleanup commands with per-comman
 
     const handle = fake.getHandle("sbx-cleanup-best-effort");
     assert.ok(handle, "sandbox handle should exist");
-    const cleanupCommand = handle.commands.find(
-      (command) => command.cmd === "bash" && command.args?.[0] === "-lc",
-    );
+    const cleanupCommand = findPreSnapshotCleanupCommand(handle);
 
     assert.ok(cleanupCommand, "pre-snapshot cleanup command should run");
     assert.equal(
@@ -186,6 +230,116 @@ test("stopSandbox runs best-effort pre-snapshot cleanup commands with per-comman
       !cleanupCommand.args?.[1]?.includes("/home/vercel-sandbox/.npm/_logs"),
       "cleanup command should not redundantly remove nested npm log path",
     );
+  });
+});
+
+test("stopSandbox runs pre-snapshot cleanup before snapshot", async () => {
+  await withHarness(async (h) => {
+    await h.driveToRunning();
+
+    const runningMeta = await h.getMeta();
+    const sandboxId = runningMeta.sandboxId;
+    assert.ok(sandboxId, "sandboxId should be set after driveToRunning");
+
+    await stopSandbox();
+
+    const handle = h.controller.getHandle(sandboxId);
+    assert.ok(handle, "sandbox handle should exist");
+
+    const cleanupCommand = findPreSnapshotCleanupCommand(handle);
+
+    assert.ok(cleanupCommand, "pre-snapshot cleanup command should run");
+    assert.equal(handle.snapshotCalled, true, "snapshot should be called after cleanup");
+
+    const cleanupEventIndex = h.controller.events.findIndex((event) =>
+      isPreSnapshotCleanupEvent(event, sandboxId),
+    );
+    const snapshotEventIndex = h.controller.events.findIndex(
+      (event) => event.kind === "snapshot" && event.sandboxId === sandboxId,
+    );
+
+    assert.ok(cleanupEventIndex >= 0, "cleanup command event should be recorded");
+    assert.ok(snapshotEventIndex > cleanupEventIndex, "cleanup should run before snapshot");
+  });
+});
+
+test("pre-snapshot cleanup preserves learning log in learning mode", async () => {
+  await withHarness(async (h) => {
+    await h.mutateMeta((meta) => {
+      meta.firewall.mode = "learning";
+    });
+    await h.driveToRunning();
+
+    const runningMeta = await h.getMeta();
+    const sandboxId = runningMeta.sandboxId;
+    assert.ok(sandboxId, "sandboxId should be set after driveToRunning");
+
+    await stopSandbox();
+
+    const handle = h.controller.getHandle(sandboxId);
+    assert.ok(handle, "sandbox handle should exist");
+
+    const cleanupCommand = findPreSnapshotCleanupCommand(handle);
+
+    assert.ok(cleanupCommand, "pre-snapshot cleanup command should run");
+    assert.ok(
+      !cleanupCommand.args?.[1]?.includes("shell-commands-for-learning.log"),
+      "learning log should be preserved in learning mode",
+    );
+  });
+});
+
+test("pre-snapshot cleanup removes learning log in enforcing mode", async () => {
+  await withHarness(async (h) => {
+    await h.mutateMeta((meta) => {
+      meta.firewall.mode = "enforcing";
+    });
+    await h.driveToRunning();
+
+    const runningMeta = await h.getMeta();
+    const sandboxId = runningMeta.sandboxId;
+    assert.ok(sandboxId, "sandboxId should be set after driveToRunning");
+
+    await stopSandbox();
+
+    const handle = h.controller.getHandle(sandboxId);
+    assert.ok(handle, "sandbox handle should exist");
+
+    const cleanupCommand = findPreSnapshotCleanupCommand(handle);
+
+    assert.ok(cleanupCommand, "pre-snapshot cleanup command should run");
+    assert.ok(
+      cleanupCommand.args?.[1]?.includes("rm -f /tmp/shell-commands-for-learning.log || true"),
+      "learning log should be removed in enforcing mode",
+    );
+  });
+});
+
+test("pre-snapshot cleanup failure does not prevent snapshot", async () => {
+  await withHarness(async (h) => {
+    await h.driveToRunning();
+
+    const runningMeta = await h.getMeta();
+    const sandboxId = runningMeta.sandboxId;
+    assert.ok(sandboxId, "sandboxId should be set after driveToRunning");
+
+    const handle = h.controller.getHandle(sandboxId);
+    assert.ok(handle, "sandbox handle should exist");
+
+    handle.responders.push((cmd, args) => {
+      if (
+        isPreSnapshotCleanupCommand({ cmd, args })
+      ) {
+        return { exitCode: 1, output: async () => "cleanup command failed" };
+      }
+      return undefined;
+    });
+
+    const result = await stopSandbox();
+
+    assert.equal(result.status, "stopped");
+    assert.ok(result.snapshotId?.startsWith("snap-"));
+    assert.equal(handle.snapshotCalled, true, "snapshot should still run after cleanup failure");
   });
 });
 
@@ -854,7 +1008,7 @@ test("restoreSandboxFromSnapshot overlaps firewall sync with local readiness and
       new Response('<div id="openclaw-app"></div>', { status: 200 });
 
     try {
-      const { handle, meta } = await triggerRestore(fake, {
+      const { meta } = await triggerRestore(fake, {
         tokenOverride: "test-ai-key",
       });
 
@@ -991,9 +1145,7 @@ test("restoreSandboxFromSnapshot fails closed when enforcing firewall sync fails
  * with an uninitialized meta (no snapshotId), captures the scheduled callback,
  * and runs it.
  */
-async function runCreatePath(
-  fake: FakeSandboxController,
-): Promise<SingleMeta> {
+async function runCreatePath(): Promise<SingleMeta> {
   let scheduledCallback: (() => Promise<void> | void) | null = null;
 
   await ensureSandboxRunning({
@@ -1031,7 +1183,7 @@ test("createAndBootstrapSandbox records successful firewall sync before running"
       new Response('<div id="openclaw-app"></div>', { status: 200 });
 
     try {
-      const meta = await runCreatePath(fake);
+      const meta = await runCreatePath();
       assert.equal(meta.status, "running");
       assert.equal(meta.firewall.lastSyncOutcome?.applied, true);
       assert.equal(meta.firewall.lastSyncReason, "create-policy-applied");
@@ -1063,7 +1215,7 @@ test("createAndBootstrapSandbox fails closed when enforcing firewall sync fails"
       new Response('<div id="openclaw-app"></div>', { status: 200 });
 
     try {
-      const meta = await runCreatePath(fake);
+      const meta = await runCreatePath();
       assert.equal(meta.status, "error");
       assert.equal(meta.sandboxId, null);
       assert.equal(meta.portUrls, null);
@@ -1104,7 +1256,7 @@ test("createAndBootstrapSandbox does not fail closed in learning mode when firew
       new Response('<div id="openclaw-app"></div>', { status: 200 });
 
     try {
-      const meta = await runCreatePath(fake);
+      const meta = await runCreatePath();
       // Learning mode should still reach running despite firewall failure
       assert.equal(meta.status, "running");
       assert.equal(meta.firewall.lastSyncOutcome?.applied, false);
