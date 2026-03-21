@@ -81,6 +81,7 @@ function buildGatewayEnvShell(): string {
     '  ai_gateway_api_key="$AI_GATEWAY_API_KEY"',
     "fi",
     `export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH}"`,
+    `export OPENCLAW_GATEWAY_PORT="${OPENCLAW_PORT}"`,
     'export OPENCLAW_GATEWAY_TOKEN="$gateway_token"',
     'if [ -n "$ai_gateway_api_key" ]; then',
     '  export AI_GATEWAY_API_KEY="$ai_gateway_api_key"',
@@ -207,6 +208,10 @@ export function buildGatewayConfig(
     },
   };
   config.tools = {
+    // Use "full" profile so all built-in tools are available, including
+    // group:automation (cron, gateway).  The default "coding" profile
+    // excludes cron, which prevents the agent from creating scheduled jobs.
+    profile: "full",
     media: {
       image: {
         enabled: true,
@@ -397,11 +402,11 @@ fi
 # Start gateway immediately — no pkill needed (snapshots have no running
 # processes) and no Telegram webhook delete needed before boot.
 echo '{"event":"fast_restore.start_gateway"}' >&2
-if [ -x "${BUN_BIN}" ]; then
-  setsid ${BUN_BIN} ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &
-else
-  setsid ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &
-fi
+# Always use Node for the gateway — Bun's WebSocket implementation does not
+# expose socket._socket.remoteAddress, which causes isLocalClient to return
+# false and blocks device auto-pairing for local CLI/tool connections (cron,
+# gateway status, etc.).
+setsid ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &
 echo '{"event":"fast_restore.readiness_loop"}' >&2
 case "\${1:-}" in ''|*[!0-9]*) _ready_timeout=30 ;; *) _ready_timeout=\$1 ;; esac
 _ready_start=\$(date +%s%N 2>/dev/null || echo 0)
@@ -423,8 +428,10 @@ if [ "\$_ready_start" != "0" ] && [ "\$_ready_end" != "0" ]; then
 fi
 if [ "\$_ready" = "1" ]; then
   printf '{"ready":true,"attempts":%d,"readyMs":%d}\\n' "\$_attempts" "\$_ready_ms"
-  # Force-pair: skipped — dangerouslyDisableDeviceAuth is true
-  #   and the snapshot already contains paired.json from initial bootstrap.
+  # Clear stale pending pairing requests — if a previous CLI connection
+  # left a non-silent pending request, it blocks auto-pairing for all
+  # subsequent local CLI connections (cron tool, gateway status, etc.).
+  rm -f "${OPENCLAW_STATE_DIR}/devices/pending.json"
   # Telegram deleteWebhook: removed — the app's webhook route handles
   #   incoming messages and forwards to the sandbox fast path when running.
   #   Deleting the webhook here created a deadlock: no webhook → no messages
@@ -1187,3 +1194,4 @@ try {
 }
 `;
 }
+

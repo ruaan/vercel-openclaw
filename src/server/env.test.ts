@@ -6,7 +6,6 @@ import {
   getAiGatewayBearerTokenOptional,
   getAiGatewayAuthMode,
   getOpenclawPackageSpec,
-  getSchedulerHostSecret,
   getSessionSecret,
   isVercelDeployment,
   requiresDurableStore,
@@ -231,20 +230,6 @@ test("admin-secret mode on Vercel can derive from upstash token", () => {
       assert.ok(secret.includes("upstash-token-value"));
     },
   );
-});
-
-test("getSchedulerHostSecret returns trimmed secret or null", () => {
-  withEnv({ OPENCLAW_SCHEDULER_HOST_SECRET: "  host-secret  " }, () => {
-    assert.equal(getSchedulerHostSecret(), "host-secret");
-  });
-
-  withEnv({ OPENCLAW_SCHEDULER_HOST_SECRET: "   " }, () => {
-    assert.equal(getSchedulerHostSecret(), null);
-  });
-
-  withEnv({ OPENCLAW_SCHEDULER_HOST_SECRET: undefined }, () => {
-    assert.equal(getSchedulerHostSecret(), null);
-  });
 });
 
 test("local dev returns placeholder session secret", () => {

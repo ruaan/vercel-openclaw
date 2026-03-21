@@ -38,11 +38,11 @@ function makeDeps(overrides: Partial<Parameters<typeof runSandboxWatchdog>[1]> =
       repaired: true,
       meta: { status: "booting" } as SingleMeta,
     }),
+    ensureReady: async () => ({ status: "running" }) as SingleMeta,
     readPrevious: async () => PREVIOUS,
     writeReport: async (next: WatchdogReport) => next,
-    claimDueScheduledTasks: async () => [],
-    pruneScheduledTasks: async () => {},
-    executeScheduledTask: async () => {},
+    getCronNextWakeMs: async () => null as number | null,
+    clearCronNextWake: async () => {},
     now: (() => {
       let current = 0;
       return () => (current += 10);
@@ -60,7 +60,7 @@ test("running sandbox with healthy probe reports ok", async () => {
   assert.equal(report.status, "ok");
   assert.equal(report.triggeredRepair, false);
   assert.equal(report.consecutiveFailures, 0);
-  assert.equal(findCheck(report, "scheduled.scan")?.status, "skip");
+  assert.equal(findCheck(report, "cron.wake")?.status, "skip");
 });
 
 test("running sandbox with failed probe schedules repair", async () => {
@@ -74,10 +74,7 @@ test("running sandbox with failed probe schedules repair", async () => {
   assert.equal(report.status, "repairing");
   assert.equal(report.triggeredRepair, true);
   assert.equal(report.consecutiveFailures, 0);
-  assert.equal(
-    report.checks.find((check) => check.id === "reconcile")?.status,
-    "pass",
-  );
+  assert.equal(findCheck(report, "reconcile")?.status, "pass");
 });
 
 test("stopped sandbox stays idle and skips repair", async () => {
@@ -91,10 +88,8 @@ test("stopped sandbox stays idle and skips repair", async () => {
 
   assert.equal(report.status, "idle");
   assert.equal(report.triggeredRepair, false);
-  assert.equal(
-    report.checks.find((check) => check.id === "probe")?.status,
-    "skip",
-  );
+  assert.equal(findCheck(report, "probe")?.status, "skip");
+  assert.equal(findCheck(report, "cron.wake")?.status, "skip");
 });
 
 test("failed probe with repair disabled reports failed", async () => {
@@ -107,7 +102,7 @@ test("failed probe with repair disabled reports failed", async () => {
 
   assert.equal(report.status, "failed");
   assert.equal(report.triggeredRepair, false);
-  assert.equal(report.consecutiveFailures, 3); // previous was 2
+  assert.equal(report.consecutiveFailures, 3);
 });
 
 test("consecutive failures increment on failure and reset on success", async () => {
@@ -126,94 +121,64 @@ test("consecutive failures increment on failure and reset on success", async () 
   assert.equal(okReport.consecutiveFailures, 0);
 });
 
-test("test_watchdog_dispatches_claimed_scheduled_tasks_when_tasks_are_due", async () => {
-  const dispatched: Array<{ id: string; origin: string }> = [];
-  let pruneCalls = 0;
+test("stopped sandbox with due cron job wakes sandbox", async () => {
+  let ensureCalled = false;
+  let cronCleared = false;
 
   const report = await runSandboxWatchdog(
     { request: new Request("https://app.test/api/cron/watchdog") },
     makeDeps({
-      claimDueScheduledTasks: async () => [{ id: "task-1" }, { id: "task-2" }] as never,
-      executeScheduledTask: async ({ task, origin }) => {
-        dispatched.push({ id: task.id, origin });
+      getMeta: async () =>
+        ({ status: "stopped", sandboxId: null, snapshotId: "snap_123" }) as SingleMeta,
+      getCronNextWakeMs: async () => 1, // in the past (now() starts at 10+)
+      ensureReady: async () => {
+        ensureCalled = true;
+        return { status: "running" } as SingleMeta;
       },
-      pruneScheduledTasks: async () => {
-        pruneCalls += 1;
+      clearCronNextWake: async () => {
+        cronCleared = true;
       },
     }),
   );
 
-  assert.equal(findCheck(report, "scheduled.scan")?.status, "pass");
-  assert.equal(
-    findCheck(report, "scheduled.scan")?.message,
-    "Claimed 2 due scheduled task(s).",
-  );
-  assert.deepEqual(dispatched, [
-    { id: "task-1", origin: "https://app.test" },
-    { id: "task-2", origin: "https://app.test" },
-  ]);
-  assert.equal(
-    report.checks.filter((check) => (check.id as string) === "scheduled.dispatch")
-      .length,
-    2,
-  );
-  assert.ok(
-    report.checks.some(
-      (check) =>
-        (check.id as string) === "scheduled.dispatch" &&
-        check.status === "pass" &&
-        check.message === "Scheduled task task-1 dispatched.",
-    ),
-  );
-  assert.ok(
-    report.checks.some(
-      (check) =>
-        (check.id as string) === "scheduled.dispatch" &&
-        check.status === "pass" &&
-        check.message === "Scheduled task task-2 dispatched.",
-    ),
-  );
-  assert.equal(pruneCalls, 1);
+  assert.equal(ensureCalled, true);
+  assert.equal(cronCleared, true);
+  assert.equal(findCheck(report, "cron.wake")?.status, "pass");
+  assert.ok(findCheck(report, "cron.wake")?.message?.includes("woke sandbox"));
+  assert.equal(report.triggeredRepair, true);
 });
 
-test("test_watchdog_marks_report_failed_when_scheduled_dispatch_errors", async () => {
-  const dispatched: string[] = [];
-  let pruneCalls = 0;
+test("stopped sandbox with future cron job skips wake", async () => {
+  let ensureCalled = false;
 
   const report = await runSandboxWatchdog(
     { request: new Request("https://app.test/api/cron/watchdog") },
     makeDeps({
-      claimDueScheduledTasks: async () => [{ id: "task-fail" }, { id: "task-pass" }] as never,
-      executeScheduledTask: async ({ task }) => {
-        dispatched.push(task.id);
-        if (task.id === "task-fail") {
-          throw new Error("boom");
-        }
-      },
-      pruneScheduledTasks: async () => {
-        pruneCalls += 1;
+      getMeta: async () =>
+        ({ status: "stopped", sandboxId: null, snapshotId: "snap_123" }) as SingleMeta,
+      getCronNextWakeMs: async () => Number.MAX_SAFE_INTEGER,
+      ensureReady: async () => {
+        ensureCalled = true;
+        return { status: "running" } as SingleMeta;
       },
     }),
   );
 
-  assert.equal(report.status, "failed");
-  assert.equal(report.lastError, "Scheduled task task-fail failed: boom");
-  assert.deepEqual(dispatched, ["task-fail", "task-pass"]);
-  assert.ok(
-    report.checks.some(
-      (check) =>
-        (check.id as string) === "scheduled.dispatch" &&
-        check.status === "fail" &&
-        check.message === "Scheduled task task-fail failed: boom",
-    ),
+  assert.equal(ensureCalled, false);
+  assert.equal(findCheck(report, "cron.wake")?.status, "skip");
+  assert.ok(findCheck(report, "cron.wake")?.message?.includes("min"));
+});
+
+test("stopped sandbox with no cron job skips wake", async () => {
+  const report = await runSandboxWatchdog(
+    { request: new Request("https://app.test/api/cron/watchdog") },
+    makeDeps({
+      getMeta: async () =>
+        ({ status: "stopped", sandboxId: null, snapshotId: "snap_123" }) as SingleMeta,
+      getCronNextWakeMs: async () => null,
+    }),
   );
-  assert.ok(
-    report.checks.some(
-      (check) =>
-        (check.id as string) === "scheduled.dispatch" &&
-        check.status === "pass" &&
-        check.message === "Scheduled task task-pass dispatched.",
-    ),
-  );
-  assert.equal(pruneCalls, 1);
+
+  assert.equal(findCheck(report, "cron.wake")?.status, "skip");
+  assert.ok(findCheck(report, "cron.wake")?.message?.includes("No cron wake"));
 });

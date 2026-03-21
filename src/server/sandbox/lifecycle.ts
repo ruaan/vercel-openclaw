@@ -49,6 +49,8 @@ import {
 
 const OPENCLAW_PORT = 3000;
 const SANDBOX_PORTS = [OPENCLAW_PORT, OPENCLAW_TELEGRAM_WEBHOOK_PORT];
+export const CRON_NEXT_WAKE_KEY = "openclaw-single:cron-next-wake-ms";
+const CRON_JOBS_PATH = `${OPENCLAW_STATE_DIR}/cron/jobs.json`;
 const LIFECYCLE_LOCK_KEY = "openclaw-single:lock:lifecycle";
 const START_LOCK_KEY = "openclaw-single:lock:start";
 const TOKEN_REFRESH_LOCK_KEY = "openclaw-single:lock:token-refresh";
@@ -319,6 +321,44 @@ async function cleanupBeforeSnapshot(
   }
 }
 
+/**
+ * Read OpenClaw's cron jobs from the sandbox and return the earliest
+ * `nextRunAtMs` across all enabled jobs.  Used to persist a wake-up
+ * time in the host store before the sandbox is snapshotted.
+ */
+async function readCronNextWakeFromSandbox(
+  sandbox: SandboxHandle,
+): Promise<number | null> {
+  try {
+    const buf = await sandbox.readFileToBuffer({ path: CRON_JOBS_PATH });
+    if (!buf) return null;
+    const data = JSON.parse(buf.toString("utf8")) as {
+      jobs?: Array<{
+        enabled?: boolean;
+        state?: { nextRunAtMs?: number };
+      }>;
+    };
+    if (!Array.isArray(data.jobs)) return null;
+    let earliest: number | null = null;
+    for (const job of data.jobs) {
+      if (job.enabled === false) continue;
+      const ms = job.state?.nextRunAtMs;
+      if (typeof ms === "number" && ms > 0) {
+        if (earliest === null || ms < earliest) earliest = ms;
+      }
+    }
+    if (earliest) {
+      logInfo("sandbox.cron_next_wake_read", { earliest, jobCount: data.jobs.length });
+    }
+    return earliest;
+  } catch (error) {
+    logWarn("sandbox.cron_next_wake_read_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 export async function stopSandbox(): Promise<SingleMeta> {
   logInfo("sandbox.stop_requested");
   return withLifecycleLock(async () => {
@@ -339,6 +379,7 @@ export async function stopSandbox(): Promise<SingleMeta> {
     try {
       const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
       await cleanupBeforeSnapshot(sandbox, meta.firewall.mode);
+      const cronNextWakeMs = await readCronNextWakeFromSandbox(sandbox);
       const snapshot = await sandbox.snapshot();
       // Compute config hash for this snapshot.  The hash covers everything
       // in buildGatewayConfig EXCEPT the proxy origin (which varies per
@@ -346,7 +387,15 @@ export async function stopSandbox(): Promise<SingleMeta> {
       // hash matches at restore time, the writeFiles call is skipped.
       const configHash = computeGatewayConfigHash(meta);
 
-      logInfo("sandbox.status_transition", { from: meta.status, to: "stopped", snapshotId: snapshot.snapshotId, configHash });
+      logInfo("sandbox.status_transition", { from: meta.status, to: "stopped", snapshotId: snapshot.snapshotId, configHash, cronNextWakeMs });
+
+      if (cronNextWakeMs) {
+        await getStore().setValue(CRON_NEXT_WAKE_KEY, cronNextWakeMs);
+        logInfo("sandbox.cron_wake_saved", { cronNextWakeMs });
+      } else {
+        await getStore().deleteValue(CRON_NEXT_WAKE_KEY);
+      }
+
       return mutateMeta((next) => {
         recordSnapshotMetadata(next, snapshot.snapshotId, "stop", configHash);
         next.sandboxId = null;
@@ -2139,7 +2188,7 @@ function resolvePortUrls(sandbox: SandboxHandle): Record<string, string> {
   return urls;
 }
 
-function isBusyStatus(status: SingleMeta["status"]): boolean {
+export function isBusyStatus(status: SingleMeta["status"]): boolean {
   return (
     status === "creating" ||
     status === "setup" ||

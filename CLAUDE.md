@@ -82,6 +82,20 @@ Channel phases (`channelRoundTrip`, `channelWakeFromSleep`) call `POST /api/admi
 | `/api/admin/snapshots/delete` | Delete a past snapshot from Vercel and local history (cannot delete current restore target) |
 | `/api/admin/channel-secrets` | Configure smoke credentials and dispatch server-signed synthetic Slack/Telegram/Discord webhooks. Raw secrets are never returned. |
 | `/api/cron/drain-channels` | Optional diagnostic backstop — replays queued channel work when `CRON_SECRET` is configured. Workflow delivery is primary; this is not the normal path. |
+| `/api/cron/watchdog` | Runs every 5 minutes via Vercel Cron. Health-checks running sandboxes, repairs stuck states, and **wakes stopped sandboxes when OpenClaw cron jobs are due**. |
+| `/api/admin/watchdog` | GET reads cached watchdog report; POST runs a fresh check |
+
+## Cron wake
+
+OpenClaw has a built-in cron scheduler (`croner` library) that persists jobs to `~/.openclaw/cron/jobs.json`. When the sandbox sleeps, the scheduler dies. The watchdog bridges this gap:
+
+1. **Before snapshot** (`stopSandbox()`): reads `jobs.json` from the sandbox, extracts the earliest `nextRunAtMs` across all enabled jobs, and saves it to the host store as `openclaw-single:cron-next-wake-ms`.
+2. **Every 5 minutes** (`/api/cron/watchdog`): if the sandbox is stopped and the saved wake time has passed, calls `ensureSandboxReady()` to restore the sandbox. OpenClaw's native cron handles everything from there.
+3. **After wake**: the wake time is cleared. OpenClaw reschedules the next run internally, and the next snapshot will persist the updated time.
+
+The watchdog never runs chat completions, delivers messages, or interacts with Telegram/Slack/Discord. It only wakes the sandbox — OpenClaw handles the rest.
+
+To use cron in OpenClaw, the `tools.profile` must be `"full"` (not the default `"coding"`) so the `cron` tool is available to the agent. The gateway must also have `OPENCLAW_GATEWAY_PORT` set to match the `--port` flag so internal tools can connect.
 
 ## Architecture
 
@@ -436,6 +450,48 @@ Run a subset of steps:
 ```bash
 node scripts/verify.mjs --steps=test,typecheck
 ```
+
+## Post-push remote verification
+
+After pushing changes that affect deployed behavior (routes, sandbox bootstrap, config, channels), **always run remote diagnostics** using the `/vercel-openclaw-testing` skill. This skill provides SSH access, admin endpoints, log queries, and smoke tests against the live deployment.
+
+Read `.env.agent` first for `OPENCLAW_BASE_URL` and `ADMIN_SECRET`.
+
+Standard post-push checklist:
+
+1. **Check deploy status** — `vercel ls` shows recent deployments with age, status (Ready/Error), and URLs. Don't proceed until the latest is `● Ready`.
+2. **Test new/changed endpoints** — curl the route with admin bearer auth
+3. **Trigger sandbox restore if bootstrap/config changed** — `POST /api/admin/stop` then `POST /api/admin/ensure` to get a fresh sandbox with updated files. Note: restores may skip config rewrites if the config hash hasn't changed (channel tokens etc.). Use `npx sandbox exec` to patch the config directly if needed.
+4. **Verify sandbox state with `npx sandbox exec`** — this is the fastest way to inspect the sandbox filesystem:
+   ```bash
+   # Get current sandbox ID
+   sbid=$(curl -s "$OPENCLAW_BASE_URL/api/status" -H "Authorization: Bearer $ADMIN_SECRET" | jq -r '.sandboxId')
+   # Run commands inside the sandbox
+   npx sandbox exec "$sbid" -- ls ~/.openclaw/skills/
+   npx sandbox exec "$sbid" -- cat /tmp/openclaw.log
+   npx sandbox exec "$sbid" -- python3 -c "import json; print(json.dumps(json.load(open('/home/vercel-sandbox/.openclaw/openclaw.json')), indent=2))"
+   ```
+   Requires `npx sandbox login` first. If the session expires, the user must re-login interactively.
+5. **Check logs for errors** — `GET /api/admin/logs?level=error` or `npx sandbox exec "$sbid" -- tail -50 /tmp/openclaw.log`
+6. **Run readiness gate** — `node scripts/check-deploy-readiness.mjs --base-url "$OPENCLAW_BASE_URL" --admin-secret "$ADMIN_SECRET"`
+
+### CLI tools for remote debugging
+
+| Tool | When to use | Example |
+|------|-------------|---------|
+| `vercel ls` | Check deploy status — is the latest build Ready or Error? | `vercel ls` |
+| `vercel inspect <url>` | Get deployment details (commit, build time) | `vercel inspect https://vercel-openclaw-xxx.labs.vercel.dev` |
+| `npx sandbox exec <id> -- <cmd>` | Run commands inside the live sandbox (faster than SSH endpoint) | `npx sandbox exec sbx_xxx -- cat /tmp/openclaw.log` |
+| `npx sandbox ls` | List all sandboxes for the project | `npx sandbox ls` |
+| Admin SSH endpoint | Alternative when `npx sandbox` session is expired | `curl -X POST "$OPENCLAW_BASE_URL/api/admin/ssh" -H "Authorization: Bearer $ADMIN_SECRET" -d '{"command":"..."}'` |
+
+### Known gotchas
+
+- **Config hash skip**: `buildDynamicRestoreFiles` is skipped on restore if `snapshotConfigHash` matches. Changes to `buildGatewayConfig()` output (like adding new fields) won't take effect until channel config changes. Workaround: patch the config directly via `npx sandbox exec` + restart gateway.
+- **OpenClaw strict config validation**: Unknown keys in `openclaw.json` cause gateway startup failure (e.g. `agents.defaults.instructions` is rejected). Always test config changes on a live sandbox before deploying.
+- **Force-push rebuild**: `git push --force-with-lease` to main may or may not trigger a new Vercel build. Always check `vercel ls` to confirm.
+
+The `/vercel-openclaw-testing` skill has full details: debug routes, SSH recipes, log filters, smoke test phases, failure patterns, and the complete test framework reference.
 
 ## AI Gateway auth helpers (`src/server/env.ts`)
 

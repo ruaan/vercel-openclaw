@@ -99,10 +99,6 @@ export function getCronSecret(): string | null {
   return secret || null;
 }
 
-export function getSchedulerHostSecret(): string | null {
-  return process.env.OPENCLAW_SCHEDULER_HOST_SECRET?.trim() || null;
-}
-
 let _aiGatewayTokenOverride: string | undefined | null = null;
 
 export function _setAiGatewayTokenOverrideForTesting(value: string | undefined | null): void {

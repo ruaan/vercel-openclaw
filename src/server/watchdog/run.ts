@@ -9,22 +9,16 @@ import {
 } from "@/server/observability/operation-context";
 import { getPublicOrigin } from "@/server/public-url";
 import {
-  claimDueScheduledTasks,
-  pruneScheduledTasks,
-} from "@/server/scheduler/store";
-import {
+  CRON_NEXT_WAKE_KEY,
+  ensureSandboxReady,
   isBusyStatus,
   probeGatewayReady,
   reconcileSandboxHealth,
   type ProbeResult,
   type SandboxHealthResult,
 } from "@/server/sandbox/lifecycle";
-import { getInitializedMeta } from "@/server/store/store";
-import type {
-  OperationContext,
-  ScheduledTaskRecord,
-  SingleMeta,
-} from "@/shared/types";
+import { getInitializedMeta, getStore } from "@/server/store/store";
+import type { OperationContext, SingleMeta } from "@/shared/types";
 import type { WatchdogCheck, WatchdogReport } from "@/shared/watchdog";
 import {
   readWatchdogReport,
@@ -45,47 +39,29 @@ export type WatchdogDeps = {
     reason: string;
     op?: OperationContext;
   }) => Promise<SandboxHealthResult>;
+  ensureReady: (options: {
+    origin: string;
+    reason: string;
+  }) => Promise<SingleMeta>;
   readPrevious: () => Promise<WatchdogReport>;
   writeReport: (report: WatchdogReport) => Promise<WatchdogReport>;
-  claimDueScheduledTasks: (
-    nowMs: number,
-    limit: number,
-  ) => Promise<ScheduledTaskRecord[]>;
-  pruneScheduledTasks: (nowMs: number) => Promise<void>;
-  executeScheduledTask: (options: {
-    task: ScheduledTaskRecord;
-    origin: string;
-  }) => Promise<void>;
+  getCronNextWakeMs: () => Promise<number | null>;
+  clearCronNextWake: () => Promise<void>;
   now: () => number;
 };
 
-const WATCHDOG_SCHEDULED_SCAN_CHECK_ID = "scheduled.scan" as never;
-const WATCHDOG_SCHEDULED_DISPATCH_CHECK_ID = "scheduled.dispatch" as never;
-
-async function dispatchWatchdogScheduledTask(options: {
-  task: ScheduledTaskRecord;
-  origin: string;
-}): Promise<void> {
-  const { executeScheduledTask } = await import("@/server/scheduler/execute");
-
-  await executeScheduledTask({
-    task: options.task,
-    origin: options.origin,
-  });
-}
+const WATCHDOG_CRON_WAKE_CHECK_ID = "cron.wake" as never;
 
 const defaultDeps: WatchdogDeps = {
   buildContract: buildDeploymentContract,
   getMeta: getInitializedMeta,
   probe: probeGatewayReady,
   reconcile: reconcileSandboxHealth,
+  ensureReady: ensureSandboxReady,
   readPrevious: readWatchdogReport,
   writeReport: writeWatchdogReport,
-  claimDueScheduledTasks,
-  pruneScheduledTasks: async (nowMs: number) => {
-    await pruneScheduledTasks(nowMs);
-  },
-  executeScheduledTask: dispatchWatchdogScheduledTask,
+  getCronNextWakeMs: () => getStore().getValue<number>(CRON_NEXT_WAKE_KEY),
+  clearCronNextWake: () => getStore().deleteValue(CRON_NEXT_WAKE_KEY),
   now: () => Date.now(),
 };
 
@@ -150,9 +126,6 @@ export async function runSandboxWatchdog(
     }
 
     // Detect stuck busy states: restoring/creating with no sandboxId for >90s.
-    // This is the watchdog's secondary safety net — the primary recovery is
-    // in ensureSandboxRunning(), but watchdog catches it during low-traffic
-    // periods when no user requests trigger the ensure path.
     if (isBusyStatus(meta.status) && !meta.sandboxId) {
       const ageMs = deps.now() - meta.updatedAt;
       const threshold = 90_000;
@@ -169,7 +142,6 @@ export async function runSandboxWatchdog(
               trigger: "watchdog",
               reason: "watchdog:stuck_busy",
             });
-            // ensureSandboxRunning now handles CAS-safe reset internally
             const result = await deps.reconcile({
               origin: getPublicOrigin(options.request),
               reason: "watchdog:stuck_busy",
@@ -195,7 +167,6 @@ export async function runSandboxWatchdog(
         status = failingRequirementIds.length > 0 ? "failed" : "idle";
       }
     } else if (meta.status !== "running" || !meta.sandboxId) {
-      // Original: skip non-running/stopped/error/uninitialized
       addCheck(
         "probe",
         "skip",
@@ -214,18 +185,8 @@ export async function runSandboxWatchdog(
       const probe = await deps.probe();
 
       if (probe.ready) {
-        addCheck(
-          "probe",
-          "pass",
-          probeStartedAt,
-          "Gateway probe returned the openclaw-app marker.",
-        );
-        addCheck(
-          "reconcile",
-          "skip",
-          deps.now(),
-          "Probe passed; no repair scheduled.",
-        );
+        addCheck("probe", "pass", probeStartedAt, "Gateway probe returned the openclaw-app marker.");
+        addCheck("reconcile", "skip", deps.now(), "Probe passed; no repair scheduled.");
         status = failingRequirementIds.length > 0 ? "failed" : "ok";
       } else {
         lastError =
@@ -234,12 +195,7 @@ export async function runSandboxWatchdog(
         addCheck("probe", "fail", probeStartedAt, lastError);
 
         if (options.repair === false) {
-          addCheck(
-            "reconcile",
-            "skip",
-            deps.now(),
-            "Repair disabled for this run.",
-          );
+          addCheck("reconcile", "skip", deps.now(), "Repair disabled for this run.");
           status = "failed";
         } else {
           const reconcileStartedAt = deps.now();
@@ -258,73 +214,46 @@ export async function runSandboxWatchdog(
           triggeredRepair = reconciliation.repaired;
 
           if (reconciliation.status === "recovering" || reconciliation.repaired) {
-            addCheck(
-              "reconcile",
-              "pass",
-              reconcileStartedAt,
-              `Recovery scheduled from status ${meta.status}.`,
-            );
+            addCheck("reconcile", "pass", reconcileStartedAt, `Recovery scheduled from status ${meta.status}.`);
             status = failingRequirementIds.length > 0 ? "failed" : "repairing";
           } else {
-            addCheck(
-              "reconcile",
-              "fail",
-              reconcileStartedAt,
-              reconciliation.error ??
-                "Health reconciliation did not schedule recovery.",
-            );
+            addCheck("reconcile", "fail", reconcileStartedAt,
+              reconciliation.error ?? "Health reconciliation did not schedule recovery.");
             status = "failed";
           }
         }
       }
     }
 
-    const scheduledScanStartedAt = deps.now();
-    const dueScheduledTasks = await deps.claimDueScheduledTasks(deps.now(), 10);
-
-    if (dueScheduledTasks.length === 0) {
-      addCheck(
-        WATCHDOG_SCHEDULED_SCAN_CHECK_ID,
-        "skip",
-        scheduledScanStartedAt,
-        "No due scheduled tasks.",
-      );
-    } else {
-      addCheck(
-        WATCHDOG_SCHEDULED_SCAN_CHECK_ID,
-        "pass",
-        scheduledScanStartedAt,
-        `Claimed ${dueScheduledTasks.length} due scheduled task(s).`,
-      );
-
-      const origin = getPublicOrigin(options.request);
-
-      for (const task of dueScheduledTasks) {
-        const dispatchStartedAt = deps.now();
-
+    // Cron wake: if sandbox is stopped and OpenClaw has a cron job due, wake it.
+    // OpenClaw's native cron scheduler handles everything once the sandbox is running.
+    const cronCheckStartedAt = deps.now();
+    if (meta.status === "stopped" && meta.snapshotId) {
+      const cronNextWakeMs = await deps.getCronNextWakeMs();
+      if (cronNextWakeMs && cronNextWakeMs <= deps.now()) {
         try {
-          await deps.executeScheduledTask({ task, origin });
-          addCheck(
-            WATCHDOG_SCHEDULED_DISPATCH_CHECK_ID,
-            "pass",
-            dispatchStartedAt,
-            `Scheduled task ${task.id} dispatched.`,
-          );
-        } catch (error) {
-          const errMsg = error instanceof Error ? error.message : String(error);
-
-          lastError = `Scheduled task ${task.id} failed: ${errMsg}`;
+          const origin = getPublicOrigin(options.request);
+          await deps.ensureReady({ origin, reason: "watchdog:cron-wake" });
+          await deps.clearCronNextWake();
+          triggeredRepair = true;
+          addCheck(WATCHDOG_CRON_WAKE_CHECK_ID, "pass", cronCheckStartedAt,
+            "Cron job due — woke sandbox.");
+          status = "repairing";
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          lastError = `Cron wake failed: ${errMsg}`;
+          addCheck(WATCHDOG_CRON_WAKE_CHECK_ID, "fail", cronCheckStartedAt, lastError);
           status = "failed";
-          addCheck(
-            WATCHDOG_SCHEDULED_DISPATCH_CHECK_ID,
-            "fail",
-            dispatchStartedAt,
-            lastError,
-          );
         }
+      } else {
+        const msg = cronNextWakeMs
+          ? `Next cron wake in ${Math.ceil((cronNextWakeMs - deps.now()) / 60000)} min.`
+          : "No cron wake scheduled.";
+        addCheck(WATCHDOG_CRON_WAKE_CHECK_ID, "skip", cronCheckStartedAt, msg);
       }
-
-      await deps.pruneScheduledTasks(deps.now());
+    } else {
+      addCheck(WATCHDOG_CRON_WAKE_CHECK_ID, "skip", cronCheckStartedAt,
+        `Sandbox is ${meta.status}; cron wake not needed.`);
     }
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
