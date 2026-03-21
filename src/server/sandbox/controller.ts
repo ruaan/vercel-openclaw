@@ -153,11 +153,11 @@ const SANDBOX_CONTROLLER_TEST_GUARD_ERROR =
 let activeController: SandboxController | null = null;
 
 export function getSandboxController(): SandboxController {
-  if (activeController) {
-    return activeController;
-  }
-
   if (process.env.NODE_ENV === "test") {
+    if (activeController) {
+      return activeController;
+    }
+
     throw new Error(SANDBOX_CONTROLLER_TEST_GUARD_ERROR);
   }
 
@@ -167,5 +167,9 @@ export function getSandboxController(): SandboxController {
 export function _setSandboxControllerForTesting(
   controller: SandboxController | null,
 ): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("test-only helper called outside tests");
+  }
+
   activeController = controller;
 }

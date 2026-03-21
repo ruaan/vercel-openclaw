@@ -5,7 +5,7 @@ import {
   ensureMetaShape,
   type SingleMeta,
 } from "@/shared/types";
-import { requiresDurableStore } from "@/server/env";
+import { isVercelDeployment, requiresDurableStore } from "@/server/env";
 import { logInfo, logWarn } from "@/server/log";
 import { MemoryStore } from "@/server/store/memory-store";
 import { UpstashStore } from "@/server/store/upstash-store";
@@ -38,10 +38,18 @@ export function getStore(): Store {
     return singletonStore;
   }
 
-  // Never connect to Upstash during tests — even if env vars leak in from
-  // .env.local or vercel env pull.  This prevents test harness fake sandbox
-  // IDs (sbx-fake-*) from corrupting production metadata.
-  if (process.env.NODE_ENV !== "test") {
+  // Only deployed Vercel runtimes may use Upstash. Tests and local/CI paths
+  // must stay on memory store even when Upstash env vars leak in.
+  if (process.env.NODE_ENV === "test") {
+    logWarn("store.memory_fallback", {
+      message: "Using in-memory store — data will not persist across restarts.",
+    });
+    singletonStore = new MemoryStore();
+    logInfo("store.initialized", { backend: singletonStore.name });
+    return singletonStore;
+  }
+
+  if (isVercelDeployment()) {
     const upstash = UpstashStore.fromEnv();
     if (upstash) {
       singletonStore = upstash;
