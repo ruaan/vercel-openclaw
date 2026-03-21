@@ -10,6 +10,7 @@ import {
 import {
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
+  OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
@@ -37,11 +38,12 @@ test("buildRestoreAssetManifest staticPaths matches buildStaticRestoreFiles path
 
 // --- buildStaticRestoreFiles ---
 
-test("static restore files include startup and force-pair scripts", () => {
+test("static restore files include startup, force-pair, and restart scripts", () => {
   const paths = buildStaticRestoreFiles().map((f) => f.path);
 
   assert.ok(paths.includes(OPENCLAW_STARTUP_SCRIPT_PATH));
   assert.ok(paths.includes(OPENCLAW_FORCE_PAIR_SCRIPT_PATH));
+  assert.ok(paths.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH));
 });
 
 test("static restore files produce non-empty buffers", () => {

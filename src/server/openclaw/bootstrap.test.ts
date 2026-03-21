@@ -9,6 +9,7 @@ import {
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
+  OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
   OPENCLAW_IMAGE_GEN_SKILL_PATH,
@@ -121,6 +122,7 @@ test("setupOpenClaw writes all required config files", async () => {
       OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
       OPENCLAW_STARTUP_SCRIPT_PATH,
       OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
+      OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
       OPENCLAW_IMAGE_GEN_SKILL_PATH,
       OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
       OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
@@ -942,7 +944,7 @@ test("setupOpenClaw uses OPENCLAW_PACKAGE_SPEC when set", async () => {
   }
 });
 
-test("setupOpenClaw rejects unpinned OPENCLAW_PACKAGE_SPEC on Vercel", async () => {
+test("setupOpenClaw warns but proceeds with unpinned OPENCLAW_PACKAGE_SPEC on Vercel", async () => {
   const h = createScenarioHarness();
   const origSpec = process.env.OPENCLAW_PACKAGE_SPEC;
   const origVercel = process.env.VERCEL;
@@ -951,23 +953,17 @@ test("setupOpenClaw rejects unpinned OPENCLAW_PACKAGE_SPEC on Vercel", async () 
     process.env.VERCEL = "1";
     const handle = await createHandle(h);
 
-    await assert.rejects(
-      () =>
-        setupOpenClaw(handle, {
-          gatewayToken: "tok",
-          proxyOrigin: "https://proxy.test",
-        }),
-      (err: Error) => {
-        assert.ok(
-          err.message.includes("OPENCLAW_PACKAGE_SPEC must be a pinned version"),
-          `Expected pinned-version error, got: ${err.message}`,
-        );
-        return true;
-      },
-    );
+    // Unpinned specs now warn instead of rejecting
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      proxyOrigin: "https://proxy.test",
+    });
 
-    // No npm install should have been attempted
-    assert.equal(handle.commands.length, 0, "no commands should run before the guard");
+    // Install should still run with the fallback spec
+    const installCmd = handle.commands.find(
+      (c) => c.cmd === "npm" && c.args?.includes("install"),
+    );
+    assert.ok(installCmd, "npm install should still run with fallback spec");
   } finally {
     if (origSpec === undefined) {
       delete process.env.OPENCLAW_PACKAGE_SPEC;
@@ -983,7 +979,7 @@ test("setupOpenClaw rejects unpinned OPENCLAW_PACKAGE_SPEC on Vercel", async () 
   }
 });
 
-test("setupOpenClaw rejects openclaw@latest on Vercel", async () => {
+test("setupOpenClaw accepts openclaw@latest on Vercel", async () => {
   const h = createScenarioHarness();
   const origSpec = process.env.OPENCLAW_PACKAGE_SPEC;
   const origVercel = process.env.VERCEL;
@@ -992,24 +988,17 @@ test("setupOpenClaw rejects openclaw@latest on Vercel", async () => {
     process.env.VERCEL = "1";
     const handle = await createHandle(h);
 
-    await assert.rejects(
-      () =>
-        setupOpenClaw(handle, {
-          gatewayToken: "tok",
-          proxyOrigin: "https://proxy.test",
-        }),
-      (err: Error) => {
-        assert.ok(
-          err.message.includes("OPENCLAW_PACKAGE_SPEC must be a pinned version"),
-          `Expected pinned-version error, got: ${err.message}`,
-        );
-        assert.ok(
-          err.message.includes("openclaw@latest"),
-          `Expected message to include the offending spec, got: ${err.message}`,
-        );
-        return true;
-      },
+    // openclaw@latest is allowed — it should not reject
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    // Verify the install command used the spec
+    const installCmd = handle.commands.find(
+      (c) => c.cmd === "npm" && c.args?.some((a) => a === "openclaw@latest"),
     );
+    assert.ok(installCmd, "Expected npm install command with openclaw@latest");
   } finally {
     if (origSpec === undefined) {
       delete process.env.OPENCLAW_PACKAGE_SPEC;

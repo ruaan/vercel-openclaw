@@ -20,10 +20,9 @@ import {
   buildGatewayConfig,
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
-  OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
+  OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_LOG_FILE,
-  OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
   OPENCLAW_TELEGRAM_WEBHOOK_PORT,
 } from "@/server/openclaw/config";
@@ -513,6 +512,55 @@ export async function getRunningSandboxTimeoutRemainingMs(): Promise<number | nu
 // ---------------------------------------------------------------------------
 
 /**
+ * Compute remaining TTL from persisted sandbox credential metadata.
+ * Returns `Infinity` for api-key sources, `null` when no expiry is recorded.
+ */
+function getSandboxCredentialRemainingMs(
+  meta: Pick<SingleMeta, "lastTokenExpiresAt" | "lastTokenSource">,
+  now = Date.now(),
+): number | null {
+  if (meta.lastTokenSource === "api-key") {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (meta.lastTokenExpiresAt == null) {
+    return null;
+  }
+  return meta.lastTokenExpiresAt * 1000 - now;
+}
+
+/**
+ * Check whether the persisted sandbox credential has at least `minRemainingMs`
+ * of TTL left. This is the only TTL authority — function-local OIDC tokens
+ * are never used for freshness decisions.
+ */
+function hasSufficientSandboxCredentialTtl(
+  meta: Pick<SingleMeta, "lastTokenExpiresAt" | "lastTokenSource">,
+  minRemainingMs: number,
+  now = Date.now(),
+): boolean {
+  const remainingMs = getSandboxCredentialRemainingMs(meta, now);
+  return remainingMs != null && remainingMs > minRemainingMs;
+}
+
+/**
+ * Produce a version string from the credential-relevant metadata fields.
+ * Used to detect whether another request refreshed the token while this
+ * request was waiting on the distributed lock.
+ */
+function getSandboxCredentialVersion(
+  meta: Pick<
+    SingleMeta,
+    "lastTokenRefreshAt" | "lastTokenExpiresAt" | "lastTokenSource"
+  >,
+): string {
+  return [
+    meta.lastTokenRefreshAt ?? "none",
+    meta.lastTokenExpiresAt ?? "none",
+    meta.lastTokenSource ?? "none",
+  ].join(":");
+}
+
+/**
  * High-level entry point for AI Gateway credential management.
  *
  * Wraps TTL-based freshness check, circuit breaker, distributed lock, and
@@ -550,22 +598,28 @@ export async function ensureUsableAiGatewayCredential(
     return { refreshed: false, reason: "no-credential-available" };
   }
 
+  // Capture credential version before the lock to detect concurrent refreshes.
+  const initialCredentialVersion = getSandboxCredentialVersion(meta);
+
   // Check TTL of the token last written to the sandbox — skip if it still has
-  // sufficient remaining life. We check meta.lastTokenExpiresAt (the sandbox's
-  // token), NOT the function-level credential's TTL, because Vercel Functions
-  // always get a fresh 1-hour OIDC token that would falsely pass a TTL check
-  // even when the sandbox's on-disk token has long expired.
-  if (!force && meta.lastTokenExpiresAt != null) {
-    const metaRemainingMs = meta.lastTokenExpiresAt * 1000 - Date.now();
-    if (metaRemainingMs > minRemainingMs) {
-      return {
-        refreshed: false,
-        reason: "meta-ttl-sufficient",
-        credential: credential
-          ? { token: credential.token, source: credential.source, expiresAt: credential.expiresAt }
-          : null,
-      };
-    }
+  // sufficient remaining life. We use the persisted sandbox metadata as the
+  // only TTL authority. Function-local OIDC tokens are never trusted for
+  // freshness decisions because Vercel Functions always get a fresh 1-hour
+  // token that would falsely pass even when the sandbox's on-disk token has
+  // long expired.
+  if (!force && hasSufficientSandboxCredentialTtl(meta, minRemainingMs)) {
+    logInfo("sandbox.credential.ttl_sufficient", {
+      sandboxId: meta.sandboxId,
+      reason: "meta-ttl-sufficient",
+      remainingMs: getSandboxCredentialRemainingMs(meta),
+    });
+    return {
+      refreshed: false,
+      reason: "meta-ttl-sufficient",
+      credential: credential
+        ? { token: credential.token, source: credential.source, expiresAt: credential.expiresAt }
+        : null,
+    };
   }
 
   // Circuit breaker check.
@@ -576,25 +630,38 @@ export async function ensureUsableAiGatewayCredential(
 
   // Acquire distributed lock before refreshing.
   return withTokenRefreshLock(meta.sandboxId, reason, async (currentMeta) => {
-    // Re-check after lock acquisition — another request may have refreshed.
-    if (!force && currentMeta.lastTokenRefreshAt) {
-      const freshCred = await resolveAiGatewayCredentialOptional();
-      if (freshCred?.expiresAt != null) {
-        const remainingMs = freshCred.expiresAt * 1000 - Date.now();
-        if (remainingMs > minRemainingMs) {
-          return {
-            refreshed: false,
-            reason: "refreshed-by-another-request",
-            credential: { token: freshCred.token, source: freshCred.source, expiresAt: freshCred.expiresAt },
-          };
-        }
-      } else if (freshCred?.source === "api-key") {
-        return {
-          refreshed: false,
-          reason: "api-key-no-refresh-needed",
-          credential: { token: freshCred.token, source: freshCred.source, expiresAt: freshCred.expiresAt },
-        };
-      }
+    // Re-check after lock acquisition — another request may have refreshed
+    // while we waited. Use persisted metadata as the only TTL authority.
+    const currentCredentialVersion = getSandboxCredentialVersion(currentMeta);
+
+    if (!force && hasSufficientSandboxCredentialTtl(currentMeta, minRemainingMs)) {
+      const versionChanged = currentCredentialVersion !== initialCredentialVersion;
+      const afterLockReason = versionChanged
+        ? "refreshed-by-another-request"
+        : "meta-ttl-sufficient-after-lock";
+      logInfo("sandbox.credential.ttl_sufficient_after_lock", {
+        sandboxId: currentMeta.sandboxId,
+        reason: afterLockReason,
+        versionChanged,
+        remainingMs: getSandboxCredentialRemainingMs(currentMeta),
+      });
+      const liveCred = await resolveAiGatewayCredentialOptional();
+      return {
+        refreshed: false,
+        reason: afterLockReason,
+        credential: liveCred
+          ? { token: liveCred.token, source: liveCred.source, expiresAt: liveCred.expiresAt }
+          : null,
+      };
+    }
+
+    // api-key check after lock (another request may have switched to api-key).
+    if (!force && currentMeta.lastTokenSource === "api-key") {
+      return {
+        refreshed: false,
+        reason: "api-key-no-refresh-needed",
+        credential: null,
+      };
     }
 
     // Verify sandboxId has not changed while we waited for the lock.
@@ -787,43 +854,11 @@ export async function writeRestoreCredentialFiles(
   }
 }
 
-/**
- * Conditional credential write — reads existing values from the sandbox first
- * and only issues a shell write when they differ.  Saves one `runCommand`
- * round-trip on repeated restores from the same snapshot where tokens have
- * not rotated.
- */
-async function syncRestoreCredentialFilesIfNeeded(
-  sandbox: SandboxHandle,
-  options: { gatewayToken: string; apiKey?: string },
-): Promise<{ skipped: boolean }> {
-  const [existingGwToken, existingApiKey] = await Promise.all([
-    sandbox.readFileToBuffer({ path: OPENCLAW_GATEWAY_TOKEN_PATH }),
-    sandbox.readFileToBuffer({ path: OPENCLAW_AI_GATEWAY_API_KEY_PATH }),
-  ]);
-
-  const currentGwToken = existingGwToken?.toString("utf8") ?? "";
-  const currentApiKey = existingApiKey?.toString("utf8") ?? "";
-  const desiredApiKey = options.apiKey ?? "";
-
-  if (currentGwToken === options.gatewayToken && currentApiKey === desiredApiKey) {
-    logInfo("sandbox.restore.credentials_unchanged", {
-      sandboxId: sandbox.sandboxId,
-    });
-    return { skipped: true };
-  }
-
-  await writeRestoreCredentialFiles(sandbox, options);
-  return { skipped: false };
-}
-
-// Targeted gateway restart for token refresh — avoids re-running the full
-// startup script (which deletes paired.json, sets up shell hooks, etc.).
-// Instead: kill the old gateway, then start a fresh one with the updated
-// token read from disk.
-// Use the existing startup script for restart — it reads the token files
-// from disk, kills any existing gateway, and starts a fresh one.
-// This is the same script used during initial bootstrap and snapshot restore.
+// Targeted gateway restart for token refresh — uses the dedicated restart
+// script which kills the old gateway and starts a fresh one with updated
+// tokens read from disk.  Unlike the full startup script, the restart script
+// does NOT delete paired.json, does NOT set up shell hooks, so token refresh
+// is side-effect-free with respect to pairing and learning state.
 
 async function refreshAiGatewayToken(sandbox: SandboxHandle, sandboxId: string): Promise<void> {
   const credential = await resolveAiGatewayCredentialOptional();
@@ -883,13 +918,14 @@ async function refreshAiGatewayToken(sandbox: SandboxHandle, sandboxId: string):
 
   logInfo("sandbox.token_refresh.token_written", { sandboxId });
 
-  // Use the on-disk startup script which reads token files, kills old gateway,
-  // and starts a fresh one. Unset the baked-in AI_GATEWAY_API_KEY env var so the
-  // script reads the freshly-written file instead of the stale env var.
+  // Use the dedicated restart script which reads token files from disk, kills
+  // the old gateway, and starts a fresh one — without touching pairing state
+  // or shell hooks.  Unset baked-in env vars so the script reads the freshly-
+  // written files instead of stale env values.
   const restartResult = await sandbox.runCommand("env", [
     "-u", "AI_GATEWAY_API_KEY",
     "-u", "OPENAI_API_KEY",
-    "bash", OPENCLAW_STARTUP_SCRIPT_PATH,
+    "bash", OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   ]);
 
   const restartOutput = await restartResult.output("both").catch(() => "");
@@ -911,17 +947,6 @@ async function refreshAiGatewayToken(sandbox: SandboxHandle, sandboxId: string):
     sandboxId,
     output: restartOutput.slice(0, 200),
   });
-
-  // The startup script deletes paired.json — re-pair the device identity
-  // so the gateway continues to accept Control UI connections.
-  try {
-    await sandbox.runCommand("node", [
-      OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
-      OPENCLAW_STATE_DIR,
-    ]);
-  } catch {
-    // Best-effort only — matches setupOpenClaw behavior.
-  }
 
   // Wait for the gateway to become healthy before returning.
   // Without this, the caller's immediate forwardToGateway() hits a dead gateway.
@@ -1269,7 +1294,8 @@ async function createAndBootstrapSandbox(
     });
 
     const latest = await getInitializedMeta();
-    const apiKey = credential?.token ?? (await getAiGatewayBearerTokenOptional()) ?? undefined;
+    // Reuse the already-resolved credential — no redundant second lookup.
+    const apiKey = credential?.token;
     const slackCfg = latest.channels.slack;
     const setupResult = await setupOpenClaw(sandbox, {
       gatewayToken: latest.gatewayToken,

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { SingleMeta } from "@/shared/types";
 
 import {
   ensureFreshGatewayToken,
+  ensureUsableAiGatewayCredential,
   ensureSandboxRunning,
   ensureSandboxReady,
   getRunningSandboxTimeoutRemainingMs,
@@ -37,6 +39,7 @@ import {
   OPENCLAW_BIN,
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
+  OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
   OPENCLAW_IMAGE_GEN_SKILL_PATH,
@@ -2131,30 +2134,35 @@ test("[lifecycle] touchRunningSandbox sandbox_timeout_invalid error -> silently 
 // Edge-branch: touchRunningSandbox token refresh paths
 // ---------------------------------------------------------------------------
 
-test("[lifecycle] ensureFreshGatewayToken: skips refresh when interval not elapsed", async () => {
+test("[lifecycle] ensureFreshGatewayToken: skips refresh when meta TTL is sufficient", async () => {
   const fake = new FakeSandboxController();
   await withTestEnv(fake, async () => {
     await mutateMeta((meta) => {
       meta.status = "running";
       meta.sandboxId = "sbx-token-skip";
       meta.lastAccessedAt = null;
-      meta.lastTokenRefreshAt = Date.now(); // Just refreshed
+      meta.lastTokenRefreshAt = Date.now();
+      // Token expires 30 minutes from now — well above the 10-minute default threshold.
+      meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) + 30 * 60;
+      meta.lastTokenSource = "oidc";
     });
 
-    await ensureFreshGatewayToken();
+    const result = await ensureFreshGatewayToken();
+    assert.equal(result.reason, "meta-ttl-sufficient", "Should short-circuit on persisted meta TTL");
+    assert.equal(result.refreshed, false);
 
-    // The handle should have been retrieved but no sh -c command for token write
+    // No shell commands should have been issued.
     const handle = fake.handlesByIds.get("sbx-token-skip");
     if (handle) {
       const shCmd = (handle as FakeSandboxHandle).commands.find(
         (c) => c.cmd === "sh" && c.args?.[0] === "-c",
       );
-      assert.equal(shCmd, undefined, "Should not attempt token refresh when interval not elapsed");
+      assert.equal(shCmd, undefined, "Should not attempt token refresh when meta TTL sufficient");
     }
   });
 });
 
-test("[lifecycle] ensureFreshGatewayToken: triggers refresh when interval elapsed", async () => {
+test("[lifecycle] ensureFreshGatewayToken: triggers refresh when meta TTL expired", async () => {
   const fake = new FakeSandboxController();
   await withTestEnv(fake, async () => {
     _setAiGatewayTokenOverrideForTesting("fresh-token-val");
@@ -2164,7 +2172,10 @@ test("[lifecycle] ensureFreshGatewayToken: triggers refresh when interval elapse
         meta.status = "running";
         meta.sandboxId = "sbx-token-refresh";
         meta.lastAccessedAt = null;
-        meta.lastTokenRefreshAt = Date.now() - 15 * 60 * 1000; // 15 min ago
+        meta.lastTokenRefreshAt = Date.now() - 15 * 60 * 1000;
+        // Token expired 5 minutes ago — below the 10-minute threshold.
+        meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) - 5 * 60;
+        meta.lastTokenSource = "oidc";
       });
 
       await ensureFreshGatewayToken();
@@ -2174,7 +2185,7 @@ test("[lifecycle] ensureFreshGatewayToken: triggers refresh when interval elapse
         const shCmd = handle.commands.find(
           (c) => c.cmd === "sh" && c.args?.[0] === "-c",
         );
-        assert.ok(shCmd, "Should attempt token refresh when interval elapsed");
+        assert.ok(shCmd, "Should attempt token refresh when meta TTL expired");
       }
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);
@@ -2193,6 +2204,8 @@ test("[lifecycle] ensureFreshGatewayToken: writes token then runs startup script
         meta.sandboxId = "sbx-refresh-script";
         meta.lastAccessedAt = null;
         meta.lastTokenRefreshAt = Date.now() - 15 * 60 * 1000;
+        meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) - 5 * 60;
+        meta.lastTokenSource = "oidc";
       });
 
       await ensureFreshGatewayToken();
@@ -2210,11 +2223,11 @@ test("[lifecycle] ensureFreshGatewayToken: writes token then runs startup script
         "Token value should be passed as argument",
       );
 
-      // Step 2: gateway restart via env -> startup script
+      // Step 2: gateway restart via env -> dedicated restart script
       const restartCmd = handle.commands.find(
-        (c) => c.cmd === "env" && c.args?.includes("bash") && c.args?.includes(OPENCLAW_STARTUP_SCRIPT_PATH),
+        (c) => c.cmd === "env" && c.args?.includes("bash") && c.args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH),
       );
-      assert.ok(restartCmd, "Should restart gateway via startup script");
+      assert.ok(restartCmd, "Should restart gateway via dedicated restart script");
 
       // Step 3: metadata updated
       const meta = await getInitializedMeta();
@@ -2242,6 +2255,8 @@ test("[lifecycle] ensureFreshGatewayToken: no OIDC token available -> skips sile
         meta.sandboxId = "sbx-no-oidc";
         meta.lastAccessedAt = null;
         meta.lastTokenRefreshAt = staleRefreshTime;
+        meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) - 5 * 60;
+        meta.lastTokenSource = "oidc";
       });
 
       await ensureFreshGatewayToken();
@@ -2279,12 +2294,14 @@ test("[lifecycle] ensureFreshGatewayToken: restart failure does not corrupt meta
         meta.sandboxId = "sbx-restart-fail";
         meta.lastAccessedAt = null;
         meta.lastTokenRefreshAt = refreshTime;
+        meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) - 5 * 60;
+        meta.lastTokenSource = "oidc";
       });
 
-      // Pre-create the handle with a failing startup script
+      // Pre-create the handle with a failing restart script
       const handle = new FakeSandboxHandle("sbx-restart-fail", fake.events);
       handle.responders.push((cmd, args) => {
-        if (cmd === "env" && args?.includes("bash") && args?.includes(OPENCLAW_STARTUP_SCRIPT_PATH)) {
+        if (cmd === "env" && args?.includes("bash") && args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH)) {
           return { exitCode: 255, output: async () => "gateway restart failed" };
         }
         return undefined;
@@ -2307,7 +2324,7 @@ test("[lifecycle] ensureFreshGatewayToken: restart failure does not corrupt meta
   });
 });
 
-test("[lifecycle] ensureFreshGatewayToken: re-pairs device identity after restart", async () => {
+test("[lifecycle] ensureFreshGatewayToken: does NOT force-pair after restart", async () => {
   const fake = new FakeSandboxController();
   await withTestEnv(fake, async () => {
     _setAiGatewayTokenOverrideForTesting("check-pair-token");
@@ -2318,6 +2335,8 @@ test("[lifecycle] ensureFreshGatewayToken: re-pairs device identity after restar
         meta.sandboxId = "sbx-check-pair";
         meta.lastAccessedAt = null;
         meta.lastTokenRefreshAt = Date.now() - 15 * 60 * 1000;
+        meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) - 5 * 60;
+        meta.lastTokenSource = "oidc";
       });
 
       await ensureFreshGatewayToken();
@@ -2325,11 +2344,12 @@ test("[lifecycle] ensureFreshGatewayToken: re-pairs device identity after restar
       const handle = fake.handlesByIds.get("sbx-check-pair") as FakeSandboxHandle | undefined;
       assert.ok(handle, "Handle should exist");
 
-      // Verify force-pair runs after startup script
+      // Token refresh uses the dedicated restart script which does not
+      // touch pairing state — verify force-pair is NOT invoked.
       const pairCmd = handle.commands.find(
         (c) => c.cmd === "node" && c.args?.[0] === OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
       );
-      assert.ok(pairCmd, "Should re-pair device identity after gateway restart");
+      assert.equal(pairCmd, undefined, "Token refresh should not force-pair after gateway restart");
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);
     }
@@ -2347,7 +2367,10 @@ test("[lifecycle] ensureFreshGatewayToken: force=true bypasses throttle", async 
         meta.status = "running";
         meta.sandboxId = "sbx-force-refresh";
         meta.lastAccessedAt = null;
-        meta.lastTokenRefreshAt = Date.now(); // Just refreshed
+        meta.lastTokenRefreshAt = Date.now();
+        // Token expires 30 minutes from now — sufficient TTL.
+        meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) + 30 * 60;
+        meta.lastTokenSource = "oidc";
       });
 
       // Without force, should skip
@@ -2392,14 +2415,16 @@ test("[lifecycle] ensureFreshGatewayToken: skips restart when token on disk matc
         meta.status = "running";
         meta.sandboxId = "sbx-same-token";
         meta.lastAccessedAt = null;
-        meta.lastTokenRefreshAt = Date.now() - 15 * 60 * 1000; // Stale
+        meta.lastTokenRefreshAt = Date.now() - 15 * 60 * 1000;
+        meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) - 5 * 60;
+        meta.lastTokenSource = "oidc";
       });
 
       await ensureFreshGatewayToken();
 
-      // Should NOT have run the startup script (no gateway restart)
+      // Should NOT have run the restart script (no gateway restart)
       const restartCmd = handle.commands.find(
-        (c) => c.cmd === "bash" && c.args?.[0] === OPENCLAW_STARTUP_SCRIPT_PATH,
+        (c) => c.cmd === "env" && c.args?.includes("bash") && c.args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH),
       );
       assert.equal(restartCmd, undefined, "Should not restart gateway when token unchanged");
 
@@ -2411,6 +2436,96 @@ test("[lifecycle] ensureFreshGatewayToken: skips restart when token on disk matc
       );
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureUsableAiGatewayCredential: meta-only TTL authority
+// ---------------------------------------------------------------------------
+
+test("[lifecycle] ensureUsableAiGatewayCredential: returns meta-ttl-sufficient when lastTokenExpiresAt is fresh", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    await mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-ttl-fresh";
+      meta.lastTokenRefreshAt = Date.now();
+      meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) + 30 * 60;
+      meta.lastTokenSource = "oidc";
+    });
+
+    const result = await ensureUsableAiGatewayCredential();
+    assert.equal(result.refreshed, false);
+    assert.equal(result.reason, "meta-ttl-sufficient");
+  });
+});
+
+test("[lifecycle] ensureUsableAiGatewayCredential: proceeds to refresh when meta TTL stale despite fresh OIDC token", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    // Function has a fresh OIDC token, but persisted meta says token is expired.
+    _setAiGatewayTokenOverrideForTesting("fresh-oidc-token");
+
+    try {
+      await mutateMeta((meta) => {
+        meta.status = "running";
+        meta.sandboxId = "sbx-stale-meta";
+        meta.lastTokenRefreshAt = Date.now() - 60 * 60 * 1000;
+        meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) - 5 * 60;
+        meta.lastTokenSource = "oidc";
+      });
+
+      const result = await ensureUsableAiGatewayCredential();
+      // Should have attempted a refresh (not short-circuited).
+      assert.equal(result.refreshed, true);
+      assert.equal(result.reason, "refreshed");
+    } finally {
+      _setAiGatewayTokenOverrideForTesting(null);
+    }
+  });
+});
+
+test("[lifecycle] ensureUsableAiGatewayCredential: null lastTokenExpiresAt proceeds to refresh", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    _setAiGatewayTokenOverrideForTesting("fresh-oidc-token");
+
+    try {
+      await mutateMeta((meta) => {
+        meta.status = "running";
+        meta.sandboxId = "sbx-null-expiry";
+        meta.lastTokenRefreshAt = Date.now();
+        meta.lastTokenExpiresAt = null;
+        meta.lastTokenSource = "oidc";
+      });
+
+      const result = await ensureUsableAiGatewayCredential();
+      // null expiresAt means TTL unknown — should proceed to refresh.
+      assert.equal(result.refreshed, true);
+      assert.equal(result.reason, "refreshed");
+    } finally {
+      _setAiGatewayTokenOverrideForTesting(null);
+    }
+  });
+});
+
+test("[lifecycle] ensureUsableAiGatewayCredential: api-key source returns no-refresh-needed", async () => {
+  const fake = new FakeSandboxController();
+  await withTestEnv(fake, async () => {
+    // Set AI_GATEWAY_API_KEY env var to simulate api-key source
+    process.env.AI_GATEWAY_API_KEY = "test-api-key";
+    try {
+      await mutateMeta((meta) => {
+        meta.status = "running";
+        meta.sandboxId = "sbx-api-key";
+      });
+
+      const result = await ensureUsableAiGatewayCredential();
+      assert.equal(result.refreshed, false);
+      assert.equal(result.reason, "api-key-no-refresh-needed");
+    } finally {
+      delete process.env.AI_GATEWAY_API_KEY;
     }
   });
 });

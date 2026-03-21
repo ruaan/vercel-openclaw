@@ -5,6 +5,7 @@ import {
   buildFastRestoreScript,
   buildForcePairScript,
   buildGatewayConfig,
+  buildGatewayRestartScript,
   buildImageGenScript,
   buildImageGenSkill,
   buildStartupScript,
@@ -25,6 +26,7 @@ import {
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
+  OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
   OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
@@ -211,6 +213,10 @@ export async function setupOpenClaw(
     {
       path: OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
       content: Buffer.from(buildFastRestoreScript()),
+    },
+    {
+      path: OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
+      content: Buffer.from(buildGatewayRestartScript()),
     },
     {
       path: OPENCLAW_IMAGE_GEN_SKILL_PATH,

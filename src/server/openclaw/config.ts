@@ -39,6 +39,7 @@ export const OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH = `${OPENCLAW_PKG_DIR}/skill
 export const OPENCLAW_LOG_FILE = "/tmp/openclaw.log";
 export const OPENCLAW_STARTUP_SCRIPT_PATH = "/vercel/sandbox/.on-restore.sh";
 export const OPENCLAW_FAST_RESTORE_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/.fast-restore.sh`;
+export const OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/.restart-gateway.sh`;
 
 function readBooleanEnv(name: string, defaultValue = false): boolean {
   const raw = process.env[name]?.trim().toLowerCase();
@@ -54,6 +55,62 @@ function readBooleanEnv(name: string, defaultValue = false): boolean {
   throw new Error(
     `${name} must be one of: true, false, 1, 0, yes, no, on, off.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Shared gateway env + launch shell fragments
+// ---------------------------------------------------------------------------
+
+const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1";
+
+/**
+ * Shell fragment that reads the gateway token and AI gateway key from disk
+ * (or env fallback) and exports the variables needed by the openclaw gateway.
+ * Exits non-zero when the gateway token is missing or empty.
+ */
+function buildGatewayEnvShell(): string {
+  return [
+    `gateway_token="$(cat "${OPENCLAW_GATEWAY_TOKEN_PATH}" 2>/dev/null || true)"`,
+    'if [ -z "$gateway_token" ]; then',
+    '  echo \'{"event":"gateway_env.error","reason":"empty_gateway_token"}\' >&2',
+    "  exit 1",
+    "fi",
+    'if [ -z "${AI_GATEWAY_API_KEY:-}" ]; then',
+    `  ai_gateway_api_key="$(cat "${OPENCLAW_AI_GATEWAY_API_KEY_PATH}" 2>/dev/null || true)"`,
+    "else",
+    '  ai_gateway_api_key="$AI_GATEWAY_API_KEY"',
+    "fi",
+    `export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH}"`,
+    'export OPENCLAW_GATEWAY_TOKEN="$gateway_token"',
+    'if [ -n "$ai_gateway_api_key" ]; then',
+    '  export AI_GATEWAY_API_KEY="$ai_gateway_api_key"',
+    '  export OPENAI_API_KEY="$ai_gateway_api_key"',
+    `  export OPENAI_BASE_URL="${AI_GATEWAY_BASE_URL}"`,
+    "fi",
+  ].join("\n");
+}
+
+/** Shell fragment that kills any existing gateway and starts a fresh one.
+ *  Uses the shell variables exported by buildGatewayEnvShell() so the
+ *  conditional API-key logic is honoured. */
+function buildGatewayLaunchShell(): string {
+  return [
+    'pkill -f "openclaw.gateway" || true',
+    `setsid ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &`,
+  ].join("\n");
+}
+
+/**
+ * Lightweight script that restarts the gateway without touching pairing state
+ * or shell hooks.  Used by token refresh to avoid the side effects of the
+ * full startup script.
+ */
+export function buildGatewayRestartScript(): string {
+  return `#!/bin/bash
+set -euo pipefail
+${buildGatewayEnvShell()}
+${buildGatewayLaunchShell()}
+`;
 }
 
 export function buildGatewayConfig(
@@ -135,7 +192,7 @@ export function buildGatewayConfig(
     mode: "merge",
     providers: {
       openai: {
-        baseUrl: "https://ai-gateway.vercel.sh/v1",
+        baseUrl: AI_GATEWAY_BASE_URL,
         apiKey: "sk-placeholder",
         api: "openai-completions",
         models: [
@@ -275,25 +332,8 @@ export function buildStartupScript(): string {
 set -euo pipefail
 mkdir -p "${OPENCLAW_STATE_DIR}/devices"
 rm -f "${OPENCLAW_STATE_DIR}/devices/paired.json" "${OPENCLAW_STATE_DIR}/devices/pending.json"
-gateway_token="$(cat "${OPENCLAW_GATEWAY_TOKEN_PATH}")"
-if [ -z "$gateway_token" ]; then
-  echo "Gateway token file is empty" >&2
-  exit 1
-fi
-if [ -z "\${AI_GATEWAY_API_KEY:-}" ]; then
-  ai_gateway_api_key="$(cat "${OPENCLAW_AI_GATEWAY_API_KEY_PATH}" 2>/dev/null || true)"
-else
-  ai_gateway_api_key="$AI_GATEWAY_API_KEY"
-fi
-export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH}"
-export OPENCLAW_GATEWAY_TOKEN="$gateway_token"
-if [ -n "$ai_gateway_api_key" ]; then
-  export AI_GATEWAY_API_KEY="$ai_gateway_api_key"
-  export OPENAI_API_KEY="$ai_gateway_api_key"
-  export OPENAI_BASE_URL="https://ai-gateway.vercel.sh/v1"
-fi
-pkill -f "openclaw.gateway" || true
-setsid env OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH}" OPENCLAW_GATEWAY_TOKEN="$gateway_token" AI_GATEWAY_API_KEY="$ai_gateway_api_key" OPENAI_API_KEY="$ai_gateway_api_key" OPENAI_BASE_URL="https://ai-gateway.vercel.sh/v1" ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &
+${buildGatewayEnvShell()}
+${buildGatewayLaunchShell()}
 _learning_log=/tmp/shell-commands-for-learning.log
 touch "$_learning_log"
 _home="\${HOME:-/home/vercel-sandbox}"

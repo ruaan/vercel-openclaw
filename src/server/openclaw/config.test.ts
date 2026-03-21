@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   buildGatewayConfig,
+  buildGatewayRestartScript,
+  buildStartupScript,
   buildWebSearchSkill,
   buildWebSearchScript,
   buildVisionSkill,
@@ -212,4 +214,59 @@ test("buildStructuredExtractScript uses json_schema response format", () => {
   const script = buildStructuredExtractScript();
   assert.ok(script.includes("json_schema"));
   assert.ok(script.includes("response_format"));
+});
+
+// ---------------------------------------------------------------------------
+// Gateway restart script
+// ---------------------------------------------------------------------------
+
+test("buildGatewayRestartScript exits non-zero when gateway token is empty", () => {
+  const script = buildGatewayRestartScript();
+  assert.ok(script.includes("set -euo pipefail"), "restart script should use strict mode");
+  assert.ok(script.includes("exit 1"), "restart script should exit 1 on empty token");
+  assert.ok(
+    script.includes("empty_gateway_token"),
+    "restart script should emit structured error for empty token",
+  );
+});
+
+test("buildGatewayRestartScript does not touch pairing state", () => {
+  const script = buildGatewayRestartScript();
+  assert.ok(!script.includes("paired.json"), "restart script must not reference paired.json");
+  assert.ok(!script.includes("pending.json"), "restart script must not reference pending.json");
+  assert.ok(!script.includes("devices"), "restart script must not reference devices dir");
+});
+
+test("buildGatewayRestartScript does not install shell hooks", () => {
+  const script = buildGatewayRestartScript();
+  assert.ok(!script.includes("shell-commands-for-learning"), "restart script must not install learning hooks");
+  assert.ok(!script.includes(".zshrc"), "restart script must not modify .zshrc");
+  assert.ok(!script.includes(".bashrc"), "restart script must not modify .bashrc");
+});
+
+test("buildGatewayRestartScript kills existing gateway and launches a new one", () => {
+  const script = buildGatewayRestartScript();
+  assert.ok(script.includes('pkill -f "openclaw.gateway"'), "restart script should kill existing gateway");
+  assert.ok(script.includes("openclaw gateway"), "restart script should launch the gateway");
+});
+
+test("buildStartupScript and buildGatewayRestartScript share the same gateway launch command", () => {
+  const startup = buildStartupScript();
+  const restart = buildGatewayRestartScript();
+
+  // Both should use setsid to launch the gateway in the background
+  assert.ok(startup.includes("setsid"), "startup script should use setsid launch");
+  assert.ok(restart.includes("setsid"), "restart script should use setsid launch");
+
+  // Both should read the gateway token from disk
+  assert.ok(startup.includes(".gateway-token"), "startup should read gateway token");
+  assert.ok(restart.includes(".gateway-token"), "restart should read gateway token");
+});
+
+test("buildStartupScript clears pairing state while restart does not", () => {
+  const startup = buildStartupScript();
+  const restart = buildGatewayRestartScript();
+
+  assert.ok(startup.includes("paired.json"), "startup should clear paired.json");
+  assert.ok(!restart.includes("paired.json"), "restart must not clear paired.json");
 });
