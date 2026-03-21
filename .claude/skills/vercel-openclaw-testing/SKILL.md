@@ -1838,9 +1838,9 @@ The following subsystems fail closed in test mode to prevent accidental producti
 
 | Subsystem | Guard behavior | What would go wrong without it |
 |-----------|---------------|-------------------------------|
-| **Sandbox controller** | `getSandboxController()` throws unless `_setSandboxControllerForTesting()` was called | Tests would create real Vercel Sandbox VMs |
-| **Upstash store** | Skips Upstash initialization even if `UPSTASH_REDIS_REST_URL` is set | Fake sandbox IDs (`sbx-fake-*`) would corrupt production metadata |
-| **Vercel Queues** | `publishToChannelQueue` skips `@vercel/queue` import, uses in-memory fallback | Tests would publish to live Vercel Queues |
+| **Sandbox controller** | `getSandboxController()` throws unless `_setSandboxControllerForTesting()` was called. `_setSandboxControllerForTesting()` throws if `NODE_ENV !== "test"`. In production, always returns the real SDK wrapper — no mutable singleton. | Tests would create real Vercel Sandbox VMs; production would use fake controllers if singleton leaked |
+| **Upstash store** | Upstash only connects on deployed Vercel runtimes (`isVercelDeployment()`). Tests and local dev always use memory store, even if Upstash env vars are present. | Fake sandbox IDs (`sbx-fake-*`) would corrupt production metadata |
+| **Workflow DevKit** | Channel webhooks call `start(drainChannelWorkflow)` from `workflow/api`. In tests, `start()` is not available (no workflow runtime), so webhook routes catch the error and return 200 gracefully. | Tests would start real workflow runs on Vercel's infrastructure |
 | **OIDC token** | `resolveAiGatewayCredentialOptional()` skips real OIDC fetch, falls back to API key or undefined | Tests would call Vercel's OIDC provider |
 | **Vercel markers** | Harness clears `VERCEL_ENV`, `VERCEL_URL`, `VERCEL_PROJECT_PRODUCTION_URL`, `VERCEL` | `isVercelDeployment()` would return true, triggering Vercel-only code paths |
 

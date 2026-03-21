@@ -115,7 +115,7 @@ Full reference:
 | `OPENCLAW_SANDBOX_VCPUS` | No | vCPU count for sandbox create and snapshot restore (valid: 1, 2, 4, 8; default: 1). Keep fixed during benchmarks. |
 | `OPENCLAW_SANDBOX_SLEEP_AFTER_MS` | No | How long the sandbox stays alive after last activity, in milliseconds (60000–2700000; default: 1800000 = 30 min). Heartbeat and touch-throttle intervals are derived proportionally. Existing running sandboxes cannot be shortened in place. If you increase this value, the next touch/heartbeat can top the sandbox timeout up to the new target. If you decrease it, the lower value becomes exact on the next create or restore. |
 | `VERCEL_AUTOMATION_BYPASS_SECRET` | No | Appended to webhook URLs to pass Deployment Protection |
-| `CRON_SECRET` | No | Enables `/api/cron/drain-channels` diagnostic backstop |
+| `CRON_SECRET` | No | Enables `/api/cron/drain-channels` diagnostic backstop (Workflow DevKit is the primary channel delivery mechanism) |
 | `NEXT_PUBLIC_APP_URL` | No | Base origin override |
 | `NEXT_PUBLIC_BASE_DOMAIN` | No | Preferred external host for webhook URLs |
 | `BASE_DOMAIN` | No | Legacy alias for `NEXT_PUBLIC_BASE_DOMAIN` |

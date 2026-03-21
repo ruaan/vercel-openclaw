@@ -103,9 +103,9 @@ All channel webhook URL builders (`buildSlackWebhookUrl`, `buildTelegramWebhookU
 
 Machine-checkable config readiness report consumed by `/api/admin/preflight`.
 
-Checks: `public-origin`, `webhook-bypass` (always passes — admin-secret auth handles webhooks without bypass), `store`, `ai-gateway`, `openclaw-package-spec` (fail on Vercel when missing or unpinned), `auth-config` (fail when sign-in-with-vercel vars are missing).
+Checks: `public-origin`, `webhook-bypass` (always passes — admin-secret auth handles webhooks without bypass), `store`, `ai-gateway`, `openclaw-package-spec` (warn on Vercel when unpinned, runtime falls back to `openclaw@latest`), `auth-config` (fail when sign-in-with-vercel vars are missing).
 
-The authoritative readiness check is `POST /api/admin/launch-verify` (`src/app/api/admin/launch-verify/route.ts`), which runs preflight as its first phase and then verifies runtime behavior: Vercel Queue loopback delivery via `/api/queues/launch-verify`, sandbox ensure, gateway chat completions, and wake-from-sleep recovery (destructive mode). `scripts/check-deploy-readiness.mjs` consumes launch-verify by default.
+The authoritative readiness check is `POST /api/admin/launch-verify` (`src/app/api/admin/launch-verify/route.ts`), which runs preflight as its first phase and then verifies runtime behavior: queue loopback delivery via `/api/queues/launch-verify`, sandbox ensure, gateway chat completions, and wake-from-sleep recovery (destructive mode). `scripts/check-deploy-readiness.mjs` consumes launch-verify by default.
 
 Store requirement policy: missing Upstash is a hard fail (`status: "fail"`) on Vercel deployments but a warning (`status: "warn"`) in non-Vercel/local environments. This applies to both connectability and preflight checks.
 
@@ -288,17 +288,31 @@ Main files:
 Channel delivery flow:
 
 1. the public webhook route validates the platform signature or secret
-2. the handler starts a channel workflow
-3. the workflow restores the sandbox if needed
-4. the workflow sends the message to `POST /v1/chat/completions` on the OpenClaw gateway
+2. **Telegram fast path**: if the sandbox is running, the route forwards the raw update to OpenClaw's native Telegram handler on port 8787 and returns 200. This preserves full native Telegram features (slash commands, media, inline keyboards, etc.)
+3. **Telegram stopped path / Slack / Discord**: the route sends a boot message (Telegram only, "Starting up…"), then calls `start(drainChannelWorkflow)` from `workflow/api`
+4. the workflow step (`processChannelStep`) restores the sandbox if needed, then sends the message to `POST /v1/chat/completions` on the OpenClaw gateway
 5. the app delivers the reply back to the originating channel
+6. the workflow step deletes the Telegram boot message after processing
 
-Channel delivery uses Workflow DevKit as the primary durable transport. `/api/cron/drain-channels` remains an optional diagnostic backstop when `CRON_SECRET` is configured. Launch verification still uses `/api/queues/launch-verify` as a separate queue probe.
+Channel delivery uses Workflow DevKit (`workflow` package) as the primary durable transport. The `withWorkflow()` wrapper in `next.config.ts` enables the `"use workflow"` and `"use step"` directives. Launch verification uses a separate `@vercel/queue` consumer at `/api/queues/launch-verify`.
+
+### Telegram webhook architecture
+
+OpenClaw's `openclaw.json` config includes `webhookUrl` pointing to the app's public Telegram webhook route. When OpenClaw boots, it calls `setWebhook` with this URL — registering the **app's** endpoint, not the sandbox's own. The native Telegram handler still listens on `127.0.0.1:8787` for the fast-path forwarding.
+
+Key config fields in `buildGatewayConfig()`:
+- `webhookUrl` — app's public route (e.g. `https://app.example.com/api/channels/telegram/webhook`)
+- `webhookSecret` — shared secret for webhook validation (must be threaded through both create and restore paths)
+- `webhookPort` — 8787 (local listener)
+- `webhookHost` — `127.0.0.1`
+- `webhookPath` — `/telegram-webhook` (local path)
+
+Both `SANDBOX_PORTS` in lifecycle.ts must include port 8787 alongside 3000.
 
 Behavior:
 
-- Slack uses threaded replies
-- Telegram uses webhook-secret validation and Bot API replies
+- Slack uses threaded replies; fast path forwards to `/slack/events` on the gateway when running
+- Telegram uses webhook-secret validation; fast path forwards to native handler on port 8787 when running; boot message sent from webhook route when stopped
 - Discord uses deferred interaction responses and can register `/ask`
 
 ### Channel connectability and 409 guards
@@ -396,10 +410,13 @@ The admin page is intentionally small. It is a control surface, not a dashboard 
 ## Important implementation constraints
 
 - Do not add `export const runtime = "nodejs"` to route handlers. This repo uses `cacheComponents: true` in `next.config.ts`, and explicit `runtime` exports break the Next.js 16 build.
-- Keep the sandbox exposed on port `3000` unless you update bootstrap, lifecycle, proxy, and docs together.
+- Keep the sandbox exposed on ports `3000` (gateway) and `8787` (Telegram native handler) unless you update bootstrap, lifecycle, proxy, and docs together. Both ports must be in `SANDBOX_PORTS`.
 - `POST /api/admin/snapshot` currently snapshots and stops. If you change that to a hot snapshot flow, update the README and this file.
 - If you add environment variables, update `.env.example`, `README.md`, and this file in the same change.
 - If you change metadata shape, update tests and migration logic in `ensureMetaShape`.
+- Telegram `webhookSecret` must flow through ALL config paths: `buildGatewayConfig()`, `buildDynamicRestoreFiles()`, `syncRestoreAssetsIfNeeded()`, and `computeGatewayConfigHash()`. Missing it causes OpenClaw config validation failure ("webhookUrl requires webhookSecret").
+- `_setSandboxControllerForTesting()` only works when `NODE_ENV=test`. In production, `getSandboxController()` always returns the real `@vercel/sandbox` SDK wrapper. This prevents fake sandbox IDs from contaminating Upstash metadata.
+- Upstash store only connects on deployed Vercel runtimes (`isVercelDeployment()`). Local dev and CI always use the memory store, even if Upstash env vars are present.
 
 ## Verification
 
