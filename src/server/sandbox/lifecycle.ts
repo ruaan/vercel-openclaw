@@ -75,6 +75,11 @@ const TOKEN_REFRESH_LOCK_POLL_MS = 500;
 
 export type BackgroundScheduler = (callback: () => Promise<void> | void) => void;
 
+export type CronWakeReadResult =
+  | { status: "ok"; nextWakeMs: number }
+  | { status: "no-jobs" }
+  | { status: "error"; error: string };
+
 type AutoRenewedLockOptions = {
   key: string;
   token: string;
@@ -328,17 +333,25 @@ async function cleanupBeforeSnapshot(
  */
 async function readCronNextWakeFromSandbox(
   sandbox: SandboxHandle,
-): Promise<number | null> {
+): Promise<CronWakeReadResult> {
   try {
     const buf = await sandbox.readFileToBuffer({ path: CRON_JOBS_PATH });
-    if (!buf) return null;
+    if (!buf) {
+      return { status: "no-jobs" };
+    }
     const data = JSON.parse(buf.toString("utf8")) as {
       jobs?: Array<{
         enabled?: boolean;
         state?: { nextRunAtMs?: number };
       }>;
     };
-    if (!Array.isArray(data.jobs)) return null;
+    if (!Array.isArray(data.jobs)) {
+      const errorMessage = `Invalid cron jobs payload at ${CRON_JOBS_PATH}: missing jobs array.`;
+      logWarn("sandbox.cron_next_wake_read_failed", {
+        error: errorMessage,
+      });
+      return { status: "error", error: errorMessage };
+    }
     let earliest: number | null = null;
     for (const job of data.jobs) {
       if (job.enabled === false) continue;
@@ -349,13 +362,15 @@ async function readCronNextWakeFromSandbox(
     }
     if (earliest) {
       logInfo("sandbox.cron_next_wake_read", { earliest, jobCount: data.jobs.length });
+      return { status: "ok", nextWakeMs: earliest };
     }
-    return earliest;
+    return { status: "no-jobs" };
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
     logWarn("sandbox.cron_next_wake_read_failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage,
     });
-    return null;
+    return { status: "error", error: errorMessage };
   }
 }
 
@@ -379,7 +394,7 @@ export async function stopSandbox(): Promise<SingleMeta> {
     try {
       const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
       await cleanupBeforeSnapshot(sandbox, meta.firewall.mode);
-      const cronNextWakeMs = await readCronNextWakeFromSandbox(sandbox);
+      const cronWakeRead = await readCronNextWakeFromSandbox(sandbox);
       const snapshot = await sandbox.snapshot();
       // Compute config hash for this snapshot.  The hash covers everything
       // in buildGatewayConfig EXCEPT the proxy origin (which varies per
@@ -387,12 +402,18 @@ export async function stopSandbox(): Promise<SingleMeta> {
       // hash matches at restore time, the writeFiles call is skipped.
       const configHash = computeGatewayConfigHash(meta);
 
-      logInfo("sandbox.status_transition", { from: meta.status, to: "stopped", snapshotId: snapshot.snapshotId, configHash, cronNextWakeMs });
+      logInfo("sandbox.status_transition", {
+        from: meta.status,
+        to: "stopped",
+        snapshotId: snapshot.snapshotId,
+        configHash,
+        cronWakeRead,
+      });
 
-      if (cronNextWakeMs) {
-        await getStore().setValue(CRON_NEXT_WAKE_KEY, cronNextWakeMs);
-        logInfo("sandbox.cron_wake_saved", { cronNextWakeMs });
-      } else {
+      if (cronWakeRead.status === "ok") {
+        await getStore().setValue(CRON_NEXT_WAKE_KEY, cronWakeRead.nextWakeMs);
+        logInfo("sandbox.cron_wake_saved", { cronNextWakeMs: cronWakeRead.nextWakeMs });
+      } else if (cronWakeRead.status === "no-jobs") {
         await getStore().deleteValue(CRON_NEXT_WAKE_KEY);
       }
 
@@ -542,9 +563,11 @@ export async function touchRunningSandbox(): Promise<SingleMeta> {
   // stopSandbox() never runs, so this is the only path that persists the
   // next wake time before the sandbox disappears.
   try {
-    const cronNextWakeMs = await readCronNextWakeFromSandbox(sandbox);
-    if (cronNextWakeMs) {
-      await getStore().setValue(CRON_NEXT_WAKE_KEY, cronNextWakeMs);
+    const cronWakeRead = await readCronNextWakeFromSandbox(sandbox);
+    if (cronWakeRead.status === "ok") {
+      await getStore().setValue(CRON_NEXT_WAKE_KEY, cronWakeRead.nextWakeMs);
+    } else if (cronWakeRead.status === "no-jobs") {
+      await getStore().deleteValue(CRON_NEXT_WAKE_KEY);
     }
   } catch {
     // Non-critical — don't let cron-wake bookkeeping break the heartbeat.
