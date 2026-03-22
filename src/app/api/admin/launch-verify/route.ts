@@ -32,12 +32,15 @@ import {
   writeChannelReadiness,
 } from "@/server/launch-verify/state";
 import type {
+  ChannelReadiness,
   LaunchVerificationDiagnostics,
   LaunchVerificationPayload,
   LaunchVerificationPhase,
   LaunchVerificationPhaseId,
   LaunchVerificationRuntime,
   LaunchVerificationSandboxHealth,
+  LaunchVerificationStreamEvent,
+  LaunchVerifyCompletionLog,
 } from "@/shared/launch-verification";
 
 const ENSURE_POLL_MS = 2_000;
@@ -81,10 +84,10 @@ function buildLaunchVerificationDiagnostics(
   preflight: PreflightPayload | null,
   blocking: LaunchVerifyBlockingResult,
 ): LaunchVerificationDiagnostics {
-  const warningChannelIds = preflight
+  const failingChannelIds = preflight
     ? (Object.values(preflight.channels ?? {})
         .filter((channel) => channel.status === "fail")
-        .map((channel) => channel.channel) as LaunchVerificationDiagnostics["warningChannelIds"])
+        .map((channel) => channel.channel) as Array<"slack" | "telegram" | "discord">)
     : [];
 
   return {
@@ -92,8 +95,34 @@ function buildLaunchVerificationDiagnostics(
     failingCheckIds: [...blocking.failingCheckIds],
     requiredActionIds: [...blocking.requiredActionIds],
     recommendedActionIds: [...blocking.recommendedActionIds],
-    warningChannelIds,
+    warningChannelIds: failingChannelIds,
+    failingChannelIds,
     skipPhaseIds: [...blocking.skipPhaseIds],
+  };
+}
+
+function buildLaunchVerifyCompletionLog(input: {
+  payload: LaunchVerificationPayload;
+  readiness: ChannelReadiness;
+}): LaunchVerifyCompletionLog {
+  return {
+    ok: input.payload.ok,
+    mode: input.payload.mode,
+    phaseCount: input.payload.phases.length,
+    totalMs:
+      new Date(input.payload.completedAt).getTime() -
+      new Date(input.payload.startedAt).getTime(),
+    channelReady: input.readiness.ready,
+    failingCheckIds: input.payload.diagnostics?.failingCheckIds ?? [],
+    requiredActionIds: input.payload.diagnostics?.requiredActionIds ?? [],
+    recommendedActionIds: input.payload.diagnostics?.recommendedActionIds ?? [],
+    failingChannelIds:
+      input.payload.diagnostics?.failingChannelIds ??
+      input.payload.diagnostics?.warningChannelIds ??
+      [],
+    dynamicConfigVerified: input.payload.runtime?.dynamicConfigVerified ?? null,
+    dynamicConfigReason: input.payload.runtime?.dynamicConfigReason,
+    repaired: input.payload.sandboxHealth?.repaired ?? null,
   };
 }
 
@@ -239,14 +268,8 @@ async function evaluatePreflight(request: Request): Promise<{
   return { phase, blocking, diagnostics };
 }
 
-// NDJSON stream event types
-type StreamPhaseEvent = { type: "phase"; phase: LaunchVerificationPhase };
-type StreamSummaryEvent = { type: "summary"; payload: LaunchVerificationDiagnostics };
-type StreamResultEvent = {
-  type: "result";
-  payload: LaunchVerificationPayload & { channelReadiness?: import("@/shared/launch-verification").ChannelReadiness };
-};
-type StreamEvent = StreamPhaseEvent | StreamSummaryEvent | StreamResultEvent;
+// NDJSON stream event types — re-export shared types for internal use
+type StreamEvent = LaunchVerificationStreamEvent;
 
 function wantsStream(request: Request): boolean {
   const accept = request.headers.get("accept") ?? "";
@@ -298,12 +321,21 @@ function buildStreamingResponse(
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
+      let seq = 0;
+
       function emit(event: StreamEvent): void {
         controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
       }
 
+      function emitPhase(phase: LaunchVerificationPhase, final: boolean): void {
+        emit({ type: "phase", phase, seq: seq++, final });
+      }
+
       function emitRunning(id: LaunchVerificationPhaseId): void {
-        emit({ type: "phase", phase: { id, status: "running", durationMs: 0, message: "Running\u2026" } });
+        emitPhase(
+          { id, status: "running", durationMs: 0, message: "Running\u2026" },
+          false,
+        );
       }
 
       const phases: LaunchVerificationPhase[] = [];
@@ -311,14 +343,14 @@ function buildStreamingResponse(
       emitRunning("preflight");
       const { phase: preflightPhase, blocking, diagnostics } = await evaluatePreflight(request);
       phases.push(preflightPhase);
-      emit({ type: "phase", phase: preflightPhase });
+      emitPhase(preflightPhase, true);
       emit({ type: "summary", payload: diagnostics });
 
       if (blocking.blocking) {
         for (const id of blocking.skipPhaseIds) {
           const s = skipPhase(id as LaunchVerificationPhaseId, "Skipped: preflight failed.");
           phases.push(s);
-          emit({ type: "phase", phase: s });
+          emitPhase(s, true);
         }
 
         const payload: LaunchVerificationPayload = {
@@ -327,6 +359,12 @@ function buildStreamingResponse(
           diagnostics,
         };
         const readiness = await writeChannelReadiness(payload);
+
+        logInfo(
+          "launch_verify.completed",
+          buildLaunchVerifyCompletionLog({ payload, readiness }),
+        );
+
         emit({ type: "result", payload: { ...payload, channelReadiness: readiness } });
         controller.close();
         return;
@@ -346,7 +384,7 @@ function buildStreamingResponse(
         return `Vercel Queue delivered callback ${messageId ?? "unknown"}.`;
       });
       phases.push(queuePingPhase);
-      emit({ type: "phase", phase: queuePingPhase });
+      emitPhase(queuePingPhase, true);
 
       let ensureReadyAction: SandboxReadyAction | null = null;
 
@@ -372,7 +410,7 @@ function buildStreamingResponse(
         }
       });
       phases.push(ensurePhase);
-      emit({ type: "phase", phase: ensurePhase });
+      emitPhase(ensurePhase, true);
 
       if (ensurePhase.status === "pass") {
         emitRunning("chatCompletions");
@@ -388,11 +426,11 @@ function buildStreamingResponse(
           return `Gateway replied with exact text: ${replyText}`;
         });
         phases.push(chatPhase);
-        emit({ type: "phase", phase: chatPhase });
+        emitPhase(chatPhase, true);
       } else {
         const s = skipPhase("chatCompletions", "Skipped: sandbox not running.");
         phases.push(s);
-        emit({ type: "phase", phase: s });
+        emitPhase(s, true);
       }
 
       if (mode === "destructive") {
@@ -413,11 +451,11 @@ function buildStreamingResponse(
           return result.message;
         });
         phases.push(wakePhase);
-        emit({ type: "phase", phase: wakePhase });
+        emitPhase(wakePhase, true);
       } else {
         const s = skipPhase("wakeFromSleep", "Not run in safe mode.");
         phases.push(s);
-        emit({ type: "phase", phase: s });
+        emitPhase(s, true);
       }
 
       let runtime: LaunchVerificationRuntime | undefined;
@@ -429,8 +467,10 @@ function buildStreamingResponse(
           repaired: ensureReadyAction !== null &&
             ensureReadyAction !== "already-running",
         };
-      } catch {
-        // Non-fatal
+      } catch (error) {
+        logInfo("launch_verify.runtime_metadata_unavailable", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
 
       const ok = phases.every((p) => p.status === "pass" || p.status === "skip");
@@ -441,12 +481,10 @@ function buildStreamingResponse(
       };
       const readiness = await writeChannelReadiness(payload);
 
-      logInfo("launch_verify.completed", {
-        ok: payload.ok, mode: payload.mode,
-        phaseCount: payload.phases.length,
-        totalMs: Date.now() - new Date(startedAt).getTime(),
-        channelReady: readiness.ready,
-      });
+      logInfo(
+        "launch_verify.completed",
+        buildLaunchVerifyCompletionLog({ payload, readiness }),
+      );
 
       emit({ type: "result", payload: { ...payload, channelReadiness: readiness } });
       controller.close();
@@ -572,8 +610,10 @@ async function buildJsonResponse(
       repaired: ensureReadyAction !== null &&
         ensureReadyAction !== "already-running",
     };
-  } catch {
-    // Non-fatal
+  } catch (error) {
+    logInfo("launch_verify.runtime_metadata_unavailable", {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   const ok = phases.every((p) => p.status === "pass" || p.status === "skip");
@@ -584,12 +624,10 @@ async function buildJsonResponse(
   };
   const readiness = await writeChannelReadiness(payload);
 
-  logInfo("launch_verify.completed", {
-    ok: payload.ok, mode: payload.mode,
-    phaseCount: payload.phases.length,
-    totalMs: Date.now() - new Date(startedAt).getTime(),
-    channelReady: readiness.ready,
-  });
+  logInfo(
+    "launch_verify.completed",
+    buildLaunchVerifyCompletionLog({ payload, readiness }),
+  );
 
   return authJsonOk({ ...payload, channelReadiness: readiness }, auth);
 }

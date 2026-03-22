@@ -73,7 +73,7 @@ export type PreflightPayload = {
   authMode: ReturnType<typeof getAuthMode>;
   publicOrigin: string | null;
   webhookBypassEnabled: boolean;
-  webhookBypassRequired: boolean;
+  webhookBypassRecommended: boolean;
   storeBackend: "upstash" | "memory";
   aiGatewayAuth: "oidc" | "api-key" | "unavailable";
   cronSecretConfigured: boolean;
@@ -142,7 +142,7 @@ function contractRequirementToAction(
 function buildActions(input: {
   publicOriginResolution: PublicOriginResolution | null;
   webhookBypassEnabled: boolean;
-  webhookBypassRequired: boolean;
+  webhookBypassRecommended: boolean;
   storeBackend: "upstash" | "memory";
   aiGatewayAuth: PreflightPayload["aiGatewayAuth"];
   contract: DeploymentContract;
@@ -163,7 +163,7 @@ function buildActions(input: {
     });
   }
 
-  if (input.webhookBypassRequired && !input.webhookBypassEnabled) {
+  if (input.webhookBypassRecommended && !input.webhookBypassEnabled) {
     actions.push({
       id: "configure-webhook-bypass",
       status: "recommended",
@@ -423,8 +423,7 @@ export async function buildDeployPreflight(
   const webhookBypassRequirement = getWebhookBypassRequirement();
   const webhookBypassEnabled = webhookBypassRequirement.configured;
   const webhookBypassRecommended =
-    !webhookBypassEnabled &&
-    webhookBypassRequirement.reason === "sign-in-with-vercel";
+    webhookBypassRequirement.recommendation === "recommended";
   const storeBackend = contract.storeBackend;
 
   const aiGatewayAuth = contract.aiGatewayAuth;
@@ -539,7 +538,7 @@ export async function buildDeployPreflight(
   const actions = buildActions({
     publicOriginResolution,
     webhookBypassEnabled,
-    webhookBypassRequired: webhookBypassRecommended,
+    webhookBypassRecommended,
     storeBackend,
     aiGatewayAuth,
     contract,
@@ -556,7 +555,7 @@ export async function buildDeployPreflight(
     authMode,
     publicOrigin,
     webhookBypassEnabled,
-    webhookBypassRequired: webhookBypassRecommended,
+    webhookBypassRecommended,
     storeBackend,
     aiGatewayAuth,
     cronSecretConfigured,
@@ -578,7 +577,7 @@ export async function buildDeployPreflight(
     authMode: payload.authMode,
     publicOrigin: payload.publicOrigin,
     webhookBypassEnabled: payload.webhookBypassEnabled,
-    webhookBypassRequired: payload.webhookBypassRequired,
+    webhookBypassRecommended: payload.webhookBypassRecommended,
     storeBackend: payload.storeBackend,
     aiGatewayAuth: payload.aiGatewayAuth,
     cronSecretConfigured: payload.cronSecretConfigured,

@@ -34,7 +34,16 @@ export type LaunchVerificationDiagnostics = {
   failingCheckIds: string[];
   requiredActionIds: string[];
   recommendedActionIds: string[];
+  /**
+   * Deprecated compatibility field.
+   * Historically named "warningChannelIds" even though it contains channels
+   * whose prerequisite status is fail.
+   */
   warningChannelIds: Array<"slack" | "telegram" | "discord">;
+  /**
+   * Correct name for the same data. Prefer this field in new code.
+   */
+  failingChannelIds?: Array<"slack" | "telegram" | "discord">;
   skipPhaseIds: LaunchVerificationPhaseId[];
 };
 
@@ -57,6 +66,51 @@ export type ChannelReadiness = {
   wakeFromSleepPassed: boolean;
   failingPhaseId: LaunchVerificationPhaseId | null;
   phases: LaunchVerificationPhase[];
+};
+
+// ---------------------------------------------------------------------------
+// NDJSON stream event types
+// ---------------------------------------------------------------------------
+
+export type LaunchVerificationPhaseEvent = {
+  type: "phase";
+  phase: LaunchVerificationPhase;
+  seq: number;
+  final: boolean;
+};
+
+export type LaunchVerificationSummaryEvent = {
+  type: "summary";
+  payload: LaunchVerificationDiagnostics;
+};
+
+export type LaunchVerificationResultEvent = {
+  type: "result";
+  payload: LaunchVerificationPayload & { channelReadiness?: ChannelReadiness };
+};
+
+export type LaunchVerificationStreamEvent =
+  | LaunchVerificationPhaseEvent
+  | LaunchVerificationSummaryEvent
+  | LaunchVerificationResultEvent;
+
+// ---------------------------------------------------------------------------
+// Completion log shape — used by both JSON and NDJSON terminal log lines
+// ---------------------------------------------------------------------------
+
+export type LaunchVerifyCompletionLog = {
+  ok: boolean;
+  mode: "safe" | "destructive";
+  phaseCount: number;
+  totalMs: number;
+  channelReady: boolean;
+  failingCheckIds: string[];
+  requiredActionIds: string[];
+  recommendedActionIds: string[];
+  failingChannelIds: Array<"slack" | "telegram" | "discord">;
+  dynamicConfigVerified: boolean | null;
+  dynamicConfigReason?: "hash-match" | "hash-miss" | "no-snapshot-hash";
+  repaired: boolean | null;
 };
 
 const REQUIRED_PHASE_IDS: LaunchVerificationPhaseId[] = [

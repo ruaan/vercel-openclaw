@@ -1252,7 +1252,7 @@ test("getLaunchVerifyBlocking: synthetic webhook-bypass warn does not block", ()
     authMode: "admin-secret" as const,
     publicOrigin: "https://app.example.com",
     webhookBypassEnabled: false,
-    webhookBypassRequired: true,
+    webhookBypassRecommended: true,
     storeBackend: "upstash" as const,
     aiGatewayAuth: "oidc" as const,
     cronSecretConfigured: true,

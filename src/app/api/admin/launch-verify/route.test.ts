@@ -409,10 +409,10 @@ async function setupWebhookBypassScenario(
 
 /**
  * Shared assertions: the structured diagnostics must reflect that missing
- * webhook bypass is non-blocking. When the bypass is "required" (per
- * getWebhookBypassRequirement), it appears as a recommendation; when
- * required is false (admin-secret mode), no action is emitted at all.
- * Either way, it must never block.
+ * webhook bypass is non-blocking. When the bypass recommendation is
+ * "recommended" (per getWebhookBypassRequirement), it appears as a
+ * recommended action; when recommendation is "none" (admin-secret mode),
+ * no action is emitted at all. Either way, it must never block.
  */
 function assertBypassDiagnostics(
   diagnostics: LaunchVerificationPayload["diagnostics"] | undefined,
@@ -736,6 +736,251 @@ test("launch-verify POST (NDJSON): runtime.dynamicConfigVerified is false when r
       .filter((event): event is { type: "phase"; phase: LaunchVerificationPayload["phases"][number] } => event.type === "phase")
       .map((event) => event.phase);
     assertBypassNonBlockingFinal(phaseEvents);
+  });
+});
+
+// ===========================================================================
+// NDJSON seq/final markers
+// ===========================================================================
+
+test("launch-verify POST (NDJSON): phase events include seq and final markers", async () => {
+  await withHarness(async (h) => {
+    process.env.NEXT_PUBLIC_APP_URL = "https://test.example";
+
+    await h.driveToRunning();
+
+    h.fakeFetch.on("POST", /v1\/chat\/completions/, () => {
+      return Response.json({
+        choices: [{ message: { content: "launch-verify-ok" } }],
+      });
+    });
+
+    const route = getAdminLaunchVerifyRoute();
+    const req = buildAuthPostRequest("/api/admin/launch-verify", "{}", {
+      accept: "application/x-ndjson",
+    });
+    const result = await callRoute(route.POST, req);
+    await drainAfterCallbacks();
+
+    const events = result.text
+      .split("\n")
+      .filter((line: string) => line.trim().length > 0)
+      .map((line: string) => JSON.parse(line) as
+        | { type: "phase"; phase: LaunchVerificationPayload["phases"][number]; seq: number; final: boolean }
+        | { type: "summary"; payload: NonNullable<LaunchVerificationPayload["diagnostics"]> }
+        | { type: "result"; payload: LaunchVerificationPayload });
+
+    const phaseEvents = events.filter(
+      (event): event is { type: "phase"; phase: LaunchVerificationPayload["phases"][number]; seq: number; final: boolean } =>
+        event.type === "phase",
+    );
+
+    assert.ok(phaseEvents.length > 0, "expected phase events");
+
+    // seq values must be monotonically increasing
+    for (let i = 0; i < phaseEvents.length; i += 1) {
+      assert.equal(phaseEvents[i]?.seq, i, `expected phase event seq=${i}`);
+    }
+
+    // The final preflight event must have final=true and a non-running status
+    const finalPreflight = phaseEvents.find(
+      (event) => event.phase.id === "preflight" && event.final === true,
+    );
+    assert.ok(finalPreflight, "expected final preflight event");
+    assert.notEqual(finalPreflight.phase.status, "running");
+
+    // Running events must have final=false
+    const runningEvents = phaseEvents.filter(
+      (event) => event.phase.status === "running",
+    );
+    for (const event of runningEvents) {
+      assert.equal(event.final, false, `running event for ${event.phase.id} should have final=false`);
+    }
+  });
+});
+
+// ===========================================================================
+// NDJSON parity: failingChannelIds
+// ===========================================================================
+
+test("launch-verify POST (NDJSON): diagnostics include failingChannelIds", async () => {
+  await withHarness(async (h) => {
+    process.env.NEXT_PUBLIC_APP_URL = "https://test.example";
+
+    await h.driveToRunning();
+
+    h.fakeFetch.on("POST", /v1\/chat\/completions/, () => {
+      return Response.json({
+        choices: [{ message: { content: "launch-verify-ok" } }],
+      });
+    });
+
+    const route = getAdminLaunchVerifyRoute();
+    const req = buildAuthPostRequest("/api/admin/launch-verify", "{}", {
+      accept: "application/x-ndjson",
+    });
+    const result = await callRoute(route.POST, req);
+    await drainAfterCallbacks();
+
+    const events = result.text
+      .split("\n")
+      .filter((line: string) => line.trim().length > 0)
+      .map((line: string) => JSON.parse(line) as
+        | { type: "summary"; payload: NonNullable<LaunchVerificationPayload["diagnostics"]> }
+        | { type: "result"; payload: LaunchVerificationPayload });
+
+    const summaryEvent = events.find(
+      (event): event is { type: "summary"; payload: NonNullable<LaunchVerificationPayload["diagnostics"]> } =>
+        event.type === "summary",
+    );
+
+    assert.ok(summaryEvent, "expected summary event");
+    assert.ok(
+      Array.isArray(summaryEvent.payload.failingChannelIds),
+      "failingChannelIds should be an array",
+    );
+    assert.deepEqual(
+      summaryEvent.payload.failingChannelIds,
+      summaryEvent.payload.warningChannelIds,
+      "failingChannelIds and warningChannelIds should match",
+    );
+  });
+});
+
+// ===========================================================================
+// NDJSON parity: dynamicConfigVerified true and null
+// ===========================================================================
+
+test("launch-verify POST (NDJSON): runtime.dynamicConfigVerified is true when restore hash matches", async () => {
+  await withHarness(async (h) => {
+    process.env.NEXT_PUBLIC_APP_URL = "https://test.example";
+
+    await h.driveToRunning();
+
+    const expectedHash = computeGatewayConfigHash({});
+
+    await h.mutateMeta((meta) => {
+      meta.lastRestoreMetrics = {
+        sandboxCreateMs: 100,
+        tokenWriteMs: 10,
+        assetSyncMs: 50,
+        startupScriptMs: 200,
+        forcePairMs: 30,
+        firewallSyncMs: 20,
+        localReadyMs: 300,
+        publicReadyMs: 400,
+        totalMs: 1000,
+        skippedStaticAssetSync: false,
+        skippedDynamicConfigSync: true,
+        dynamicConfigHash: expectedHash,
+        dynamicConfigReason: "hash-match",
+        assetSha256: null,
+        vcpus: 1,
+        recordedAt: Date.now(),
+      };
+    });
+
+    h.fakeFetch.on("POST", /v1\/chat\/completions/, () => {
+      return Response.json({
+        choices: [{ message: { content: "launch-verify-ok" } }],
+      });
+    });
+
+    const route = getAdminLaunchVerifyRoute();
+    const req = buildAuthPostRequest("/api/admin/launch-verify", "{}", {
+      accept: "application/x-ndjson",
+    });
+    const result = await callRoute(route.POST, req);
+    await drainAfterCallbacks();
+
+    const events = result.text
+      .split("\n")
+      .filter((line: string) => line.trim().length > 0)
+      .map((line: string) => JSON.parse(line) as
+        | { type: "result"; payload: LaunchVerificationPayload & { runtime?: LaunchVerificationRuntime } });
+
+    const resultEvent = events.find(
+      (event): event is { type: "result"; payload: LaunchVerificationPayload & { runtime?: LaunchVerificationRuntime } } =>
+        event.type === "result",
+    );
+
+    assert.equal(resultEvent?.payload.runtime?.dynamicConfigVerified, true);
+    assert.equal(resultEvent?.payload.runtime?.dynamicConfigReason, "hash-match");
+    assert.equal(resultEvent?.payload.runtime?.lastRestoreConfigHash, expectedHash);
+  });
+});
+
+test("launch-verify POST (NDJSON): runtime.dynamicConfigVerified is null when no restore metrics exist", async () => {
+  await withHarness(async (h) => {
+    process.env.NEXT_PUBLIC_APP_URL = "https://test.example";
+
+    await h.driveToRunning();
+
+    await h.mutateMeta((meta) => {
+      meta.lastRestoreMetrics = null;
+    });
+
+    h.fakeFetch.on("POST", /v1\/chat\/completions/, () => {
+      return Response.json({
+        choices: [{ message: { content: "launch-verify-ok" } }],
+      });
+    });
+
+    const route = getAdminLaunchVerifyRoute();
+    const req = buildAuthPostRequest("/api/admin/launch-verify", "{}", {
+      accept: "application/x-ndjson",
+    });
+    const result = await callRoute(route.POST, req);
+    await drainAfterCallbacks();
+
+    const events = result.text
+      .split("\n")
+      .filter((line: string) => line.trim().length > 0)
+      .map((line: string) => JSON.parse(line) as
+        | { type: "result"; payload: LaunchVerificationPayload & { runtime?: LaunchVerificationRuntime } });
+
+    const resultEvent = events.find(
+      (event): event is { type: "result"; payload: LaunchVerificationPayload & { runtime?: LaunchVerificationRuntime } } =>
+        event.type === "result",
+    );
+
+    assert.equal(resultEvent?.payload.runtime?.dynamicConfigVerified, null);
+    assert.equal(resultEvent?.payload.runtime?.lastRestoreConfigHash, null);
+  });
+});
+
+// ===========================================================================
+// JSON path: failingChannelIds
+// ===========================================================================
+
+test("launch-verify POST (JSON): diagnostics include failingChannelIds matching warningChannelIds", async () => {
+  await withHarness(async (h) => {
+    process.env.NEXT_PUBLIC_APP_URL = "https://test.example";
+
+    await h.driveToRunning();
+
+    h.fakeFetch.on("POST", /v1\/chat\/completions/, () => {
+      return Response.json({
+        choices: [{ message: { content: "launch-verify-ok" } }],
+      });
+    });
+
+    const route = getAdminLaunchVerifyRoute();
+    const req = buildAuthPostRequest("/api/admin/launch-verify", "{}");
+    const result = await callRoute(route.POST, req);
+    await drainAfterCallbacks();
+
+    const body = result.json as LaunchVerificationPayload;
+    assert.ok(body.diagnostics, "expected diagnostics");
+    assert.ok(
+      Array.isArray(body.diagnostics.failingChannelIds),
+      "failingChannelIds should be an array",
+    );
+    assert.deepEqual(
+      body.diagnostics.failingChannelIds,
+      body.diagnostics.warningChannelIds,
+      "failingChannelIds and warningChannelIds should match",
+    );
   });
 });
 

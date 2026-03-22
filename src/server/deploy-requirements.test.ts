@@ -35,8 +35,8 @@ test("bypass is not required in sign-in-with-vercel mode", () => {
 
   const requirement = getWebhookBypassRequirement();
   assert.deepEqual(requirement, {
-    required: false,
     configured: false,
+    recommendation: "recommended",
     reason: "sign-in-with-vercel",
   });
   assert.equal(
@@ -45,15 +45,15 @@ test("bypass is not required in sign-in-with-vercel mode", () => {
   );
 });
 
-test("bypass is not required in admin-secret mode", () => {
+test("bypass recommendation is none in admin-secret mode", () => {
   delete process.env.VERCEL_AUTH_MODE;
   delete process.env.VERCEL;
   delete process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 
   const requirement = getWebhookBypassRequirement();
   assert.deepEqual(requirement, {
-    required: false,
     configured: false,
+    recommendation: "none",
     reason: "admin-secret",
   });
   assert.equal(
@@ -62,15 +62,15 @@ test("bypass is not required in admin-secret mode", () => {
   );
 });
 
-test("bypass is not required on Vercel in admin-secret mode", () => {
+test("bypass recommendation is none on Vercel in admin-secret mode", () => {
   delete process.env.VERCEL_AUTH_MODE;
   process.env.VERCEL = "1";
   delete process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 
   const requirement = getWebhookBypassRequirement();
   assert.deepEqual(requirement, {
-    required: false,
     configured: false,
+    recommendation: "none",
     reason: "admin-secret",
   });
   assert.equal(
@@ -79,15 +79,15 @@ test("bypass is not required on Vercel in admin-secret mode", () => {
   );
 });
 
-test("bypass is not required but configured when secret is present", () => {
+test("bypass recommendation is none when secret is already configured", () => {
   delete process.env.VERCEL_AUTH_MODE;
   process.env.VERCEL = "1";
   process.env.VERCEL_AUTOMATION_BYPASS_SECRET = "secret";
 
   const requirement = getWebhookBypassRequirement();
   assert.deepEqual(requirement, {
-    required: false,
     configured: true,
+    recommendation: "none",
     reason: "admin-secret",
   });
   assert.equal(
