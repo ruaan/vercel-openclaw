@@ -148,6 +148,32 @@ test("stopped sandbox with due cron job wakes sandbox", async () => {
   assert.equal(report.triggeredRepair, true);
 });
 
+test("error status with snapshot and due cron job wakes sandbox", async () => {
+  let ensureCalled = false;
+  let cronCleared = false;
+
+  const report = await runSandboxWatchdog(
+    { request: new Request("https://app.test/api/cron/watchdog") },
+    makeDeps({
+      getMeta: async () =>
+        ({ status: "error", sandboxId: null, snapshotId: "snap_123" }) as SingleMeta,
+      getCronNextWakeMs: async () => 1,
+      ensureReady: async () => {
+        ensureCalled = true;
+        return { status: "running" } as SingleMeta;
+      },
+      clearCronNextWake: async () => {
+        cronCleared = true;
+      },
+    }),
+  );
+
+  assert.equal(ensureCalled, true);
+  assert.equal(cronCleared, true);
+  assert.equal(findCheck(report, "cron.wake")?.status, "pass");
+  assert.equal(report.triggeredRepair, true);
+});
+
 test("stopped sandbox with future cron job skips wake", async () => {
   let ensureCalled = false;
 
@@ -169,7 +195,7 @@ test("stopped sandbox with future cron job skips wake", async () => {
   assert.ok(findCheck(report, "cron.wake")?.message?.includes("min"));
 });
 
-test("stopped sandbox with no cron job skips wake", async () => {
+test("stopped sandbox with null cron wake skips correctly", async () => {
   const report = await runSandboxWatchdog(
     { request: new Request("https://app.test/api/cron/watchdog") },
     makeDeps({
