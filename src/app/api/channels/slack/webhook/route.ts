@@ -191,10 +191,14 @@ export async function POST(request: Request): Promise<Response> {
   }));
 
   // --- Fast path: forward raw event to OpenClaw's native Slack HTTP handler ---
-  // OpenClaw in HTTP mode handles Slack events, slash commands, and interactivity
-  // natively on the main gateway port at /slack/events.  Forward the raw body
-  // (not re-serialized) so OpenClaw can re-verify the Slack signature.
-  if (meta.status === "running" && meta.sandboxId) {
+  // OpenClaw in HTTP mode re-verifies the Slack signature using x-slack-signature.
+  // The Vercel Sandbox proxy strips x-slack-* headers, so OpenClaw rejects the
+  // forwarded request with "x-slack-signature did not have the expected type
+  // (received undefined)".  Disable the fast path until the sandbox proxy
+  // preserves custom headers.  The workflow path extracts the message and calls
+  // /v1/chat/completions directly, which works correctly.
+  const SLACK_FAST_PATH_ENABLED = false;
+  if (SLACK_FAST_PATH_ENABLED && meta.status === "running" && meta.sandboxId) {
     try {
       const sandboxUrl = await getSandboxDomain();
       const forwardUrl = `${sandboxUrl}/slack/events`;
@@ -209,6 +213,9 @@ export async function POST(request: Request): Promise<Response> {
       logInfo("channels.slack_fast_path_forwarding", withOperationContext(op, {
         sandboxId: meta.sandboxId,
         forwardUrl,
+        forwardHeaderKeys: Object.keys(forwardHeaders),
+        hasSlackSignature: Boolean(forwardHeaders["x-slack-signature"]),
+        hasSlackTimestamp: Boolean(forwardHeaders["x-slack-request-timestamp"]),
         ...eventInfo,
       }));
 
