@@ -239,6 +239,7 @@ export function buildGatewayConfig(
       enabled: true,
       botToken: telegramBotToken,
       dmPolicy: "open",
+      groupPolicy: "open",
       allowFrom: ["*"],
       webhookPort: OPENCLAW_TELEGRAM_WEBHOOK_PORT,
       webhookHost: OPENCLAW_TELEGRAM_WEBHOOK_HOST,
@@ -264,6 +265,7 @@ export function buildGatewayConfig(
       botToken: slackCredentials.botToken,
       signingSecret: slackCredentials.signingSecret,
       dmPolicy: "open",
+      groupPolicy: "open",
       allowFrom: ["*"],
       webhookPath: "/slack/events",
     };
