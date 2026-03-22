@@ -262,6 +262,8 @@ export function buildGatewayConfig(
       mode: "http",
       botToken: slackCredentials.botToken,
       signingSecret: slackCredentials.signingSecret,
+      dmPolicy: "open",
+      allowFrom: ["*"],
       webhookPath: "/slack/events",
     };
     config.channels = channels;

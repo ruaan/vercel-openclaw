@@ -24,6 +24,35 @@ function unauthorizedResponse() {
   return Response.json({ ok: false, error: "UNAUTHORIZED" }, { status: 401 });
 }
 
+function extractSlackEventInfo(payload: unknown): {
+  eventType: string | null;
+  eventSubtype: string | null;
+  channel: string | null;
+  user: string | null;
+  text: string | null;
+  threadTs: string | null;
+  botId: string | null;
+  payloadType: string | null;
+} {
+  if (!payload || typeof payload !== "object") {
+    return { eventType: null, eventSubtype: null, channel: null, user: null, text: null, threadTs: null, botId: null, payloadType: null };
+  }
+
+  const p = payload as Record<string, unknown>;
+  const event = p.event as Record<string, unknown> | undefined;
+
+  return {
+    payloadType: typeof p.type === "string" ? p.type : null,
+    eventType: typeof event?.type === "string" ? event.type : null,
+    eventSubtype: typeof event?.subtype === "string" ? event.subtype : null,
+    channel: typeof event?.channel === "string" ? event.channel : null,
+    user: typeof event?.user === "string" ? event.user : null,
+    text: typeof event?.text === "string" ? event.text.slice(0, 100) : null,
+    threadTs: typeof event?.thread_ts === "string" ? event.thread_ts : null,
+    botId: typeof event?.bot_id === "string" ? event.bot_id : null,
+  };
+}
+
 function extractSlackDedupId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") {
     return null;
@@ -52,14 +81,26 @@ export async function POST(request: Request): Promise<Response> {
   const rawBody = await request.text().catch(() => "");
   const signatureHeader = request.headers.get("x-slack-signature");
   const timestampHeader = request.headers.get("x-slack-request-timestamp");
+  const retryNum = request.headers.get("x-slack-retry-num");
+  const retryReason = request.headers.get("x-slack-retry-reason");
 
   if (!signatureHeader || !timestampHeader) {
+    logWarn("channels.slack_webhook_rejected", {
+      reason: "missing_signature_headers",
+      hasSignature: Boolean(signatureHeader),
+      hasTimestamp: Boolean(timestampHeader),
+      requestId,
+    });
     return unauthorizedResponse();
   }
 
   const meta = await getInitializedMeta();
   const config = meta.channels.slack;
   if (!config) {
+    logWarn("channels.slack_webhook_rejected", {
+      reason: "slack_not_configured",
+      requestId,
+    });
     return Response.json({ ok: false, error: "NOT_FOUND" }, { status: 404 });
   }
 
@@ -70,6 +111,12 @@ export async function POST(request: Request): Promise<Response> {
     rawBody,
   });
   if (!signatureValid) {
+    logWarn("channels.slack_webhook_rejected", {
+      reason: "invalid_signature",
+      requestId,
+      timestampHeader,
+      bodyLength: rawBody.length,
+    });
     return unauthorizedResponse();
   }
 
@@ -77,11 +124,21 @@ export async function POST(request: Request): Promise<Response> {
   try {
     payload = rawBody.length > 0 ? JSON.parse(rawBody) : null;
   } catch {
+    logWarn("channels.slack_webhook_rejected", {
+      reason: "invalid_json",
+      requestId,
+      bodyLength: rawBody.length,
+      bodyHead: rawBody.slice(0, 100),
+    });
     return Response.json({ ok: true });
   }
 
   const challenge = getSlackUrlVerificationChallenge(payload);
   if (challenge !== null) {
+    logInfo("channels.slack_url_verification", {
+      requestId,
+      challengeLength: challenge.length,
+    });
     return new Response(challenge, {
       status: 200,
       headers: {
@@ -90,12 +147,29 @@ export async function POST(request: Request): Promise<Response> {
     });
   }
 
+  const eventInfo = extractSlackEventInfo(payload);
   const dedupId = extractSlackDedupId(payload);
   if (dedupId) {
     const accepted = await getStore().acquireLock(channelDedupKey("slack", dedupId), 24 * 60 * 60);
     if (!accepted) {
+      logInfo("channels.slack_webhook_dedup_skip", {
+        requestId,
+        dedupId,
+        ...eventInfo,
+      });
       return Response.json({ ok: true });
     }
+  }
+
+  // Skip bot messages to avoid feedback loops
+  if (eventInfo.botId) {
+    logInfo("channels.slack_webhook_bot_skip", {
+      requestId,
+      dedupId,
+      botId: eventInfo.botId,
+      eventType: eventInfo.eventType,
+    });
+    return Response.json({ ok: true });
   }
 
   const op = createOperationContext({
@@ -109,7 +183,12 @@ export async function POST(request: Request): Promise<Response> {
     status: meta.status,
   });
 
-  logInfo("channels.slack_webhook_accepted", withOperationContext(op));
+  logInfo("channels.slack_webhook_accepted", withOperationContext(op, {
+    ...eventInfo,
+    retryNum: retryNum ? Number(retryNum) : null,
+    retryReason,
+    bodyLength: rawBody.length,
+  }));
 
   // --- Fast path: forward raw event to OpenClaw's native Slack HTTP handler ---
   // OpenClaw in HTTP mode handles Slack events, slash commands, and interactivity
@@ -126,6 +205,13 @@ export async function POST(request: Request): Promise<Response> {
         const v = request.headers.get(h);
         if (v) forwardHeaders[h] = v;
       }
+
+      logInfo("channels.slack_fast_path_forwarding", withOperationContext(op, {
+        sandboxId: meta.sandboxId,
+        forwardUrl,
+        ...eventInfo,
+      }));
+
       const resp = await fetch(forwardUrl, {
         method: "POST",
         headers: forwardHeaders,
@@ -133,35 +219,55 @@ export async function POST(request: Request): Promise<Response> {
         signal: AbortSignal.timeout(FORWARD_TIMEOUT_MS),
       });
       if (resp.ok) {
-        logInfo("channels.slack_fast_path_ok", withOperationContext(op, { sandboxId: meta.sandboxId }));
+        const respBody = await resp.text();
+        logInfo("channels.slack_fast_path_ok", withOperationContext(op, {
+          sandboxId: meta.sandboxId,
+          responseStatus: resp.status,
+          responseBodyLength: respBody.length,
+          ...eventInfo,
+        }));
         // Proxy the response — Slack slash commands and interactivity expect
         // response bodies from the webhook endpoint.
-        const respBody = await resp.text();
         return new Response(respBody, {
           status: resp.status,
           headers: { "content-type": resp.headers.get("content-type") ?? "application/json" },
         });
       }
+      const errorBody = await resp.text().catch(() => "");
       logWarn("channels.slack_fast_path_non_ok", withOperationContext(op, {
         status: resp.status,
         sandboxId: meta.sandboxId,
+        responseBody: errorBody.slice(0, 500),
+        ...eventInfo,
       }));
     } catch (error) {
       logWarn("channels.slack_fast_path_failed", withOperationContext(op, {
         error: error instanceof Error ? error.message : String(error),
+        errorName: error instanceof Error ? error.name : undefined,
         sandboxId: meta.sandboxId,
+        ...eventInfo,
       }));
     }
     // Fall through to queue-based path
+  } else {
+    logInfo("channels.slack_fast_path_skipped", withOperationContext(op, {
+      reason: meta.status !== "running" ? `sandbox_status_${meta.status}` : "no_sandbox_id",
+      status: meta.status,
+      sandboxId: meta.sandboxId,
+      ...eventInfo,
+    }));
   }
 
   try {
     const origin = getPublicOrigin(request);
     await start(drainChannelWorkflow, ["slack", payload, origin, requestId ?? null]);
-    logInfo("channels.slack_workflow_started", withOperationContext(op));
+    logInfo("channels.slack_workflow_started", withOperationContext(op, {
+      ...eventInfo,
+    }));
   } catch (error) {
     logWarn("channels.slack_workflow_start_failed", withOperationContext(op, {
       error: error instanceof Error ? error.message : String(error),
+      ...eventInfo,
     }));
   }
 
