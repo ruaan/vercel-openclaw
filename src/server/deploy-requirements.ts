@@ -15,10 +15,18 @@ export type WebhookBypassRequirement = {
 export function getWebhookBypassRequirement(): WebhookBypassRequirement {
   const configured = Boolean(getProtectionBypassSecret());
 
-  // Webhook bypass is never required with admin-secret auth — the app
-  // handles auth itself. If VERCEL_AUTOMATION_BYPASS_SECRET is set, it is
-  // applied opportunistically to webhook URLs.
-  const reason = getAuthMode() === "admin-secret" ? "admin-secret" : "sign-in-with-vercel";
+  // Webhook bypass is diagnostic-only across all auth modes. If
+  // VERCEL_AUTOMATION_BYPASS_SECRET is set, it is applied opportunistically
+  // to webhook URLs.
+  //
+  // sign-in-with-vercel implies Deployment Protection is likely active,
+  // so the bypass is recommended (warn) to let Slack/Telegram/Discord
+  // webhooks through.  Still non-blocking — operators can disable
+  // Deployment Protection instead.
+  const isAdminSecret = getAuthMode() === "admin-secret";
+  const reason: WebhookBypassRequirementReason = isAdminSecret
+    ? "admin-secret"
+    : "sign-in-with-vercel";
   return { required: false, configured, reason };
 }
 

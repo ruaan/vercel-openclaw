@@ -22,6 +22,7 @@ import {
 import { computeGatewayConfigHash } from "@/server/openclaw/config";
 import type {
   LaunchVerificationPayload,
+  LaunchVerificationPhaseId,
   LaunchVerificationRuntime,
   LaunchVerificationSandboxHealth,
   ChannelReadiness,
@@ -507,9 +508,11 @@ test("launch-verify POST (NDJSON): missing webhook bypass does not block runtime
       assert.ok(summaryEvent, "expected a summary event");
       assert.ok(resultEvent?.payload, "expected a result event with payload");
 
-      assertBypassNonBlocking(phaseEvents);
+      // Use final-state helper for streamed phase events — intermediate
+      // "running" events must not cause false assertions.
+      assertBypassNonBlockingFinal(phaseEvents);
       assertBypassDiagnostics(summaryEvent.payload);
-      assertBypassNonBlocking(resultEvent.payload.phases);
+      assertBypassNonBlockingFinal(resultEvent.payload.phases);
       assertBypassDiagnostics(resultEvent.payload.diagnostics);
     } finally {
       restoreEnv();
@@ -627,6 +630,112 @@ test("launch-verify POST: runtime.dynamicConfigVerified is false when restore ha
     assert.equal(runtime.lastRestoreConfigHash, "stale-hash-from-previous-restore");
     assert.equal(runtime.dynamicConfigReason, "hash-miss");
     assert.notEqual(runtime.expectedConfigHash, runtime.lastRestoreConfigHash);
+  });
+});
+
+// ===========================================================================
+// NDJSON parity: runtime config verification
+// ===========================================================================
+
+function latestPhaseState(
+  phases: LaunchVerificationPayload["phases"],
+): Map<LaunchVerificationPhaseId, LaunchVerificationPayload["phases"][number]> {
+  const byId = new Map<
+    LaunchVerificationPhaseId,
+    LaunchVerificationPayload["phases"][number]
+  >();
+  for (const phase of phases) {
+    byId.set(phase.id, phase);
+  }
+  return byId;
+}
+
+function assertBypassNonBlockingFinal(phases: LaunchVerificationPayload["phases"]): void {
+  const byId = latestPhaseState(phases);
+
+  const preflightPhase = byId.get("preflight");
+  assert.ok(preflightPhase, "expected preflight phase");
+  assert.notEqual(
+    preflightPhase.status,
+    "fail",
+    "preflight must not fail solely because webhook bypass is missing",
+  );
+
+  const ensurePhase = byId.get("ensureRunning");
+  assert.ok(ensurePhase, "expected ensureRunning phase");
+  assert.notEqual(
+    ensurePhase.status,
+    "skip",
+    "ensureRunning must not be skipped when only webhook bypass is missing",
+  );
+}
+
+test("launch-verify POST (NDJSON): runtime.dynamicConfigVerified is false when restore hash differs", async () => {
+  await withHarness(async (h) => {
+    process.env.NEXT_PUBLIC_APP_URL = "https://test.example";
+
+    await h.driveToRunning();
+
+    await h.mutateMeta((meta) => {
+      meta.lastRestoreMetrics = {
+        sandboxCreateMs: 100,
+        tokenWriteMs: 10,
+        assetSyncMs: 50,
+        startupScriptMs: 200,
+        forcePairMs: 30,
+        firewallSyncMs: 20,
+        localReadyMs: 300,
+        publicReadyMs: 400,
+        totalMs: 1000,
+        skippedStaticAssetSync: false,
+        skippedDynamicConfigSync: false,
+        dynamicConfigHash: "stale-hash-from-previous-restore",
+        dynamicConfigReason: "hash-miss",
+        assetSha256: null,
+        vcpus: 1,
+        recordedAt: Date.now(),
+      };
+    });
+
+    h.fakeFetch.on("POST", /v1\/chat\/completions/, () => {
+      return Response.json({
+        choices: [{ message: { content: "launch-verify-ok" } }],
+      });
+    });
+
+    const route = getAdminLaunchVerifyRoute();
+    const req = buildAuthPostRequest("/api/admin/launch-verify", "{}", {
+      accept: "application/x-ndjson",
+    });
+    const result = await callRoute(route.POST, req);
+    await drainAfterCallbacks();
+
+    const events = result.text
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as
+        | { type: "phase"; phase: LaunchVerificationPayload["phases"][number] }
+        | { type: "summary"; payload: NonNullable<LaunchVerificationPayload["diagnostics"]> }
+        | { type: "result"; payload: LaunchVerificationPayload & { runtime?: LaunchVerificationRuntime } });
+
+    const resultEvent = events.find(
+      (event): event is { type: "result"; payload: LaunchVerificationPayload & { runtime?: LaunchVerificationRuntime } } =>
+        event.type === "result",
+    );
+
+    assert.ok(resultEvent?.payload.runtime, "expected runtime in NDJSON result payload");
+    assert.equal(resultEvent.payload.runtime?.dynamicConfigVerified, false);
+    assert.equal(resultEvent.payload.runtime?.dynamicConfigReason, "hash-miss");
+    assert.equal(
+      resultEvent.payload.runtime?.lastRestoreConfigHash,
+      "stale-hash-from-previous-restore",
+    );
+
+    // Verify final phase state uses last event per phase ID
+    const phaseEvents = events
+      .filter((event): event is { type: "phase"; phase: LaunchVerificationPayload["phases"][number] } => event.type === "phase")
+      .map((event) => event.phase);
+    assertBypassNonBlockingFinal(phaseEvents);
   });
 });
 

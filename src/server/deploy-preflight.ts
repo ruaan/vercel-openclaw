@@ -422,6 +422,9 @@ export async function buildDeployPreflight(
   const publicOrigin = publicOriginResolution?.origin ?? null;
   const webhookBypassRequirement = getWebhookBypassRequirement();
   const webhookBypassEnabled = webhookBypassRequirement.configured;
+  const webhookBypassRecommended =
+    !webhookBypassEnabled &&
+    webhookBypassRequirement.reason === "sign-in-with-vercel";
   const storeBackend = contract.storeBackend;
 
   const aiGatewayAuth = contract.aiGatewayAuth;
@@ -488,10 +491,7 @@ export async function buildDeployPreflight(
     // are never skipped solely because of a missing bypass secret.
     {
       id: "webhook-bypass",
-      status:
-        !webhookBypassRequirement.required || webhookBypassRequirement.configured
-          ? "pass"
-          : "warn",
+      status: webhookBypassRecommended ? "warn" : "pass",
       message: getWebhookBypassStatusMessage(webhookBypassRequirement),
     },
     // store — derived from contract (warn locally, fail on Vercel)
@@ -539,7 +539,7 @@ export async function buildDeployPreflight(
   const actions = buildActions({
     publicOriginResolution,
     webhookBypassEnabled,
-    webhookBypassRequired: webhookBypassRequirement.required,
+    webhookBypassRequired: webhookBypassRecommended,
     storeBackend,
     aiGatewayAuth,
     contract,
@@ -556,7 +556,7 @@ export async function buildDeployPreflight(
     authMode,
     publicOrigin,
     webhookBypassEnabled,
-    webhookBypassRequired: webhookBypassRequirement.required,
+    webhookBypassRequired: webhookBypassRecommended,
     storeBackend,
     aiGatewayAuth,
     cronSecretConfigured,

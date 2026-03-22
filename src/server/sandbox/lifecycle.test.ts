@@ -3758,3 +3758,45 @@ test("non-zero fast-restore exit emits sandbox.restore.fast_restore_failed befor
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Restore metrics: background asset sync must not rewrite history
+// ---------------------------------------------------------------------------
+
+test("restoreSandboxFromSnapshot keeps skippedStaticAssetSync=false after background asset sync completes", async () => {
+  const fake = new FakeSandboxController();
+  const originalFetch = globalThis.fetch;
+
+  await withTestEnv(fake, async () => {
+    await mutateMeta((meta) => {
+      meta.status = "stopped";
+      meta.snapshotId = "snap-needs-background-assets";
+      meta.gatewayToken = "test-gw-token";
+      meta.snapshotConfigHash = null;
+    });
+
+    globalThis.fetch = async () =>
+      new Response('<div id="openclaw-app"></div>', { status: 200 });
+
+    try {
+      await triggerRestore(fake, { tokenOverride: "test-ai-key" });
+
+      // Allow background asset sync promise to settle
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const meta = await getInitializedMeta();
+      assert.equal(
+        meta.lastRestoreMetrics?.skippedStaticAssetSync,
+        false,
+        "background asset sync must not rewrite the restore's hot-path skip flag",
+      );
+      assert.ok(
+        typeof meta.lastRestoreMetrics?.assetSha256 === "string" &&
+          meta.lastRestoreMetrics.assetSha256.length > 0,
+        "background asset sync should refresh assetSha256",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

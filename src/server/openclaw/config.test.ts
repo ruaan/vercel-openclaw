@@ -370,6 +370,37 @@ test("computeGatewayConfigHash changes when slack bot token changes", () => {
   assert.notEqual(baseline, changed);
 });
 
+test("computeGatewayConfigHash is deterministic for identical input", () => {
+  const input = {
+    telegramBotToken: "telegram-token",
+    telegramWebhookSecret: "telegram-secret",
+    slackCredentials: {
+      botToken: "slack-bot-token",
+      signingSecret: "slack-signing-secret",
+    },
+  };
+
+  assert.equal(computeGatewayConfigHash(input), computeGatewayConfigHash(input));
+});
+
+test("computeGatewayConfigHash changes when channel config changes", () => {
+  const base = computeGatewayConfigHash({});
+  const telegram = computeGatewayConfigHash({
+    telegramBotToken: "telegram-token",
+    telegramWebhookSecret: "telegram-secret",
+  });
+  const slack = computeGatewayConfigHash({
+    slackCredentials: {
+      botToken: "slack-bot-token",
+      signingSecret: "slack-signing-secret",
+    },
+  });
+
+  assert.notEqual(base, telegram);
+  assert.notEqual(base, slack);
+  assert.notEqual(telegram, slack);
+});
+
 test("computeGatewayConfigHash changes when slack signing secret changes and uses the current version", () => {
   const baseline = computeGatewayConfigHash({
     slackCredentials: {

@@ -97,6 +97,57 @@ function buildLaunchVerificationDiagnostics(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Shared helpers — used by both JSON and NDJSON code paths
+// ---------------------------------------------------------------------------
+
+type LaunchVerificationRuntimeMeta = Awaited<ReturnType<typeof getInitializedMeta>>;
+
+function buildPreflightPassMessage(preflight: PreflightPayload): string {
+  const warningCheckIds = preflight.checks
+    .filter((check) => check.status === "warn")
+    .map((check) => check.id);
+
+  if (warningCheckIds.length === 0) {
+    return `All ${preflight.checks.length} config checks passed.`;
+  }
+
+  return `Preflight passed with ${warningCheckIds.length} warning${
+    warningCheckIds.length === 1 ? "" : "s"
+  }: ${warningCheckIds.join(", ")}.`;
+}
+
+function buildLaunchVerificationRuntime(
+  runtimeMeta: LaunchVerificationRuntimeMeta,
+): LaunchVerificationRuntime | undefined {
+  const packageSpec = getOpenclawPackageSpec();
+  if (!packageSpec) return undefined;
+
+  const expectedConfigHash = computeGatewayConfigHash({
+    telegramBotToken: runtimeMeta.channels.telegram?.botToken,
+    telegramWebhookSecret: runtimeMeta.channels.telegram?.webhookSecret,
+    slackCredentials: runtimeMeta.channels.slack
+      ? {
+          botToken: runtimeMeta.channels.slack.botToken,
+          signingSecret: runtimeMeta.channels.slack.signingSecret,
+        }
+      : undefined,
+  });
+
+  return {
+    packageSpec,
+    installedVersion: runtimeMeta.openclawVersion,
+    drift: detectDrift(packageSpec, runtimeMeta.openclawVersion),
+    expectedConfigHash,
+    lastRestoreConfigHash: runtimeMeta.lastRestoreMetrics?.dynamicConfigHash ?? null,
+    dynamicConfigVerified:
+      runtimeMeta.lastRestoreMetrics?.dynamicConfigHash == null
+        ? null
+        : runtimeMeta.lastRestoreMetrics.dynamicConfigHash === expectedConfigHash,
+    dynamicConfigReason: runtimeMeta.lastRestoreMetrics?.dynamicConfigReason,
+  };
+}
+
 /**
  * Evaluate the preflight phase: build the preflight payload, check for
  * blocking failures via the canonical helper, and return both the phase
@@ -176,7 +227,7 @@ async function evaluatePreflight(request: Request): Promise<{
     id: "preflight",
     status: "pass",
     durationMs: Date.now() - start,
-    message: `All ${preflight.checks.length} config checks passed.`,
+    message: buildPreflightPassMessage(preflight),
   };
 
   logInfo("launch_verify.phase_pass", {
@@ -373,30 +424,7 @@ function buildStreamingResponse(
       let sandboxHealth: LaunchVerificationSandboxHealth | undefined;
       try {
         const runtimeMeta = await getInitializedMeta();
-        const packageSpec = getOpenclawPackageSpec();
-        if (packageSpec) {
-          const expectedConfigHash = computeGatewayConfigHash({
-            telegramBotToken: runtimeMeta.channels.telegram?.botToken,
-            telegramWebhookSecret: runtimeMeta.channels.telegram?.webhookSecret,
-            slackCredentials: runtimeMeta.channels.slack
-              ? {
-                botToken: runtimeMeta.channels.slack.botToken,
-                signingSecret: runtimeMeta.channels.slack.signingSecret,
-              }
-              : undefined,
-          });
-          runtime = {
-            packageSpec,
-            installedVersion: runtimeMeta.openclawVersion,
-            drift: detectDrift(packageSpec, runtimeMeta.openclawVersion),
-            expectedConfigHash,
-            lastRestoreConfigHash: runtimeMeta.lastRestoreMetrics?.dynamicConfigHash ?? null,
-            dynamicConfigVerified: runtimeMeta.lastRestoreMetrics?.dynamicConfigHash == null
-              ? null
-              : runtimeMeta.lastRestoreMetrics.dynamicConfigHash === expectedConfigHash,
-            dynamicConfigReason: runtimeMeta.lastRestoreMetrics?.dynamicConfigReason,
-          };
-        }
+        runtime = buildLaunchVerificationRuntime(runtimeMeta);
         sandboxHealth = {
           repaired: ensureReadyAction !== null &&
             ensureReadyAction !== "already-running",
@@ -539,30 +567,7 @@ async function buildJsonResponse(
   let sandboxHealth: LaunchVerificationSandboxHealth | undefined;
   try {
     const runtimeMeta = await getInitializedMeta();
-    const packageSpec = getOpenclawPackageSpec();
-    if (packageSpec) {
-      const expectedConfigHash = computeGatewayConfigHash({
-        telegramBotToken: runtimeMeta.channels.telegram?.botToken,
-        telegramWebhookSecret: runtimeMeta.channels.telegram?.webhookSecret,
-        slackCredentials: runtimeMeta.channels.slack
-          ? {
-            botToken: runtimeMeta.channels.slack.botToken,
-            signingSecret: runtimeMeta.channels.slack.signingSecret,
-          }
-          : undefined,
-      });
-      runtime = {
-        packageSpec,
-        installedVersion: runtimeMeta.openclawVersion,
-        drift: detectDrift(packageSpec, runtimeMeta.openclawVersion),
-        expectedConfigHash,
-        lastRestoreConfigHash: runtimeMeta.lastRestoreMetrics?.dynamicConfigHash ?? null,
-        dynamicConfigVerified: runtimeMeta.lastRestoreMetrics?.dynamicConfigHash == null
-          ? null
-          : runtimeMeta.lastRestoreMetrics.dynamicConfigHash === expectedConfigHash,
-        dynamicConfigReason: runtimeMeta.lastRestoreMetrics?.dynamicConfigReason,
-      };
-    }
+    runtime = buildLaunchVerificationRuntime(runtimeMeta);
     sandboxHealth = {
       repaired: ensureReadyAction !== null &&
         ensureReadyAction !== "already-running",

@@ -1999,8 +1999,8 @@ async function restoreSandboxFromSnapshot(
       }).then(async (result) => {
         await mutateMeta((m) => {
           if (m.lastRestoreMetrics) {
+            // Keep the hot-path skip flag truthful for the restore that already happened.
             m.lastRestoreMetrics.assetSha256 = result.assetSha256;
-            m.lastRestoreMetrics.skippedStaticAssetSync = true;
           }
         });
         logInfo("sandbox.restore.background_asset_sync_complete", {
