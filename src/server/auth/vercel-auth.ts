@@ -10,6 +10,7 @@ import {
 } from "@/server/env";
 import { getPublicOrigin } from "@/server/public-url";
 import { logInfo, logWarn } from "@/server/log";
+import { clearAdminSession } from "@/server/auth/admin-auth";
 
 import {
   AuthSession,
@@ -199,39 +200,27 @@ export async function buildCallbackResponse(request: Request): Promise<Response>
   );
   logInfo("auth.session_created", { sub: session.user.sub });
 
-  const response = Response.redirect(
-    new URL(oauthContext.next || "/admin", request.url),
-    302,
-  );
-  response.headers.append(
-    "Set-Cookie",
-    clearCookie(OAUTH_STATE_COOKIE_NAME, secure),
-  );
-  response.headers.append(
-    "Set-Cookie",
-    clearCookie(OAUTH_CONTEXT_COOKIE_NAME, secure),
-  );
-  response.headers.append(
+  const redirectUrl = new URL(oauthContext.next || "/admin", request.url);
+  const headers = new Headers({ Location: redirectUrl.toString() });
+  headers.append("Set-Cookie", clearCookie(OAUTH_STATE_COOKIE_NAME, secure));
+  headers.append("Set-Cookie", clearCookie(OAUTH_CONTEXT_COOKIE_NAME, secure));
+  headers.append(
     "Set-Cookie",
     await serializeSessionCookie(session, secure),
   );
-  return response;
+  return new Response(null, { status: 302, headers });
 }
 
 export async function buildSignoutResponse(request: Request): Promise<Response> {
   logInfo("auth.session_destroyed");
-  const response = Response.redirect(new URL("/", request.url), 302);
+  const redirectUrl = new URL("/", request.url);
   const secure = isSecureRequest(request);
-  response.headers.append("Set-Cookie", clearCookie(SESSION_COOKIE_NAME, secure));
-  response.headers.append(
-    "Set-Cookie",
-    clearCookie(OAUTH_STATE_COOKIE_NAME, secure),
-  );
-  response.headers.append(
-    "Set-Cookie",
-    clearCookie(OAUTH_CONTEXT_COOKIE_NAME, secure),
-  );
-  return response;
+  const headers = new Headers({ Location: redirectUrl.toString() });
+  headers.append("Set-Cookie", clearCookie(SESSION_COOKIE_NAME, secure));
+  headers.append("Set-Cookie", clearCookie(OAUTH_STATE_COOKIE_NAME, secure));
+  headers.append("Set-Cookie", clearCookie(OAUTH_CONTEXT_COOKIE_NAME, secure));
+  headers.append("Set-Cookie", clearAdminSession(secure));
+  return new Response(null, { status: 302, headers });
 }
 
 async function refreshAuthSession(
