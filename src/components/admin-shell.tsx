@@ -58,11 +58,12 @@ export function AdminShell({
 
       const payload = (await response.json()) as StatusPayload;
       setStatus(payload);
-    } catch (nextError) {
+    } catch (error) {
+      if (error instanceof TypeError || error instanceof DOMException) {
+        return; // Network-level failure; next poll will recover.
+      }
       toast.error(
-        nextError instanceof Error
-          ? nextError.message
-          : "Failed to load status",
+        error instanceof Error ? error.message : "Failed to load status",
       );
     }
   }, []);

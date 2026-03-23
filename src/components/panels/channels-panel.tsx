@@ -6,7 +6,6 @@ import type {
 } from "@/components/admin-types";
 import { TelegramPanel } from "@/components/panels/telegram-panel";
 import { SlackPanel } from "@/components/panels/slack-panel";
-import { DiscordPanel } from "@/components/panels/discord-panel";
 
 type PreflightAction = {
   id: string;
@@ -106,13 +105,6 @@ export function ChannelsPanel({
           refresh={refresh}
         />
         <TelegramPanel
-          status={status}
-          busy={busy}
-          runAction={runAction}
-          requestJson={requestJson}
-          refresh={refresh}
-        />
-        <DiscordPanel
           status={status}
           busy={busy}
           runAction={runAction}

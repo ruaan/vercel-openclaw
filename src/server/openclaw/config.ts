@@ -226,13 +226,17 @@ export function buildGatewayConfig(
       },
     },
   };
-  // Mark all senders as "owner" so owner-only tools (cron, gateway,
-  // nodes) are available through channel handlers (Telegram fast path,
-  // Slack).  Without this, OpenClaw strips these tools from non-admin
-  // senders on the native handler ports.  This is safe because the
-  // proxy already enforces auth before any traffic reaches the sandbox.
+  // Grant owner-level tool access (cron, gateway, nodes) to channel
+  // senders.  Without this, OpenClaw's native handlers strip owner-only
+  // tools from non-admin senders.  The proxy already enforces auth
+  // before traffic reaches the sandbox, so elevated access defaults to
+  // all senders ("*").  Override with OPENCLAW_OWNER_ALLOW_FROM to
+  // restrict to specific Telegram chat IDs or Slack user IDs.
+  const ownerAllowFrom = process.env.OPENCLAW_OWNER_ALLOW_FROM;
   config.commands = {
-    ownerAllowFrom: ["*"],
+    ownerAllowFrom: ownerAllowFrom
+      ? ownerAllowFrom.split(",").map((s) => s.trim()).filter(Boolean)
+      : ["*"],
   };
 
   config.tools = {

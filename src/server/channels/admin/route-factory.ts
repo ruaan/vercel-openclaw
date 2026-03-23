@@ -91,8 +91,8 @@ export function createChannelAdminRouteHandlers<TState>(
           return result;
         }
 
-        // Sync updated config to the running sandbox so OpenClaw's file
-        // watcher hot-reloads the channel without a gateway restart.
+        // Sync updated config to the running sandbox and restart the
+        // gateway so new HTTP routes (e.g. /slack/events) are registered.
         try {
           const syncResult = await syncGatewayConfigToSandbox();
           logInfo("channels.admin_config_synced", {
@@ -133,8 +133,8 @@ export function createChannelAdminRouteHandlers<TState>(
           return result;
         }
 
-        // Sync updated config to the running sandbox so OpenClaw's file
-        // watcher removes the channel without a gateway restart.
+        // Sync updated config to the running sandbox and restart the
+        // gateway so removed channel routes are cleaned up.
         try {
           const syncResult = await syncGatewayConfigToSandbox();
           logInfo("channels.admin_config_synced", {

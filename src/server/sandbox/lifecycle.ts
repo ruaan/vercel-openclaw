@@ -593,9 +593,14 @@ export async function getSandboxDomain(port = OPENCLAW_PORT): Promise<string> {
 }
 
 /**
- * Write an updated openclaw.json into the running sandbox so that OpenClaw's
- * built-in chokidar file watcher detects the change and hot-reloads the
- * affected channel (no gateway restart required).
+ * Write an updated openclaw.json into the running sandbox and restart the
+ * gateway so new HTTP routes (e.g. `/slack/events`) are registered.
+ *
+ * OpenClaw's chokidar file watcher hot-reloads channel providers on config
+ * change, but does NOT register new HTTP route handlers — that requires a
+ * full gateway restart.  Without this restart, first-time Slack setup on a
+ * running sandbox leaves `/slack/events` returning 404 until the next
+ * stop+ensure cycle.
  *
  * Called after channel credentials are saved or removed in the admin UI.
  * No-op when the sandbox is not running.
@@ -626,18 +631,58 @@ export async function syncGatewayConfigToSandbox(): Promise<{ synced: boolean; r
       : undefined,
   });
 
+  const sandboxId = meta.sandboxId;
   try {
-    const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
+    const sandbox = await getSandboxController().get({ sandboxId });
     await sandbox.writeFiles(files);
     logInfo("sandbox.config_sync_written", {
-      sandboxId: meta.sandboxId,
+      sandboxId,
       fileCount: files.length,
       filePaths: files.map((f) => f.path),
     });
-    return { synced: true, reason: "config_written" };
+
+    // Restart the gateway so new HTTP route handlers are registered.
+    // Without this, hot-reload restarts the channel provider but does not
+    // wire up new routes like /slack/events.
+    const restartResult = await sandbox.runCommand("env", [
+      "-u", "AI_GATEWAY_API_KEY",
+      "-u", "OPENAI_API_KEY",
+      "bash", OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
+    ]);
+
+    if (restartResult.exitCode !== 0) {
+      const output = await restartResult.output("both").catch(() => "");
+      logWarn("sandbox.config_sync_restart_failed", {
+        sandboxId,
+        exitCode: restartResult.exitCode,
+        output: output.slice(0, 300),
+      });
+      return { synced: true, reason: "config_written_restart_failed" };
+    }
+
+    // Poll for gateway readiness after restart.
+    await pollUntil({
+      label: "config-sync-gateway-ready",
+      timeoutMs: 15_000,
+      initialDelayMs: 200,
+      maxDelayMs: 500,
+      step: async () => {
+        const result = await sandbox.runCommand("bash", [
+          "-c",
+          `curl -s -f --max-time 1 http://localhost:${OPENCLAW_PORT}/ 2>/dev/null | grep -q 'openclaw-app' && echo ok || echo not-ready`,
+        ]);
+        const out = await result.output("stdout");
+        if (out.trim() === "ok") return { done: true, result: true };
+        return { done: false };
+      },
+      timeoutError: () => new Error("Gateway did not become ready after config sync restart"),
+    });
+
+    logInfo("sandbox.config_sync_restarted", { sandboxId });
+    return { synced: true, reason: "config_written_and_restarted" };
   } catch (error) {
     logWarn("sandbox.config_sync_failed", {
-      sandboxId: meta.sandboxId,
+      sandboxId,
       error: error instanceof Error ? error.message : String(error),
     });
     return { synced: false, reason: error instanceof Error ? error.message : String(error) };
