@@ -2142,12 +2142,17 @@ async function restoreSandboxFromSnapshot(
     // the store does, write them back and restart the gateway to reload.
     let cronRestoreOutcome: CronRestoreOutcome = "no-store-jobs";
     try {
-      const storedJobsJson = await getStore().getValue<string>(CRON_JOBS_KEY);
-      if (storedJobsJson) {
+      // getValue may return a string (memory store) or an already-parsed
+      // object (Upstash store double-deserializes via JSON.parse).  Handle both.
+      const storedRaw = await getStore().getValue<string | Record<string, unknown>>(CRON_JOBS_KEY);
+      if (storedRaw) {
+        const storedJobsJson = typeof storedRaw === "string" ? storedRaw : JSON.stringify(storedRaw);
         // Verify the stored jobs actually have jobs (not an empty array).
         let storedData: { jobs?: unknown[] };
         try {
-          storedData = JSON.parse(storedJobsJson) as { jobs?: unknown[] };
+          storedData = typeof storedRaw === "object" && storedRaw !== null
+            ? (storedRaw as { jobs?: unknown[] })
+            : (JSON.parse(storedJobsJson) as { jobs?: unknown[] });
         } catch (error) {
           cronRestoreOutcome = "store-invalid";
           throw error;
