@@ -11,19 +11,14 @@
 </p>
 
 <p align="center">
-  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvercel-labs%2Fvercel-openclaw.git&env=UPSTASH_REDIS_REST_URL,UPSTASH_REDIS_REST_TOKEN&envDescription=Recommended%20for%20durable%20state.%20AI%20Gateway%20uses%20OIDC%20on%20Vercel%20by%20default.&envLink=https%3A%2F%2Fgithub.com%2Fvercel-labs%2Fvercel-openclaw%23setup&project-name=openclaw&repository-name=openclaw"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
+  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvercel-labs%2Fvercel-openclaw.git&integration-ids=oac_V3R1GIpkoJorr6fqyiwdhl17&project-name=openclaw&repository-name=openclaw"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
 </p>
 
 ---
 
 ## Setup
 
-The deploy button asks for the two Upstash Redis variables because durable state is the only external dependency the template cannot infer. A working Vercel deployment still needs an auth configuration and `CRON_SECRET` before launch verification passes.
-
-| Variable | Where to get it |
-| -------- | --------------- |
-| `UPSTASH_REDIS_REST_URL` | Upstash console → your database → REST API → Endpoint |
-| `UPSTASH_REDIS_REST_TOKEN` | Upstash console → your database → REST API → Token |
+The deploy button auto-provisions an Upstash Redis database via the Vercel Marketplace integration — no manual environment variables needed. A working Vercel deployment still needs an auth configuration and `CRON_SECRET` before launch verification passes.
 
 AI Gateway auth is handled automatically via OIDC on deployed Vercel environments.
 
