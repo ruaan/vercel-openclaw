@@ -91,6 +91,12 @@ The app resolves its canonical public URL from Vercel system variables automatic
 | `NEXT_PUBLIC_BASE_DOMAIN` | Preferred external host for webhook URLs |
 | `BASE_DOMAIN` | Legacy alias for `NEXT_PUBLIC_BASE_DOMAIN` |
 
+## Machine-readable operations surfaces
+
+- `GET /api/admin/preflight` returns a `PreflightPayload` with `checks`, `actions`, `nextSteps`, and per-channel readiness.
+- `POST /api/admin/launch-verify` returns a `LaunchVerificationPayload`. Send `Accept: application/x-ndjson` to stream phase events (`LaunchVerificationStreamEvent`) for automation.
+- `GET /api/admin/watchdog` returns the cached `WatchdogReport`; `POST /api/admin/watchdog` runs a fresh check. Each report contains `WatchdogCheck` entries.
+
 ## Local development
 
 ```bash

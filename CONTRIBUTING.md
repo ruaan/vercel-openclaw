@@ -146,6 +146,12 @@ Full reference:
 | `/api/channels/telegram/webhook` | Public Telegram webhook |
 | `/api/channels/discord/webhook` | Public Discord interactions endpoint |
 
+## Machine-readable operations surfaces
+
+- `GET /api/admin/preflight` returns a `PreflightPayload` with `checks`, `actions`, `nextSteps`, and per-channel readiness.
+- `POST /api/admin/launch-verify` returns a `LaunchVerificationPayload`. Send `Accept: application/x-ndjson` to stream phase events (`LaunchVerificationStreamEvent`) for automation.
+- `GET /api/admin/watchdog` returns the cached `WatchdogReport`; `POST /api/admin/watchdog` runs a fresh check. Each report contains `WatchdogCheck` entries.
+
 See `CLAUDE.md` for the complete route table and detailed system documentation.
 
 See `SECURITY.md` for vulnerability reporting.

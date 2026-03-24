@@ -80,7 +80,7 @@ for (const relPath of docFiles) {
 
 // ---------------------------------------------------------------------------
 // OPENCLAW_PACKAGE_SPEC policy accuracy check
-// The deployment contract hard-fails (not warns) on Vercel when the spec is
+// The deployment contract warns (not fails) on Vercel when the spec is
 // unset or unpinned. The runtime still falls back to openclaw@latest with a
 // warning log. Docs must not contradict either of these facts.
 // ---------------------------------------------------------------------------
@@ -88,28 +88,31 @@ for (const relPath of docFiles) {
 const policyDocFiles = ["README.md", "CLAUDE.md", "CONTRIBUTING.md"];
 const policyContradictions = [
   {
-    // Catches "emits a warn (not a hard fail)", "warns (not fails)", etc.
-    // These phrases uniquely describe the OPENCLAW_PACKAGE_SPEC policy.
-    pattern: /\bwarn[s ]?\s*\(not\s+(?:a\s+(?:hard\s+)?)?fail[s]?\)/gi,
-    label: 'claims OPENCLAW_PACKAGE_SPEC contract status is warn (not fail) on Vercel — it is a hard fail',
+    // Catches "fails (not warns)", "fail (not warn)", etc.
+    pattern: /\bfail[s ]?\s*\(not\s+(?:a\s+)?warn(?:ing)?\)/gi,
+    label:
+      'claims OPENCLAW_PACKAGE_SPEC contract status is fail (not warn) on Vercel — it is warn-only',
   },
   {
-    // Catches "warn (not a hard fail)"
-    pattern: /\bwarn\b[^.]*\bnot\s+a\s+hard\s+fail\b/gi,
-    label: 'claims OPENCLAW_PACKAGE_SPEC contract status is warn (not a hard fail) on Vercel — it is a hard fail',
+    // Catches "OPENCLAW_PACKAGE_SPEC … hard fail" in the same sentence.
+    pattern: /\bOPENCLAW_PACKAGE_SPEC\b[^.\n]*\b(?:hard\s+)?fail/gi,
+    label:
+      'claims OPENCLAW_PACKAGE_SPEC is a deployment blocker on Vercel — it is warn-only',
   },
   {
     pattern: /\bruntime\s+refuses\s+to\s+install\b/gi,
-    label: 'claims runtime refuses to install when OPENCLAW_PACKAGE_SPEC is unpinned — runtime falls back to openclaw@latest',
+    label:
+      'claims runtime refuses to install when OPENCLAW_PACKAGE_SPEC is unpinned — runtime falls back to openclaw@latest',
   },
   // NOTE: "api-key" is now a valid AI Gateway auth mode alongside "oidc"
   // and "unavailable". The previous guards against stale "api-key"
   // references have been removed.
   {
-    // The preflight route probes OIDC at runtime, not just config.
+    // The preflight route performs runtime auth detection, not just config.
     // "config-only" misleads callers into thinking the check is static.
     pattern: /preflight.*AI Gateway auth \(config-only\)/gi,
-    label: 'describes preflight AI Gateway check as "config-only" — it probes OIDC at runtime',
+    label:
+      'describes preflight AI Gateway check as "config-only" — it performs runtime auth detection',
   },
 ];
 
