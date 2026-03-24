@@ -1,3 +1,5 @@
+<p align="center"><strong>Research Preview</strong></p>
+
 <p align="center">
   <img src="public/openclaw-logo.svg" width="80" height="80" alt="OpenClaw" />
 </p>
