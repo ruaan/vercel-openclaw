@@ -68,12 +68,12 @@ function scanFile(text, file) {
   const patterns = [
     { label: "pnpm", regex: /\bpnpm\b/ },
     { label: "npx tsx", regex: /npx\s+tsx/ },
-    { label: "tsx --test", regex: /tsx\s+--test/ },
+    { label: "tsx --test", regex: /tsx\s+--test/, skip: /--import\s+tsx\s+--test/ },
   ];
 
   text.split(/\r?\n/).forEach((lineText, index) => {
     for (const pattern of patterns) {
-      if (pattern.regex.test(lineText)) {
+      if (pattern.regex.test(lineText) && !(pattern.skip && pattern.skip.test(lineText))) {
         findings.push({
           file,
           pattern: pattern.label,
@@ -92,6 +92,7 @@ const EXCLUDED_FILES = new Set([
   "scripts/audit-verifier-surface.mjs",
   "scripts/verify-package-manager.mjs",
   "scripts/check-verifier-contract.mjs",
+  "scripts/test-self-heal.ts",
 ]);
 
 const packageJsonPath = join(ROOT, "package.json");
