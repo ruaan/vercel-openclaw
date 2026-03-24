@@ -43,7 +43,6 @@
   },
   "packageManager": "npm@11.6.4",
   "devDependencies": {
-    "@swc/helpers": "^0.5.19",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
