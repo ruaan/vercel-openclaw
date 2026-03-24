@@ -25,6 +25,12 @@ import { buildTelegramWebhook } from "@/test-utils/webhook-builders";
 patchNextServerAfter();
 const telegramRoute = getTelegramWebhookRoute();
 
+// Stub workflow start so tests don't depend on the workflow engine
+const routeModule = telegramRoute as unknown as {
+  telegramWebhookWorkflowRuntime: { start: (...args: unknown[]) => Promise<void> };
+};
+routeModule.telegramWebhookWorkflowRuntime.start = async () => {};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------

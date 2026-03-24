@@ -11,12 +11,20 @@ class TestRetryableError extends Error {
     this.name = "RetryableError";
     this.retryAfter = options?.retryAfter;
   }
+
+  static is(err: unknown): err is TestRetryableError {
+    return err instanceof TestRetryableError;
+  }
 }
 
 class TestFatalError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "FatalError";
+  }
+
+  static is(err: unknown): err is TestFatalError {
+    return err instanceof TestFatalError;
   }
 }
 
@@ -25,8 +33,8 @@ test("toWorkflowProcessingError returns RetryableError for sandbox_not_ready", (
     "slack",
     new Error("sandbox_not_ready: gateway probe still loading"),
     {
-      RetryableError: TestRetryableError,
-      FatalError: TestFatalError,
+      RetryableError: TestRetryableError as never,
+      FatalError: TestFatalError as never,
       isRetryable: () => false,
     },
   );
@@ -40,8 +48,8 @@ test("toWorkflowProcessingError returns RetryableError for SANDBOX_READY_TIMEOUT
     "telegram",
     new Error("SANDBOX_READY_TIMEOUT: sandbox did not become ready in time"),
     {
-      RetryableError: TestRetryableError,
-      FatalError: TestFatalError,
+      RetryableError: TestRetryableError as never,
+      FatalError: TestFatalError as never,
       isRetryable: () => false,
     },
   );

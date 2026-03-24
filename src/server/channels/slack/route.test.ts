@@ -29,6 +29,12 @@ import {
 patchNextServerAfter();
 const slackRoute = getSlackWebhookRoute();
 
+// Stub workflow start so tests don't depend on the workflow engine
+const routeModule = slackRoute as unknown as {
+  slackWebhookWorkflowRuntime: { start: (...args: unknown[]) => Promise<void> };
+};
+routeModule.slackWebhookWorkflowRuntime.start = async () => {};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
