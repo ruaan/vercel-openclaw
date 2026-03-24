@@ -222,6 +222,40 @@ for (const envName of contractEnvNames) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Key wording checks — ensure docs stay aligned with runtime behavior on
+// Telegram bypass, AI Gateway fallback, OPENCLAW_PACKAGE_SPEC warn-only, and
+// the docs/env contract guard itself.
+// ---------------------------------------------------------------------------
+
+const wordingDocFiles = ["README.md", "CLAUDE.md", "CONTRIBUTING.md"];
+const wordingRequirements = [
+  {
+    snippet: "Telegram intentionally does not include the bypass query parameter",
+    label: "Telegram bypass behavior",
+    files: wordingDocFiles,
+  },
+  {
+    snippet: "deployment contract **warns** — it does not fail",
+    label: "OPENCLAW_PACKAGE_SPEC warn-only policy",
+    files: ["CLAUDE.md"],
+  },
+];
+
+for (const { snippet, label, files } of wordingRequirements) {
+  for (const relPath of files) {
+    const absPath = path.join(rootDir, relPath);
+    if (!existsSync(absPath)) {
+      failures.push(`${relPath}: missing file (needed for wording check: ${label})`);
+      continue;
+    }
+    const text = readFileSync(absPath, "utf8");
+    if (!text.includes(snippet)) {
+      failures.push(`${relPath}: missing required wording "${snippet}" (${label})`);
+    }
+  }
+}
+
 const payload = {
   event: "verifier_contract.checked",
   ok: failures.length === 0,

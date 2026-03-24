@@ -1492,6 +1492,92 @@ test("preflight reports api-key when AI_GATEWAY_API_KEY is used without OIDC", a
   );
 });
 
+// ===========================================================================
+// Drift-resistant: webhook-bypass remediation copy and AI Gateway fallback
+// ===========================================================================
+
+test("preflight bypass remediation text mentions Slack/Discord and Telegram exception path", async () => {
+  await withEnv(
+    {
+      VERCEL: "1",
+      VERCEL_AUTH_MODE: "sign-in-with-vercel",
+      NEXT_PUBLIC_APP_URL: "https://app.example.com",
+      NEXT_PUBLIC_VERCEL_APP_CLIENT_ID: "client-id",
+      VERCEL_APP_CLIENT_SECRET: "client-secret",
+      SESSION_SECRET: "session-secret",
+      VERCEL_AUTOMATION_BYPASS_SECRET: undefined,
+      UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "token",
+      OPENCLAW_PACKAGE_SPEC: "openclaw@1.0.0",
+      CRON_SECRET: "cron-secret",
+    },
+    async () => {
+      _setAiGatewayTokenOverrideForTesting("oidc-token");
+
+      const payload = await buildDeployPreflight(
+        new Request("https://app.example.com/api/admin/preflight"),
+      );
+
+      // Bypass check must be warn, never fail
+      const bypassCheck = payload.checks.find((c) => c.id === "webhook-bypass");
+      assert.ok(bypassCheck, "expected webhook-bypass check");
+      assert.equal(bypassCheck.status, "warn", "missing bypass must be warn, not fail");
+
+      // The action copy must name Slack and Discord as bypass consumers
+      const bypassAction = payload.actions.find(
+        (a) => a.id === "configure-webhook-bypass",
+      );
+      assert.ok(bypassAction, "expected configure-webhook-bypass action");
+      assert.match(bypassAction.message, /Slack and Discord/i, "message must mention Slack and Discord");
+      assert.match(bypassAction.message, /Telegram/i, "message must mention Telegram");
+      assert.match(
+        bypassAction.remediation,
+        /Deployment Protection Exception/i,
+        "remediation must mention Deployment Protection Exception for Telegram",
+      );
+
+      // Overall preflight must still pass (bypass is diagnostic-only)
+      assert.equal(payload.ok, true, "missing bypass must not make preflight fail");
+    },
+  );
+});
+
+test("preflight accepts AI_GATEWAY_API_KEY fallback on Vercel when OIDC is unavailable", async () => {
+  await withEnv(
+    {
+      VERCEL: "1",
+      VERCEL_AUTH_MODE: "admin-secret",
+      NEXT_PUBLIC_APP_URL: "https://app.example.com",
+      UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "token",
+      OPENCLAW_PACKAGE_SPEC: "openclaw@1.0.0",
+      CRON_SECRET: "cron-secret",
+      AI_GATEWAY_API_KEY: "static-key",
+    },
+    async () => {
+      // No OIDC — only static API key
+      _setAiGatewayTokenOverrideForTesting(undefined);
+      _setAiGatewayCredentialOverrideForTesting({
+        token: "static-key",
+        source: "api-key",
+        expiresAt: null,
+      });
+
+      const payload = await buildDeployPreflight(
+        new Request("https://app.example.com/api/admin/preflight"),
+      );
+
+      assert.equal(payload.aiGatewayAuth, "api-key", "should report api-key on Vercel fallback");
+      assert.equal(
+        payload.checks.find((c) => c.id === "ai-gateway")?.status,
+        "pass",
+        "ai-gateway check should pass with api-key fallback on Vercel",
+      );
+      assert.equal(payload.ok, true, "preflight should pass with api-key fallback on Vercel");
+    },
+  );
+});
+
 test("preflight passes cron-secret check when CRON_SECRET is configured on Vercel", async () => {
   await withEnv(
     {
@@ -1518,6 +1604,86 @@ test("preflight passes cron-secret check when CRON_SECRET is configured on Verce
 
       const cronAction = payload.actions.find((a) => a.id === "configure-cron-secret");
       assert.equal(cronAction, undefined, "no action needed when CRON_SECRET is configured");
+    },
+  );
+});
+
+test("preflight treats missing webhook bypass as warning and mentions Telegram exception", async () => {
+  await withEnv(
+    {
+      VERCEL: "1",
+      VERCEL_AUTH_MODE: "sign-in-with-vercel",
+      CRON_SECRET: "cron-secret",
+      UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "token",
+      VERCEL_AUTOMATION_BYPASS_SECRET: undefined,
+      NEXT_PUBLIC_APP_URL: "https://app.example.com",
+      NEXT_PUBLIC_VERCEL_APP_CLIENT_ID: "client-id",
+      VERCEL_APP_CLIENT_SECRET: "client-secret",
+      SESSION_SECRET: "session-secret-32-chars-minimum!",
+    },
+    async () => {
+      _setAiGatewayCredentialOverrideForTesting({
+        token: "static-key",
+        source: "api-key",
+        expiresAt: null,
+      });
+
+      const request = new Request("https://app.example.com/api/admin/preflight", {
+        headers: {
+          host: "app.example.com",
+          "x-forwarded-proto": "https",
+        },
+      });
+
+      const payload = await buildDeployPreflight(request);
+
+      assert.equal(
+        payload.checks.find((check) => check.id === "webhook-bypass")?.status,
+        "warn",
+      );
+
+      const action = payload.actions.find(
+        (item) => item.id === "configure-webhook-bypass",
+      );
+      assert.ok(action, "expected configure-webhook-bypass action");
+      assert.match(action.message, /Slack and Discord/i);
+      assert.match(action.message, /Telegram/i);
+      assert.match(action.remediation, /Deployment Protection Exception/i);
+    },
+  );
+});
+
+test("preflight accepts AI_GATEWAY_API_KEY fallback on Vercel", async () => {
+  await withEnv(
+    {
+      VERCEL: "1",
+      CRON_SECRET: "cron-secret",
+      UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "token",
+      NEXT_PUBLIC_APP_URL: "https://app.example.com",
+    },
+    async () => {
+      _setAiGatewayCredentialOverrideForTesting({
+        token: "static-key",
+        source: "api-key",
+        expiresAt: null,
+      });
+
+      const request = new Request("https://app.example.com/api/admin/preflight", {
+        headers: {
+          host: "app.example.com",
+          "x-forwarded-proto": "https",
+        },
+      });
+
+      const payload = await buildDeployPreflight(request);
+
+      assert.equal(payload.aiGatewayAuth, "api-key");
+      assert.equal(
+        payload.checks.find((check) => check.id === "ai-gateway")?.status,
+        "pass",
+      );
     },
   );
 });

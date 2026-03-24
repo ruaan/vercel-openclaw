@@ -124,7 +124,7 @@ Responsibilities:
 - expose `buildPublicUrl(path: string, request?: Request): string`
 - append `x-vercel-protection-bypass=<VERCEL_AUTOMATION_BYPASS_SECRET>` when the bypass secret is available (regardless of auth mode)
 
-Channel webhook URL construction lives in `src/server/channels/webhook-urls.ts`. The convenience wrappers in `src/server/channels/state.ts` (`buildSlackWebhookUrl`, `buildTelegramWebhookUrl`, `buildDiscordPublicWebhookUrl`) delegate to `buildChannelWebhookUrl()` in that module. Slack and Discord URLs use `buildPublicUrl` (bypass secret appended when available). Telegram URLs use `buildPublicDisplayUrl` (no bypass secret) because Telegram validates webhooks via the `x-telegram-bot-api-secret-token` header, and including the bypass query parameter causes `setWebhook` to silently drop the registration.
+Channel webhook URL construction lives in `src/server/channels/webhook-urls.ts`. The convenience wrappers in `src/server/channels/state.ts` (`buildSlackWebhookUrl`, `buildTelegramWebhookUrl`, `buildDiscordPublicWebhookUrl`) delegate to `buildChannelWebhookUrl()` in that module. Slack and Discord URLs use `buildPublicUrl` (bypass secret appended when available). Telegram intentionally does not include the bypass query parameter — Telegram URLs use `buildPublicDisplayUrl` (no bypass secret) because Telegram validates webhooks via the `x-telegram-bot-api-secret-token` header, and including the bypass query parameter causes `setWebhook` to silently drop the registration.
 
 Admin-visible surfaces (preflight payload, status responses, UI) must use `buildPublicDisplayUrl()` instead of `buildPublicUrl()`. The display variant omits the `x-vercel-protection-bypass` query parameter so secrets are never leaked to the browser or API consumers.
 

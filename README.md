@@ -52,7 +52,7 @@ AI Gateway auth is handled automatically via OIDC on deployed Vercel environment
 | `VERCEL_APP_CLIENT_SECRET` | `sign-in-with-vercel` mode | OAuth client secret. |
 | `SESSION_SECRET` | `sign-in-with-vercel` mode on Vercel | Explicit cookie encryption secret. Do not rely on derivation from the Upstash token. |
 
-`VERCEL_AUTH_MODE` defaults to `admin-secret` when unset. AI Gateway auth uses Vercel OIDC automatically on deployed Vercel environments. If OIDC is unavailable outside Vercel, set `AI_GATEWAY_API_KEY` as an optional fallback.
+`VERCEL_AUTH_MODE` defaults to `admin-secret` when unset. AI Gateway auth uses Vercel OIDC automatically on deployed Vercel environments. `AI_GATEWAY_API_KEY` is an optional static fallback when OIDC is unavailable; deployed Vercel still prefers OIDC first.
 
 ## Optional: pin the OpenClaw version
 
@@ -74,7 +74,7 @@ By default the app installs `openclaw@latest`, which is non-deterministic across
 
 Channel behavior:
 - Slack and Discord webhook URLs include the bypass query parameter when the secret is configured.
-- Telegram intentionally does not include the bypass query parameter. Telegram validates via the `x-telegram-bot-api-secret-token` header, and adding the bypass query parameter can cause `setWebhook` to silently drop registration.
+- Telegram intentionally does not include the bypass query parameter. Telegram validates via the `x-telegram-bot-api-secret-token` header, and adding the bypass query parameter can cause `setWebhook` to silently drop registration. On protected deployments, Telegram needs a Deployment Protection Exception or another protection-compatible path.
 
 ## Optional: override the public origin
 

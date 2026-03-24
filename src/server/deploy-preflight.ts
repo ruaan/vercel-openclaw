@@ -170,9 +170,9 @@ function buildActions(input: {
       id: "configure-webhook-bypass",
       status: "recommended",
       message:
-        "Enable Protection Bypass for Automation and set VERCEL_AUTOMATION_BYPASS_SECRET so Slack, Telegram, and Discord can reach the protected deployment.",
+        "Enable Protection Bypass for Automation and set VERCEL_AUTOMATION_BYPASS_SECRET so Slack and Discord can reach the protected deployment. Telegram does not use the bypass query parameter; use a Deployment Protection Exception or another protection-compatible path for its webhook.",
       remediation:
-        "In your Vercel project, go to Settings > Deployment Protection > Protection Bypass for Automation. Enable it and copy the secret into the VERCEL_AUTOMATION_BYPASS_SECRET environment variable, then redeploy.",
+        "In your Vercel project, go to Settings > Deployment Protection > Protection Bypass for Automation. Enable it and copy the secret into VERCEL_AUTOMATION_BYPASS_SECRET for Slack and Discord. For Telegram, add a Deployment Protection Exception for the webhook endpoint/provider because Telegram cannot preserve the bypass query parameter, then redeploy.",
       env: ["VERCEL_AUTOMATION_BYPASS_SECRET"],
     });
   }
