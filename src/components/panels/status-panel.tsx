@@ -2,7 +2,14 @@
 
 import { StatusBadge } from "@/components/ui/badge";
 import { ConfirmDialog, useConfirm } from "@/components/ui/confirm-dialog";
+import {
+  getFirstRunCallout,
+  getLifecycleActionLabel,
+  getLifecycleProgressDetail,
+  getLifecycleProgressLabel,
+} from "@/shared/sandbox-lifecycle-copy";
 import type { StatusPayload, RunAction } from "@/components/admin-types";
+import type { SingleStatus } from "@/shared/types";
 
 type StatusPanelProps = {
   status: StatusPayload;
@@ -11,8 +18,20 @@ type StatusPanelProps = {
   runAction: RunAction;
 };
 
-const NEEDS_RESTART = new Set(["error", "stopped", "uninitialized"]);
-const IS_TRANSITIONAL = new Set(["creating", "restoring", "booting", "setup"]);
+type LifecycleAwareStatus = StatusPayload & {
+  lifecycle?: {
+    restoreHistory?: unknown[];
+  };
+  snapshotHistory?: unknown[];
+};
+
+const NEEDS_RESTART = new Set<SingleStatus>(["error", "stopped", "uninitialized"]);
+const IS_TRANSITIONAL = new Set<SingleStatus>([
+  "creating",
+  "restoring",
+  "booting",
+  "setup",
+]);
 
 function friendlyError(raw: string): { headline: string; detail: string } {
   const lower = raw.toLowerCase();
@@ -50,11 +69,43 @@ export function StatusPanel({ status, busy, pendingAction, runAction }: StatusPa
   const { confirm: confirmStop, dialogProps: stopDialogProps } = useConfirm();
   const { confirm: confirmSnapshot, dialogProps: snapshotDialogProps } =
     useConfirm();
+  const { confirm: confirmReset, dialogProps: resetDialogProps } = useConfirm();
+
+  const lifecycleStatus = status.status as SingleStatus;
+  const lifecycleAwareStatus = status as LifecycleAwareStatus;
+  const hasSnapshot = Boolean(status.snapshotId);
+  const restoreHistory = Array.isArray(
+    lifecycleAwareStatus.lifecycle?.restoreHistory,
+  )
+    ? lifecycleAwareStatus.lifecycle.restoreHistory
+    : [];
+  const snapshotHistoryCount = Array.isArray(lifecycleAwareStatus.snapshotHistory)
+    ? lifecycleAwareStatus.snapshotHistory.length
+    : null;
+  const isFirstRun =
+    snapshotHistoryCount != null
+      ? snapshotHistoryCount === 0
+      : !hasSnapshot && restoreHistory.length === 0;
+  const primaryActionLabel = getLifecycleActionLabel(
+    lifecycleStatus,
+    hasSnapshot,
+  );
+  const progressLabel = getLifecycleProgressLabel(lifecycleStatus);
+  const progressDetail = getLifecycleProgressDetail(lifecycleStatus, isFirstRun);
+  const firstRunCallout =
+    lifecycleStatus === "uninitialized" ? getFirstRunCallout() : null;
 
   function handleRestart(): void {
     void runAction("/api/admin/ensure", {
-      label: "Restart sandbox",
-      successMessage: "Sandbox restart initiated",
+      label: primaryActionLabel,
+      successMessage:
+        lifecycleStatus === "uninitialized"
+          ? "Sandbox creation initiated"
+          : lifecycleStatus === "stopped"
+            ? "Sandbox start initiated"
+            : hasSnapshot
+              ? "Sandbox restore initiated"
+              : "Fresh sandbox creation initiated",
       method: "POST",
     });
   }
@@ -90,11 +141,32 @@ export function StatusPanel({ status, busy, pendingAction, runAction }: StatusPa
     });
   }
 
+  async function handleReset(): Promise<void> {
+    const ok = await confirmReset({
+      title: "Reset sandbox from scratch?",
+      description:
+        "This deletes the current sandbox and all saved snapshots, then starts a fresh install of OpenClaw. Unsaved runtime state, installed packages, and in-sandbox changes will be lost.",
+      confirmLabel: "Reset Sandbox",
+      variant: "danger",
+    });
+    if (!ok) return;
+
+    void runAction("/api/admin/reset", {
+      label: "Reset Sandbox",
+      successMessage: "Sandbox reset initiated",
+      method: "POST",
+    });
+  }
+
   const isStopping = pendingAction === "Stop sandbox";
-  const displayStatus = isStopping ? "stopping" : status.status;
-  const showRestart = NEEDS_RESTART.has(status.status);
-  const showRunningActions = status.status === "running" && !isStopping;
-  const isTransitional = IS_TRANSITIONAL.has(status.status) || isStopping;
+  const displayStatus = isStopping ? "stopping" : lifecycleStatus;
+  const showRestart = NEEDS_RESTART.has(lifecycleStatus);
+  const showRunningActions = lifecycleStatus === "running" && !isStopping;
+  const isLifecycleTransition = IS_TRANSITIONAL.has(lifecycleStatus);
+  const isTransitional = isLifecycleTransition || isStopping;
+  const isResetDisabled =
+    busy || lifecycleStatus === "uninitialized" || isLifecycleTransition;
+  const errorCopy = status.lastError ? friendlyError(status.lastError) : null;
 
   return (
     <article className="panel-card">
@@ -146,6 +218,33 @@ export function StatusPanel({ status, busy, pendingAction, runAction }: StatusPa
         </div>
       </dl>
 
+      {firstRunCallout ? (
+        <div
+          className="border border-zinc-800 bg-zinc-900/50 rounded-lg p-4"
+          style={{
+            marginTop: 20,
+            border: "1px solid var(--border)",
+            borderRadius: 12,
+            background: "rgba(24, 24, 27, 0.5)",
+            padding: 16,
+          }}
+        >
+          <p style={{ margin: 0, fontWeight: 600 }}>{firstRunCallout.headline}</p>
+          {firstRunCallout.body.map((line) => (
+            <p
+              key={line}
+              style={{
+                margin: "8px 0 0",
+                color: "var(--foreground-muted)",
+                lineHeight: 1.5,
+              }}
+            >
+              {line}
+            </p>
+          ))}
+        </div>
+      ) : null}
+
       <div className="hero-actions" style={{ justifyContent: "flex-end" }}>
         {showRestart && (
           <button
@@ -153,7 +252,7 @@ export function StatusPanel({ status, busy, pendingAction, runAction }: StatusPa
             disabled={busy}
             onClick={handleRestart}
           >
-            Restart sandbox
+            {primaryActionLabel}
           </button>
         )}
         {showRunningActions && (
@@ -178,7 +277,7 @@ export function StatusPanel({ status, busy, pendingAction, runAction }: StatusPa
               target="_blank"
               rel="noreferrer"
             >
-              Open VClaw
+              {primaryActionLabel}
             </a>
           </>
         )}
@@ -189,13 +288,40 @@ export function StatusPanel({ status, busy, pendingAction, runAction }: StatusPa
         )}
       </div>
 
-      {status.lastError ? (
+      {isLifecycleTransition && (progressLabel || progressDetail) ? (
+        <div
+          className="border border-zinc-800 bg-zinc-900/50 rounded-lg p-4"
+          style={{
+            border: "1px solid var(--border)",
+            borderRadius: 12,
+            background: "rgba(24, 24, 27, 0.35)",
+            padding: 16,
+          }}
+        >
+          {progressLabel ? (
+            <p style={{ margin: 0, fontWeight: 600 }}>{progressLabel}</p>
+          ) : null}
+          {progressDetail ? (
+            <p
+              style={{
+                margin: progressLabel ? "8px 0 0" : 0,
+                color: "var(--foreground-muted)",
+                lineHeight: 1.5,
+              }}
+            >
+              {progressDetail}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {errorCopy ? (
         <div className="error-banner">
           <p style={{ margin: 0, fontWeight: 500 }}>
-            {friendlyError(status.lastError).headline}
+            {errorCopy.headline}
           </p>
           <p style={{ margin: "4px 0 0", opacity: 0.85 }}>
-            {friendlyError(status.lastError).detail}
+            {errorCopy.detail}
           </p>
           <details style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
             <summary>Technical details</summary>
@@ -206,8 +332,66 @@ export function StatusPanel({ status, busy, pendingAction, runAction }: StatusPa
         </div>
       ) : null}
 
+      <section style={{ marginTop: 28 }}>
+        <p
+          style={{
+            margin: "0 0 8px",
+            color: "var(--foreground-subtle)",
+            fontSize: 12,
+            fontWeight: 500,
+            lineHeight: 1.4,
+          }}
+        >
+          Danger zone
+        </p>
+        <div
+          className="border border-red-900/50 rounded-lg p-4"
+          style={{
+            border: "1px solid rgba(127, 29, 29, 0.5)",
+            borderRadius: 12,
+            background: "rgba(127, 29, 29, 0.08)",
+            padding: 16,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              gap: 16,
+              flexWrap: "wrap",
+            }}
+          >
+            <div style={{ flex: "1 1 320px" }}>
+              <p style={{ margin: 0, fontWeight: 600 }}>Reset Sandbox</p>
+              <p
+                style={{
+                  margin: "8px 0 0",
+                  color: "var(--foreground-muted)",
+                  lineHeight: 1.5,
+                  maxWidth: 640,
+                }}
+              >
+                Delete the current sandbox and all saved snapshots, then create
+                a brand new sandbox from scratch. Use this when the environment
+                is stuck, corrupted, or you want a clean rebuild.
+              </p>
+            </div>
+            <button
+              className="button danger"
+              disabled={isResetDisabled}
+              onClick={() => void handleReset()}
+              type="button"
+            >
+              Reset Sandbox
+            </button>
+          </div>
+        </div>
+      </section>
+
       <ConfirmDialog {...stopDialogProps} />
       <ConfirmDialog {...snapshotDialogProps} />
+      <ConfirmDialog {...resetDialogProps} />
     </article>
   );
 }
