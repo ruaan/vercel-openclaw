@@ -2,6 +2,7 @@ import { ApiError } from "@/shared/http";
 import type { FirewallEvent, FirewallIngestOutcome, FirewallReport, FirewallState, FirewallSyncOutcome, LearnedDomain } from "@/shared/types";
 import { computePolicyHash } from "@/shared/types";
 import { getInitializedMeta, getStore, mutateMeta } from "@/server/store/store";
+import { learningLockKey } from "@/server/store/keyspace";
 import { applyFirewallPolicyToSandbox } from "@/server/firewall/policy";
 import { extractDomainsWithContext, groupByRegistrableDomain, normalizeDomainList } from "@/server/firewall/domains";
 import { logInfo, logWarn } from "@/server/log";
@@ -10,7 +11,6 @@ import { getSandboxController } from "@/server/sandbox/controller";
 const EVENT_RETENTION = 1000;
 const LEARNED_RETENTION = 500;
 const LEARNING_LOG_PATH = "/tmp/shell-commands-for-learning.log";
-const LEARNING_LOCK_KEY = "openclaw-single:lock:learning-refresh";
 const LEARNING_INGEST_INTERVAL_MS = 10_000;
 
 export async function getFirewallState(): Promise<FirewallState> {
@@ -396,7 +396,8 @@ export async function ingestLearningFromSandbox(
   }
 
   const store = getStore();
-  const lockToken = await store.acquireLock(LEARNING_LOCK_KEY, 10);
+  const lockKey = learningLockKey();
+  const lockToken = await store.acquireLock(lockKey, 10);
   if (!lockToken) {
     logInfo("firewall.ingest_skipped", { operation: "ingest", reason: "locked", requestId: options?.requestId });
     const outcome = makeSkipOutcome("locked");
@@ -546,7 +547,7 @@ export async function ingestLearningFromSandbox(
     });
     return { ingested: false, reason: "sandbox-read-failed", domains: [], outcome };
   } finally {
-    await store.releaseLock(LEARNING_LOCK_KEY, lockToken);
+    await store.releaseLock(lockKey, lockToken);
   }
 }
 

@@ -1,9 +1,8 @@
 import { requireDebugEnabled } from "@/server/auth/debug-guard";
 import { requireJsonRouteAuth } from "@/server/auth/route-auth";
+import { debugLockKey } from "@/server/store/keyspace";
 import { getStore } from "@/server/store/store";
 import { jsonOk } from "@/shared/http";
-
-const DEBUG_LOCK_KEY = "openclaw-single:lock:debug-timing";
 
 export async function GET(request: Request): Promise<Response> {
   const blocked = requireDebugEnabled();
@@ -16,7 +15,8 @@ export async function GET(request: Request): Promise<Response> {
   const timings: Record<string, number> = {};
 
   let t0 = performance.now();
-  const token = await store.acquireLock(DEBUG_LOCK_KEY, 5);
+  const lockKey = debugLockKey();
+  const token = await store.acquireLock(lockKey, 5);
   timings.acquireLockMs = Math.round((performance.now() - t0) * 100) / 100;
 
   if (!token) {
@@ -27,16 +27,16 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   t0 = performance.now();
-  await store.releaseLock(DEBUG_LOCK_KEY, token);
+  await store.releaseLock(lockKey, token);
   timings.releaseLockMs = Math.round((performance.now() - t0) * 100) / 100;
 
   t0 = performance.now();
-  const token2 = await store.acquireLock(DEBUG_LOCK_KEY, 5);
+  const token2 = await store.acquireLock(lockKey, 5);
   timings.acquireLockWarmMs = Math.round((performance.now() - t0) * 100) / 100;
 
   if (token2) {
     t0 = performance.now();
-    await store.releaseLock(DEBUG_LOCK_KEY, token2);
+    await store.releaseLock(lockKey, token2);
     timings.releaseLockWarmMs = Math.round((performance.now() - t0) * 100) / 100;
   }
 

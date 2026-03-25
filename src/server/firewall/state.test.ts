@@ -6,6 +6,7 @@ import type { NetworkPolicy } from "@vercel/sandbox";
 import { ApiError } from "@/shared/http";
 import type { SingleMeta } from "@/shared/types";
 import { DOMAIN_PRESETS, computePolicyHash, ensureMetaShape } from "@/shared/types";
+import { _setInstanceIdOverrideForTesting } from "@/server/env";
 import {
   approveDomains,
   computeWouldBlock,
@@ -20,6 +21,7 @@ import {
 import { toNetworkPolicy } from "@/server/firewall/policy";
 import { _setSandboxControllerForTesting } from "@/server/sandbox/controller";
 import type { SandboxController, SandboxHandle } from "@/server/sandbox/controller";
+import { learningLockKey } from "@/server/store/keyspace";
 import { _resetStoreForTesting, mutateMeta } from "@/server/store/store";
 import { getServerLogs, _resetLogBuffer } from "@/server/log";
 
@@ -56,6 +58,43 @@ async function withFirewallTestStore(fn: () => Promise<void>): Promise<void> {
     _resetStoreForTesting();
     _resetLogBuffer();
   }
+}
+
+function withInstanceId<T>(
+  instanceId: string | null,
+  fn: () => T | Promise<T>,
+): T | Promise<T> {
+  const original = process.env.OPENCLAW_INSTANCE_ID;
+  if (instanceId === null) {
+    delete process.env.OPENCLAW_INSTANCE_ID;
+  } else {
+    process.env.OPENCLAW_INSTANCE_ID = instanceId;
+  }
+  _setInstanceIdOverrideForTesting(null);
+
+  const restore = () => {
+    if (original === undefined) {
+      delete process.env.OPENCLAW_INSTANCE_ID;
+    } else {
+      process.env.OPENCLAW_INSTANCE_ID = original;
+    }
+    _setInstanceIdOverrideForTesting(null);
+  };
+
+  let result: T | Promise<T>;
+  try {
+    result = fn();
+  } catch (error) {
+    restore();
+    throw error;
+  }
+
+  if (result instanceof Promise) {
+    return result.finally(restore);
+  }
+
+  restore();
+  return result;
 }
 
 async function prepareRunningSandbox(
@@ -1297,6 +1336,47 @@ test("ingestLearningFromSandbox emits logInfo with skip reason when sandbox is n
       (e) => e.message === "firewall.ingest_skipped" && e.data?.reason === "sandbox-not-running",
     );
     assert.ok(skipLog, "Expected logInfo with reason 'sandbox-not-running'");
+  });
+});
+
+test("ingestLearningFromSandbox acquires the learning lock with the active instance id", async () => {
+  await withFirewallTestStore(async () => {
+    await withInstanceId("fork-a", async () => {
+      const ctrl = installSucceedingSandboxController();
+      try {
+        await prepareRunningSandbox((meta) => {
+          meta.firewall.mode = "learning";
+        });
+
+        const storeModule = await import("@/server/store/store");
+        const store = storeModule.getStore();
+        const originalAcquireLock = store.acquireLock.bind(store);
+        const originalReleaseLock = store.releaseLock.bind(store);
+        const acquiredKeys: string[] = [];
+        const releasedKeys: string[] = [];
+
+        store.acquireLock = async (key, ttlSeconds) => {
+          acquiredKeys.push(key);
+          return originalAcquireLock(key, ttlSeconds);
+        };
+        store.releaseLock = async (key, token) => {
+          releasedKeys.push(key);
+          return originalReleaseLock(key, token);
+        };
+
+        try {
+          await ingestLearningFromSandbox(true);
+        } finally {
+          store.acquireLock = originalAcquireLock;
+          store.releaseLock = originalReleaseLock;
+        }
+
+        assert.deepEqual(acquiredKeys, [learningLockKey()]);
+        assert.deepEqual(releasedKeys, [learningLockKey()]);
+      } finally {
+        ctrl.restore();
+      }
+    });
   });
 });
 
