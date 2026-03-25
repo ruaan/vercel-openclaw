@@ -103,7 +103,7 @@ Also: `restoring`, `error`
 
 1. Public webhook validates the platform signature or secret.
 2. If the sandbox is already running, Telegram forwards raw updates to the native handler on port `8787`; Slack forwards to the gateway's Slack events endpoint.
-3. Otherwise Telegram may send a boot message, then the route starts `drainChannelWorkflow` via Workflow DevKit. Slack and Discord also enter the workflow path when they cannot use the fast path.
+3. Otherwise Telegram may send a boot message, then the route starts `drainChannelWorkflow` via Workflow DevKit. Slack also enters the workflow path when it cannot use the fast path.
 4. The workflow restores the sandbox if needed, sends the message to `POST /v1/chat/completions`, and delivers the reply back to the originating channel.
 5. `@vercel/queue` is used for launch verification only, via `/api/queues/launch-verify`.
 
@@ -147,7 +147,7 @@ Full reference:
 | `OPENCLAW_PACKAGE_SPEC` | No | OpenClaw version to install (defaults to `openclaw@latest`). On Vercel deployments, the deployment contract **warns** — it does not fail — when unset or unpinned (e.g. `openclaw@latest`). The runtime still falls back to `openclaw@latest`, but restores are non-deterministic. Pin to an exact version like `openclaw@1.2.3`. |
 | `OPENCLAW_SANDBOX_VCPUS` | No | vCPU count for sandbox create and snapshot restore (valid: 1, 2, 4, 8; default: 1). Keep fixed during benchmarks. |
 | `OPENCLAW_SANDBOX_SLEEP_AFTER_MS` | No | How long the sandbox stays alive after last activity, in milliseconds (60000–2700000; default: 1800000 = 30 min). Heartbeat and touch-throttle intervals are derived proportionally. Existing running sandboxes cannot be shortened in place. If you increase this value, the next touch/heartbeat can top the sandbox timeout up to the new target. If you decrease it, the lower value becomes exact on the next create or restore. |
-| `VERCEL_AUTOMATION_BYPASS_SECRET` | No | Enables protected webhook delivery when Deployment Protection is on. Slack and Discord URLs use it when configured; Telegram intentionally does not include the bypass query parameter and relies on webhook-secret validation instead. On protected deployments, Telegram needs a Deployment Protection Exception. |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | No | Enables protected webhook delivery when Deployment Protection is on. Slack URLs use it when configured; Telegram intentionally does not include the bypass query parameter and relies on webhook-secret validation instead. On protected deployments, Telegram needs a Deployment Protection Exception. |
 | `NEXT_PUBLIC_APP_URL` | No | Base origin override |
 | `NEXT_PUBLIC_BASE_DOMAIN` | No | Preferred external host for webhook URLs |
 | `BASE_DOMAIN` | No | Legacy alias for `NEXT_PUBLIC_BASE_DOMAIN` |
@@ -168,12 +168,11 @@ Full reference:
 | `/api/admin/stop` | Snapshot and stop |
 | `/api/admin/snapshot` | Snapshot and stop (same as stop for now) |
 | `/api/admin/snapshots/delete` | Delete a past snapshot from Vercel and local history |
-| `/api/admin/channel-secrets` | Configure smoke credentials and dispatch signed synthetic Slack/Telegram/Discord webhooks. Smoke dispatch uses `buildPublicUrl()` (bypass included) for all channels including Telegram — distinct from provider-facing registration which omits bypass for Telegram. |
+| `/api/admin/channel-secrets` | Configure smoke credentials and dispatch signed synthetic Slack/Telegram webhooks. Smoke dispatch uses `buildPublicUrl()` (bypass included) for all channels including Telegram — distinct from provider-facing registration which omits bypass for Telegram. |
 | `/api/cron/watchdog` | Cron watchdog for health repair and scheduled OpenClaw cron wake |
 | `/api/admin/watchdog` | Read cached watchdog report or run a fresh one |
 | `/api/channels/slack/webhook` | Public Slack webhook |
 | `/api/channels/telegram/webhook` | Public Telegram webhook |
-| `/api/channels/discord/webhook` | Public Discord interactions endpoint |
 
 ## Verification behavior that is easy to miss
 
@@ -263,7 +262,7 @@ type LaunchVerifyCompletionLog = {
   failingCheckIds: string[];
   requiredActionIds: string[];
   recommendedActionIds: string[];
-  failingChannelIds: Array<"slack" | "telegram" | "discord">;
+  failingChannelIds: Array<"slack" | "telegram">;
   dynamicConfigVerified: boolean | null;
   dynamicConfigReason?: "hash-match" | "hash-miss" | "no-snapshot-hash";
   repaired: boolean | null;

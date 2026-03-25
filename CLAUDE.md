@@ -13,7 +13,7 @@ The app handles:
 - proxying the OpenClaw UI at `/gateway`
 - HTML injection for WebSocket rewriting and gateway token handoff
 - learning and enforcing egress firewall state
-- Slack, Discord, and Telegram channel webhooks through the app
+- Slack and Telegram channel webhooks through the app
 
 The app does not handle:
 
@@ -79,7 +79,7 @@ Channel phases (`channelRoundTrip`, `channelWakeFromSleep`) call `POST /api/admi
 | `/api/admin/stop` | Snapshot and stop the sandbox |
 | `/api/admin/snapshot` | Snapshot and stop (same as stop for now) |
 | `/api/admin/snapshots/delete` | Delete a past snapshot from Vercel and local history (cannot delete current restore target) |
-| `/api/admin/channel-secrets` | Configure smoke credentials and dispatch server-signed synthetic Slack/Telegram/Discord webhooks. Raw secrets are never returned. Smoke dispatch URLs use `buildPublicUrl()` (bypass included when configured) for all channels, including Telegram — this is intentionally different from provider-facing Telegram webhook registration, which omits the bypass parameter. |
+| `/api/admin/channel-secrets` | Configure smoke credentials and dispatch server-signed synthetic Slack/Telegram webhooks. Raw secrets are never returned. Smoke dispatch URLs use `buildPublicUrl()` (bypass included when configured) for all channels, including Telegram — this is intentionally different from provider-facing Telegram webhook registration, which omits the bypass parameter. |
 | `/api/cron/watchdog` | Runs every 5 minutes via Vercel Cron. Health-checks running sandboxes, repairs stuck states, and **wakes stopped sandboxes when OpenClaw cron jobs are due**. |
 | `/api/admin/watchdog` | GET reads cached watchdog report; POST runs a fresh check |
 
@@ -93,7 +93,7 @@ OpenClaw has a built-in cron scheduler (`croner` library) that persists jobs to 
 4. **After restore**: checks if `jobs.json` is empty on the restored sandbox. If jobs were lost but the store has a copy, writes the stored jobs back and restarts the gateway so the cron module loads them.
 5. **After wake**: the wake key is cleared only when the cron restore outcome is `no-store-jobs`, `already-present`, or `restored-verified`. If restore fails or is unverified, the key is retained so the next watchdog run can retry. OpenClaw reschedules the next run internally, and the next heartbeat/snapshot will persist the updated time.
 
-The watchdog never runs chat completions, delivers messages, or interacts with Telegram/Slack/Discord. It only wakes the sandbox — OpenClaw handles the rest.
+The watchdog never runs chat completions, delivers messages, or interacts with Telegram/Slack. It only wakes the sandbox — OpenClaw handles the rest.
 
 Watchdog observability notes:
 
@@ -130,7 +130,7 @@ Responsibilities:
 - expose `buildPublicUrl(path: string, request?: Request): string`
 - append `x-vercel-protection-bypass=<VERCEL_AUTOMATION_BYPASS_SECRET>` when the bypass secret is available (regardless of auth mode)
 
-Channel webhook URL construction lives in `src/server/channels/webhook-urls.ts`. The convenience wrappers in `src/server/channels/state.ts` (`buildSlackWebhookUrl`, `buildTelegramWebhookUrl`, `buildDiscordPublicWebhookUrl`) delegate to `buildChannelWebhookUrl()` in that module. Slack and Discord URLs use `buildPublicUrl` (bypass secret appended when available). Telegram intentionally does not include the bypass query parameter — Telegram URLs use `buildPublicDisplayUrl` (no bypass secret) because Telegram validates webhooks via the `x-telegram-bot-api-secret-token` header, and including the bypass query parameter causes `setWebhook` to silently drop the registration.
+Channel webhook URL construction lives in `src/server/channels/webhook-urls.ts`. The convenience wrappers in `src/server/channels/state.ts` (`buildSlackWebhookUrl`, `buildTelegramWebhookUrl`) delegate to `buildChannelWebhookUrl()` in that module. Slack URLs use `buildPublicUrl` (bypass secret appended when available). Telegram intentionally does not include the bypass query parameter — Telegram URLs use `buildPublicDisplayUrl` (no bypass secret) because Telegram validates webhooks via the `x-telegram-bot-api-secret-token` header, and including the bypass query parameter causes `setWebhook` to silently drop the registration.
 
 Admin-visible surfaces (preflight payload, status responses, UI) must use `buildPublicDisplayUrl()` instead of `buildPublicUrl()`. The display variant omits the `x-vercel-protection-bypass` query parameter so secrets are never leaked to the browser or API consumers.
 
@@ -176,8 +176,8 @@ Observability notes:
   aiGatewayAuth: "oidc" | "api-key" | "unavailable";
   cronSecretConfigured: boolean;
   publicOriginResolution: PublicOriginResolution | null;
-  webhookDiagnostics: { slack, telegram, discord };
-  channels: Record<"slack" | "telegram" | "discord", ChannelConnectability>;
+  webhookDiagnostics: { slack, telegram };
+  channels: Record<"slack" | "telegram", ChannelConnectability>;
   actions: PreflightAction[];
   checks: PreflightCheck[];
   nextSteps: PreflightNextStep[];
@@ -363,14 +363,11 @@ Main files:
 - `src/server/channels/slack/adapter.ts`
 - `src/server/channels/telegram/adapter.ts`
 - `src/server/channels/telegram/bot-api.ts`
-- `src/server/channels/discord/adapter.ts`
-- `src/server/channels/discord/application.ts`
-
 Channel delivery flow:
 
 1. the public webhook route validates the platform signature or secret
 2. **Telegram fast path**: if the sandbox is running, the route forwards the raw update to OpenClaw's native Telegram handler on port 8787 and returns 200. This preserves full native Telegram features (slash commands, media, inline keyboards, etc.)
-3. **Telegram stopped path / Slack / Discord**: the route sends a boot message (Telegram only, "Starting up…"), then calls `start(drainChannelWorkflow)` from `workflow/api`
+3. **Telegram stopped path / Slack**: the route sends a boot message (Telegram only, "Starting up…"), then calls `start(drainChannelWorkflow)` from `workflow/api`
 4. the workflow step (`processChannelStep`) restores the sandbox if needed, then sends the message to `POST /v1/chat/completions` on the OpenClaw gateway
 5. the app delivers the reply back to the originating channel
 6. the workflow step deletes the Telegram boot message after processing
@@ -394,11 +391,10 @@ Behavior:
 
 - Slack uses threaded replies; fast path forwards to `/slack/events` on the gateway when running
 - Telegram uses webhook-secret validation; fast path forwards to native handler on port 8787 when running; boot message sent from webhook route when stopped
-- Discord uses deferred interaction responses and can register `/ask`
 
 ### Channel connectability and 409 guards
 
-`src/server/channels/connectability.ts` computes whether a channel can be connected before credentials are saved. All three channel config routes (Slack, Telegram, Discord) enforce this check at the top of their `PUT` handler.
+`src/server/channels/connectability.ts` computes whether a channel can be connected before credentials are saved. Both channel config routes (Slack, Telegram) enforce this check at the top of their `PUT` handler.
 
 Hard blockers (cause `canConnect: false`):
 
@@ -439,19 +435,6 @@ Shared blocked response (HTTP 409):
 }
 ```
 
-Discord also has a separate 409 for endpoint conflicts:
-
-```json
-{
-  "error": {
-    "code": "DISCORD_ENDPOINT_CONFLICT",
-    "message": "Discord interactions endpoint is already set to a different URL. Set forceOverwriteEndpoint=true to replace it."
-  },
-  "currentUrl": "<currentUrl>",
-  "desiredUrl": "<desiredUrl>"
-}
-```
-
 ## Auth
 
 Main files:
@@ -473,7 +456,7 @@ Notes:
 - `admin-secret` is the default if `VERCEL_AUTH_MODE` is unset
 - admin auth accepts either `Authorization: Bearer <admin-secret>` or the encrypted `openclaw_admin` session cookie
 - CSRF is enforced on cookie-based mutation requests but not bearer token requests
-- deployment-protection was attempted and abandoned — Vercel's deployment protection blocks channel webhooks from Slack, Telegram, and Discord, and is unavailable on Hobby plans
+- deployment-protection was attempted and abandoned — Vercel's deployment protection blocks channel webhooks from Slack and Telegram, and is unavailable on Hobby plans
 - `sign-in-with-vercel` uses encrypted cookie sessions and verifies the ID token against Vercel's JWKS
 - access tokens are refreshed before expiry
 - refresh failure should clear the session and force a new login
