@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { StatusBadge } from "@/components/ui/badge";
 import { ConfirmDialog, useConfirm } from "@/components/ui/confirm-dialog";
 import {
@@ -68,14 +67,12 @@ function friendlyError(raw: string): { headline: string; detail: string } {
   };
 }
 
-function formatDuration(ms: number): string {
-  if (ms < 60_000) return `${Math.ceil(ms / 1_000)}s`;
-  const totalSeconds = Math.ceil(ms / 1_000);
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (totalMinutes < 60) return `${totalMinutes}m ${String(seconds).padStart(2, "0")}s`;
+function formatDurationMinutes(ms: number): string {
+  const totalMinutes = Math.max(1, Math.ceil(ms / 60_000));
+  if (totalMinutes < 60) return `${totalMinutes}m`;
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
+  if (minutes === 0) return `${hours}h`;
   return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }
 
@@ -99,47 +96,6 @@ function formatGatewayStatus(status: StatusPayload["gatewayStatus"]): string {
   return "Unknown";
 }
 
-export function getNextDisplayedTimeoutMs(
-  current: number | null,
-  timeoutSource: StatusPayload["timeoutSource"],
-): number | null {
-  if (current == null || timeoutSource === "none") {
-    return current;
-  }
-  if (timeoutSource === "estimated") {
-    return current - 1_000;
-  }
-  return Math.max(current - 1_000, 0);
-}
-
-function AutoSleepValue({
-  status,
-}: {
-  status: Pick<StatusPayload, "timeoutRemainingMs" | "timeoutSource">;
-}) {
-  const [displayedTimeoutMs, setDisplayedTimeoutMs] = useState<number | null>(
-    status.timeoutRemainingMs,
-  );
-
-  useEffect(() => {
-    if (status.timeoutRemainingMs == null || status.timeoutSource === "none") {
-      return;
-    }
-
-    const interval = window.setInterval(() => {
-      setDisplayedTimeoutMs((current) =>
-        getNextDisplayedTimeoutMs(current, status.timeoutSource),
-      );
-    }, 1_000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [status.timeoutRemainingMs, status.timeoutSource]);
-
-  return <>{getAutoSleepDisplay(status, displayedTimeoutMs)}</>;
-}
-
 export function getAutoSleepDisplay(
   status: Pick<StatusPayload, "timeoutSource">,
   displayedTimeoutMs: number | null,
@@ -156,12 +112,11 @@ export function getAutoSleepDisplay(
       : status.timeoutSource === "live"
         ? " (live)"
         : "";
-  return `${formatDuration(Math.max(displayedTimeoutMs, 0))}${suffix}`;
+  return `${formatDurationMinutes(Math.max(displayedTimeoutMs, 0))}${suffix}`;
 }
 
 export function StatusPanel({
   status,
-  statusVersion = 0,
   busy,
   pendingAction,
   runAction,
@@ -285,17 +240,7 @@ export function StatusPanel({
         </div>
         <div>
           <dt>Auto-sleep in</dt>
-          <dd>
-            <AutoSleepValue key={statusVersion} status={status} />
-          </dd>
-        </div>
-        <div>
-          <dt>Last keepalive</dt>
-          <dd>
-            {status.lastKeepaliveAt != null
-              ? formatRelativeTime(status.lastKeepaliveAt)
-              : "Never"}
-          </dd>
+          <dd>{getAutoSleepDisplay(status, status.timeoutRemainingMs)}</dd>
         </div>
         <div>
           <dt>Firewall</dt>

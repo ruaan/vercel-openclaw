@@ -139,7 +139,7 @@ export function SnapshotsPanel({
     });
     if (!ok) return;
 
-    void runAction("/api/admin/reset", {
+    await runAction("/api/admin/reset", {
       label: "Reset Sandbox",
       successMessage: "Sandbox reset initiated",
       method: "POST",
@@ -243,47 +243,15 @@ export function SnapshotsPanel({
         })}
       </ul>
 
-      <ConfirmDialog {...dialogProps} />
-      <section style={{ marginTop: 28 }}>
-        <p
-          style={{
-            margin: "0 0 8px",
-            color: "var(--foreground-subtle)",
-            fontSize: 12,
-            fontWeight: 500,
-            lineHeight: 1.4,
-          }}
-        >
+      <section className="mt-7">
+        <p className="mb-2 text-xs font-medium leading-5 text-[var(--foreground-subtle)]">
           Danger zone
         </p>
-        <div
-          className="border border-red-900/50 rounded-lg p-4"
-          style={{
-            border: "1px solid rgba(127, 29, 29, 0.5)",
-            borderRadius: 12,
-            background: "rgba(127, 29, 29, 0.08)",
-            padding: 16,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              justifyContent: "space-between",
-              gap: 16,
-              flexWrap: "wrap",
-            }}
-          >
-            <div style={{ flex: "1 1 320px" }}>
-              <p style={{ margin: 0, fontWeight: 600 }}>Reset Sandbox</p>
-              <p
-                style={{
-                  margin: "8px 0 0",
-                  color: "var(--foreground-muted)",
-                  lineHeight: 1.5,
-                  maxWidth: 640,
-                }}
-              >
+        <div className="rounded-lg border border-red-900/50 bg-red-950/20 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-80 flex-1">
+              <p className="m-0 font-semibold">Reset Sandbox</p>
+              <p className="mt-2 max-w-2xl text-[var(--foreground-muted)] leading-6">
                 Delete the current sandbox and all saved snapshots, then create
                 a brand new sandbox from scratch. Use this when the environment
                 is stuck, corrupted, or you want a clean rebuild.
@@ -300,6 +268,7 @@ export function SnapshotsPanel({
           </div>
         </div>
       </section>
+      <ConfirmDialog {...dialogProps} />
       <ConfirmDialog {...resetDialogProps} />
     </article>
   );

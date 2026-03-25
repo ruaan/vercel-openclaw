@@ -8,7 +8,6 @@ import type { ChannelConnectability } from "@/shared/channel-connectability";
 import { getStatusRequestPath } from "../admin-shell";
 import {
   getAutoSleepDisplay,
-  getNextDisplayedTimeoutMs,
   StatusPanel,
 } from "./status-panel";
 
@@ -180,7 +179,7 @@ test("StatusPanel renders Open Gateway as the main green running action", () => 
   assert.match(html, /<a[^>]*class="button success"[^>]*>Open Gateway<\/a>/);
 });
 
-test("StatusPanel renders estimated auto-sleep, keepalive, and gateway check metadata", () => {
+test("StatusPanel renders minute-only auto-sleep and gateway check metadata", () => {
   const now = Date.now();
   const html = renderPanel(
     makeStatus({
@@ -188,17 +187,15 @@ test("StatusPanel renders estimated auto-sleep, keepalive, and gateway check met
       timeoutSource: "estimated",
       gatewayStatus: "unknown",
       gatewayCheckedAt: now - 120_000,
-      lastKeepaliveAt: now - 30_000,
     }),
   );
 
   assert.ok(html.includes("Auto-sleep in"));
-  assert.ok(html.includes("2m 05s (estimated)"));
+  assert.ok(html.includes("3m (estimated)"));
   assert.ok(html.includes("Gateway"));
   assert.ok(html.includes("Unknown"));
   assert.ok(html.includes("checked 2m ago"));
-  assert.ok(html.includes("Last keepalive"));
-  assert.ok(html.includes("30s ago"));
+  assert.ok(!html.includes("Last keepalive"));
 });
 
 test("StatusPanel renders past estimated sleep warning when timeout is expired", () => {
@@ -225,22 +222,14 @@ test("getStatusRequestPath uses passive polling by default and live health on de
   assert.equal(getStatusRequestPath(true), "/api/status?health=1");
 });
 
-test("getNextDisplayedTimeoutMs decrements estimated timers past zero but clamps live timers", () => {
-  assert.equal(getNextDisplayedTimeoutMs(5_000, "estimated"), 4_000);
-  assert.equal(getNextDisplayedTimeoutMs(0, "estimated"), -1_000);
-  assert.equal(getNextDisplayedTimeoutMs(5_000, "live"), 4_000);
-  assert.equal(getNextDisplayedTimeoutMs(0, "live"), 0);
-  assert.equal(getNextDisplayedTimeoutMs(null, "estimated"), null);
-});
-
 test("getAutoSleepDisplay shows source labels and estimated sleep warning", () => {
   assert.equal(
     getAutoSleepDisplay({ timeoutSource: "estimated" }, 65_000),
-    "1m 05s (estimated)",
+    "2m (estimated)",
   );
   assert.equal(
     getAutoSleepDisplay({ timeoutSource: "live" }, 65_000),
-    "1m 05s (live)",
+    "2m (live)",
   );
   assert.equal(
     getAutoSleepDisplay({ timeoutSource: "estimated" }, 0),
