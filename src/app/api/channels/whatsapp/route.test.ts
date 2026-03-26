@@ -351,6 +351,162 @@ test("whatsapp GET returns needs-plugin status verbatim", async () => {
 // Guardrail: no fake webhook path for WhatsApp
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// PUT — validation: rejects invalid dmPolicy
+// ---------------------------------------------------------------------------
+
+test("whatsapp PUT rejects invalid dmPolicy with actionable 400", async () => {
+  await withHarness(async () => {
+    _setAiGatewayTokenOverrideForTesting("oidc-token");
+
+    const route = getWhatsAppChannelRoute();
+    const request = buildAuthPutRequest(
+      "/api/channels/whatsapp",
+      JSON.stringify({ enabled: true, dmPolicy: "bogus" }),
+    );
+    const result = await callRoute(route.PUT!, request);
+
+    assert.equal(result.status, 400);
+    const bodyText = JSON.stringify(result.json);
+    assert.match(bodyText, /INVALID_DMPOLICY/);
+    assert.match(bodyText, /pairing, allowlist, open, disabled/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PUT — validation: rejects invalid groupPolicy
+// ---------------------------------------------------------------------------
+
+test("whatsapp PUT rejects invalid groupPolicy with actionable 400", async () => {
+  await withHarness(async () => {
+    _setAiGatewayTokenOverrideForTesting("oidc-token");
+
+    const route = getWhatsAppChannelRoute();
+    const request = buildAuthPutRequest(
+      "/api/channels/whatsapp",
+      JSON.stringify({ enabled: true, groupPolicy: "nope" }),
+    );
+    const result = await callRoute(route.PUT!, request);
+
+    assert.equal(result.status, 400);
+    const bodyText = JSON.stringify(result.json);
+    assert.match(bodyText, /INVALID_GROUPPOLICY/);
+    assert.match(bodyText, /open, allowlist, disabled/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PUT — validation: rejects malformed allowFrom
+// ---------------------------------------------------------------------------
+
+test("whatsapp PUT rejects invalid allowFrom arrays with actionable 400", async () => {
+  await withHarness(async () => {
+    _setAiGatewayTokenOverrideForTesting("oidc-token");
+
+    const route = getWhatsAppChannelRoute();
+    const request = buildAuthPutRequest(
+      "/api/channels/whatsapp",
+      JSON.stringify({ allowFrom: ["+15551234567", 123] }),
+    );
+    const result = await callRoute(route.PUT!, request);
+
+    assert.equal(result.status, 400);
+    const bodyText = JSON.stringify(result.json);
+    assert.match(bodyText, /INVALID_ALLOWFROM/);
+    assert.match(bodyText, /array of non-empty strings/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PUT — validation: rejects non-array allowFrom
+// ---------------------------------------------------------------------------
+
+test("whatsapp PUT rejects non-array allowFrom with actionable 400", async () => {
+  await withHarness(async () => {
+    _setAiGatewayTokenOverrideForTesting("oidc-token");
+
+    const route = getWhatsAppChannelRoute();
+    const request = buildAuthPutRequest(
+      "/api/channels/whatsapp",
+      JSON.stringify({ allowFrom: "not-an-array" }),
+    );
+    const result = await callRoute(route.PUT!, request);
+
+    assert.equal(result.status, 400);
+    const bodyText = JSON.stringify(result.json);
+    assert.match(bodyText, /INVALID_ALLOWFROM/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PUT — validation: rejects non-boolean enabled
+// ---------------------------------------------------------------------------
+
+test("whatsapp PUT rejects non-boolean enabled with actionable 400", async () => {
+  await withHarness(async () => {
+    _setAiGatewayTokenOverrideForTesting("oidc-token");
+
+    const route = getWhatsAppChannelRoute();
+    const request = buildAuthPutRequest(
+      "/api/channels/whatsapp",
+      JSON.stringify({ enabled: "yes" }),
+    );
+    const result = await callRoute(route.PUT!, request);
+
+    assert.equal(result.status, 400);
+    const bodyText = JSON.stringify(result.json);
+    assert.match(bodyText, /INVALID_ENABLED/);
+    assert.match(bodyText, /boolean/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PUT — validation: rejects non-object JSON bodies
+// ---------------------------------------------------------------------------
+
+test("whatsapp PUT rejects non-object JSON bodies with actionable 400", async () => {
+  await withHarness(async () => {
+    _setAiGatewayTokenOverrideForTesting("oidc-token");
+
+    const route = getWhatsAppChannelRoute();
+    const request = buildAuthPutRequest(
+      "/api/channels/whatsapp",
+      "null",
+    );
+    const result = await callRoute(route.PUT!, request);
+
+    assert.equal(result.status, 400);
+    const bodyText = JSON.stringify(result.json);
+    assert.match(bodyText, /INVALID_JSON/);
+    assert.match(bodyText, /JSON object/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PUT — validation: rejects malformed groupAllowFrom
+// ---------------------------------------------------------------------------
+
+test("whatsapp PUT rejects malformed groupAllowFrom with actionable 400", async () => {
+  await withHarness(async () => {
+    _setAiGatewayTokenOverrideForTesting("oidc-token");
+
+    const route = getWhatsAppChannelRoute();
+    const request = buildAuthPutRequest(
+      "/api/channels/whatsapp",
+      JSON.stringify({ groupAllowFrom: [null] }),
+    );
+    const result = await callRoute(route.PUT!, request);
+
+    assert.equal(result.status, 400);
+    const bodyText = JSON.stringify(result.json);
+    assert.match(bodyText, /INVALID_GROUPALLOWFROM/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guardrail: no fake webhook path for WhatsApp
+// ---------------------------------------------------------------------------
+
 test("whatsapp connectability in GET response has null webhookUrl", async () => {
   await withHarness(async () => {
     _setAiGatewayTokenOverrideForTesting("oidc-token");

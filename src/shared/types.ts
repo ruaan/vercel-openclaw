@@ -220,6 +220,26 @@ export type FirewallReport = {
   policyHash: string;
 };
 
+// ---------------------------------------------------------------------------
+// Restore target truth types
+// ---------------------------------------------------------------------------
+
+export type RestorePreparedStatus =
+  | "unknown"
+  | "dirty"
+  | "preparing"
+  | "ready"
+  | "failed";
+
+export type RestorePreparedReason =
+  | "snapshot-missing"
+  | "dynamic-config-changed"
+  | "static-assets-changed"
+  | "deployment-changed"
+  | "manual-reset"
+  | "prepare-failed"
+  | "prepared";
+
 export type CronRestoreOutcome =
   | "no-store-jobs"
   | "already-present"
@@ -287,10 +307,27 @@ export type SingleMeta = {
   id: string;
   sandboxId: string | null;
   snapshotId: string | null;
-  /** SHA-256 of the gateway config baked into the current snapshot.
-   *  When this matches the config computed at restore time, the dynamic
-   *  config writeFiles call (~6s) can be skipped entirely. */
+  /** @deprecated Legacy hash — kept for backward hydration only. Use
+   *  snapshotDynamicConfigHash / runtimeDynamicConfigHash instead. */
   snapshotConfigHash: string | null;
+
+  /** SHA-256 of the gateway config baked into the most recent snapshot image.
+   *  Only set by actual snapshot-creation paths. */
+  snapshotDynamicConfigHash: string | null;
+  /** SHA-256 of the gateway config currently on the running sandbox.
+   *  Updated by runtime reconciliation — never used for restore skip gates. */
+  runtimeDynamicConfigHash: string | null;
+  /** SHA-256 of static restore assets in the most recent snapshot image. */
+  snapshotAssetSha256: string | null;
+  /** SHA-256 of static restore assets on the running sandbox. */
+  runtimeAssetSha256: string | null;
+
+  /** Whether the next restore target is verified-ready. */
+  restorePreparedStatus: RestorePreparedStatus;
+  /** Reason for the current restorePreparedStatus. */
+  restorePreparedReason: RestorePreparedReason | null;
+  /** Unix-epoch ms when restorePreparedStatus was last set to "ready". */
+  restorePreparedAt: number | null;
   openclawVersion: string | null;
   status: SingleStatus;
   gatewayToken: string;
@@ -339,6 +376,13 @@ export function createDefaultMeta(
     sandboxId: null,
     snapshotId: null,
     snapshotConfigHash: null,
+    snapshotDynamicConfigHash: null,
+    runtimeDynamicConfigHash: null,
+    snapshotAssetSha256: null,
+    runtimeAssetSha256: null,
+    restorePreparedStatus: "unknown",
+    restorePreparedReason: null,
+    restorePreparedAt: null,
     openclawVersion: null,
     status: "uninitialized",
     gatewayToken,
@@ -410,6 +454,36 @@ export function ensureMetaShape(
     snapshotConfigHash:
       typeof (raw as Record<string, unknown>).snapshotConfigHash === "string"
         ? (raw as Record<string, unknown>).snapshotConfigHash as string
+        : null,
+    snapshotDynamicConfigHash:
+      typeof (raw as Record<string, unknown>).snapshotDynamicConfigHash === "string"
+        ? (raw as Record<string, unknown>).snapshotDynamicConfigHash as string
+        : typeof (raw as Record<string, unknown>).snapshotConfigHash === "string"
+          ? (raw as Record<string, unknown>).snapshotConfigHash as string
+          : null,
+    runtimeDynamicConfigHash:
+      typeof (raw as Record<string, unknown>).runtimeDynamicConfigHash === "string"
+        ? (raw as Record<string, unknown>).runtimeDynamicConfigHash as string
+        : null,
+    snapshotAssetSha256:
+      typeof (raw as Record<string, unknown>).snapshotAssetSha256 === "string"
+        ? (raw as Record<string, unknown>).snapshotAssetSha256 as string
+        : null,
+    runtimeAssetSha256:
+      typeof (raw as Record<string, unknown>).runtimeAssetSha256 === "string"
+        ? (raw as Record<string, unknown>).runtimeAssetSha256 as string
+        : null,
+    restorePreparedStatus:
+      isRestorePreparedStatus((raw as Record<string, unknown>).restorePreparedStatus)
+        ? (raw as Record<string, unknown>).restorePreparedStatus as RestorePreparedStatus
+        : "unknown",
+    restorePreparedReason:
+      isRestorePreparedReason((raw as Record<string, unknown>).restorePreparedReason)
+        ? (raw as Record<string, unknown>).restorePreparedReason as RestorePreparedReason
+        : null,
+    restorePreparedAt:
+      typeof (raw as Record<string, unknown>).restorePreparedAt === "number"
+        ? (raw as Record<string, unknown>).restorePreparedAt as number
         : null,
     openclawVersion:
       typeof raw.openclawVersion === "string" ? raw.openclawVersion : null,
@@ -647,6 +721,38 @@ const CRON_RESTORE_OUTCOMES: readonly CronRestoreOutcome[] = [
   "restore-unverified",
   "store-invalid",
 ];
+
+const RESTORE_PREPARED_STATUSES: readonly RestorePreparedStatus[] = [
+  "unknown",
+  "dirty",
+  "preparing",
+  "ready",
+  "failed",
+];
+
+function isRestorePreparedStatus(value: unknown): value is RestorePreparedStatus {
+  return (
+    typeof value === "string" &&
+    RESTORE_PREPARED_STATUSES.includes(value as RestorePreparedStatus)
+  );
+}
+
+const RESTORE_PREPARED_REASONS: readonly RestorePreparedReason[] = [
+  "snapshot-missing",
+  "dynamic-config-changed",
+  "static-assets-changed",
+  "deployment-changed",
+  "manual-reset",
+  "prepare-failed",
+  "prepared",
+];
+
+function isRestorePreparedReason(value: unknown): value is RestorePreparedReason {
+  return (
+    typeof value === "string" &&
+    RESTORE_PREPARED_REASONS.includes(value as RestorePreparedReason)
+  );
+}
 
 function isCronRestoreOutcome(value: unknown): value is CronRestoreOutcome {
   return (

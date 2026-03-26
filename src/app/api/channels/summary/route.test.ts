@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { ChannelSummaryResponse } from "@/shared/channel-summary";
 import {
   _resetStoreForTesting,
   mutateMeta,
@@ -84,25 +85,22 @@ test("GET /api/channels/summary: returns summary for all channels including what
     const result = await callRoute(route.GET!, request);
 
     assert.equal(result.status, 200);
-    const body = result.json as {
-      slack: { connected: boolean; lastError: string | null };
-      telegram: { connected: boolean; lastError: string | null };
-      discord: { connected: boolean; lastError: string | null };
-      whatsapp: {
-        connected: boolean;
-        lastError: string | null;
-        deliveryMode: string;
-        requiresRunningSandbox: boolean;
-      };
-    };
+    const body = result.json as ChannelSummaryResponse;
 
     // All channels disconnected by default
     assert.equal(body.slack.connected, false);
+    assert.equal(body.slack.configured, false);
     assert.equal(body.telegram.connected, false);
+    assert.equal(body.telegram.configured, false);
     assert.equal(body.discord.connected, false);
+    assert.equal(body.discord.configured, false);
     assert.equal(body.whatsapp.connected, false);
+    assert.equal(body.whatsapp.configured, false);
+    assert.equal(body.whatsapp.linkState, "unconfigured");
     assert.equal(body.whatsapp.deliveryMode, "gateway-native");
     assert.equal(body.whatsapp.requiresRunningSandbox, true);
+    assert.equal(body.whatsapp.connectionSemantics, "delivery-enabled");
+    assert.equal(body.whatsapp.detailRoute, "/api/channels/whatsapp");
   });
 });
 
@@ -124,16 +122,15 @@ test("GET /api/channels/summary: reflects connected channel state", async () => 
     const result = await callRoute(route.GET!, request);
 
     assert.equal(result.status, 200);
-    const body = result.json as {
-      slack: { connected: boolean; lastError: string | null };
-      telegram: { connected: boolean };
-      discord: { connected: boolean };
-    };
+    const body = result.json as ChannelSummaryResponse;
 
     assert.equal(body.slack.connected, true);
+    assert.equal(body.slack.configured, true);
     assert.equal(body.slack.lastError, null);
     assert.equal(body.telegram.connected, false);
+    assert.equal(body.telegram.configured, false);
     assert.equal(body.discord.connected, false);
+    assert.equal(body.discord.configured, false);
   });
 });
 
@@ -154,19 +151,16 @@ test("GET /api/channels/summary: whatsapp connected reflects enabled config", as
     const result = await callRoute(route.GET!, request);
 
     assert.equal(result.status, 200);
-    const body = result.json as {
-      whatsapp: {
-        connected: boolean;
-        deliveryMode: string;
-        requiresRunningSandbox: boolean;
-        lastError: string | null;
-      };
-    };
+    const body = result.json as ChannelSummaryResponse;
 
     assert.equal(body.whatsapp.connected, true);
+    assert.equal(body.whatsapp.configured, true);
+    assert.equal(body.whatsapp.linkState, "linked");
     assert.equal(body.whatsapp.deliveryMode, "gateway-native");
     assert.equal(body.whatsapp.requiresRunningSandbox, true);
     assert.equal(body.whatsapp.lastError, null);
+    assert.equal(body.whatsapp.connectionSemantics, "delivery-enabled");
+    assert.equal(body.whatsapp.detailRoute, "/api/channels/whatsapp");
   });
 });
 
@@ -186,7 +180,7 @@ test("GET /api/channels/summary: whatsapp response has no webhookUrl field", asy
   });
 });
 
-test("GET /api/channels/summary: whatsapp disabled config returns connected false", async () => {
+test("GET /api/channels/summary: whatsapp disabled config reports configured false but preserves linkState", async () => {
   await withTestEnv(async () => {
     await mutateMeta((meta) => {
       meta.channels.whatsapp = {
@@ -202,23 +196,20 @@ test("GET /api/channels/summary: whatsapp disabled config returns connected fals
     const result = await callRoute(route.GET!, request);
 
     assert.equal(result.status, 200);
-    const body = result.json as {
-      whatsapp: {
-        connected: boolean;
-        lastError: string | null;
-        deliveryMode: string;
-        requiresRunningSandbox: boolean;
-      };
-    };
+    const body = result.json as ChannelSummaryResponse;
 
     assert.equal(body.whatsapp.connected, false);
+    assert.equal(body.whatsapp.configured, false);
+    assert.equal(body.whatsapp.linkState, "linked");
     assert.equal(body.whatsapp.lastError, null);
+    assert.equal(body.whatsapp.connectionSemantics, "delivery-enabled");
+    assert.equal(body.whatsapp.detailRoute, "/api/channels/whatsapp");
     assert.equal(body.whatsapp.deliveryMode, "gateway-native");
     assert.equal(body.whatsapp.requiresRunningSandbox, true);
   });
 });
 
-test("GET /api/channels/summary: whatsapp enabled but needs-login still reports connected in coarse summary", async () => {
+test("GET /api/channels/summary: whatsapp needs-login exposes coarse and detailed state together", async () => {
   await withTestEnv(async () => {
     await mutateMeta((meta) => {
       meta.channels.whatsapp = {
@@ -234,19 +225,18 @@ test("GET /api/channels/summary: whatsapp enabled but needs-login still reports 
     const result = await callRoute(route.GET!, request);
 
     assert.equal(result.status, 200);
-    const body = result.json as {
-      whatsapp: {
-        connected: boolean;
-        lastError: string | null;
-      };
-    };
+    const body = result.json as ChannelSummaryResponse;
 
     assert.equal(body.whatsapp.connected, true);
+    assert.equal(body.whatsapp.configured, true);
+    assert.equal(body.whatsapp.linkState, "needs-login");
     assert.equal(body.whatsapp.lastError, "scan QR to continue");
+    assert.equal(body.whatsapp.connectionSemantics, "delivery-enabled");
+    assert.equal(body.whatsapp.detailRoute, "/api/channels/whatsapp");
   });
 });
 
-test("GET /api/channels/summary: whatsapp lastError is surfaced", async () => {
+test("GET /api/channels/summary: whatsapp error exposes linkState and lastError", async () => {
   await withTestEnv(async () => {
     await mutateMeta((meta) => {
       meta.channels.whatsapp = {
@@ -262,15 +252,13 @@ test("GET /api/channels/summary: whatsapp lastError is surfaced", async () => {
     const result = await callRoute(route.GET!, request);
 
     assert.equal(result.status, 200);
-    const body = result.json as {
-      whatsapp: {
-        connected: boolean;
-        lastError: string | null;
-      };
-    };
+    const body = result.json as ChannelSummaryResponse;
 
     assert.equal(body.whatsapp.connected, true);
+    assert.equal(body.whatsapp.configured, true);
+    assert.equal(body.whatsapp.linkState, "error");
     assert.equal(body.whatsapp.lastError, "connection timeout");
+    assert.equal(body.whatsapp.detailRoute, "/api/channels/whatsapp");
   });
 });
 
