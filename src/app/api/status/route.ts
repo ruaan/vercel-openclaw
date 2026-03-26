@@ -140,6 +140,7 @@ export async function GET(request: Request): Promise<Response> {
         runtimeAssetSha256: responseMeta.runtimeAssetSha256,
         attestation: restoreAttestation,
         plan: restorePlan,
+        oracle: responseMeta.restoreOracle,
       },
       lifecycle: {
         lastRestoreMetrics: responseMeta.lastRestoreMetrics ?? null,

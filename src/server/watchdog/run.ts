@@ -12,13 +12,18 @@ import {
   CRON_NEXT_WAKE_KEY,
   ensureSandboxReady,
   isBusyStatus,
+  prepareRestoreTarget,
   probeGatewayReady,
   reconcileSandboxHealth,
   reconcileStaleRunningStatus,
   type ProbeResult,
   type SandboxHealthResult,
 } from "@/server/sandbox/lifecycle";
-import { getInitializedMeta, getStore } from "@/server/store/store";
+import {
+  runRestoreOracleCycle,
+  type RestoreOracleCycleResult,
+} from "@/server/sandbox/restore-oracle";
+import { getInitializedMeta, getStore, mutateMeta } from "@/server/store/store";
 import type {
   CronRestoreOutcome,
   OperationContext,
@@ -55,6 +60,13 @@ export type WatchdogDeps = {
   writeReport: (report: WatchdogReport) => Promise<WatchdogReport>;
   getCronNextWakeMs: () => Promise<number | null>;
   clearCronNextWake: () => Promise<void>;
+  runRestoreOracle: (input: {
+    origin: string;
+    reason: string;
+    force?: boolean;
+    minIdleMs?: number;
+    op?: OperationContext;
+  }) => Promise<RestoreOracleCycleResult>;
   now: () => number;
 };
 
@@ -76,6 +88,14 @@ const defaultDeps: WatchdogDeps = {
   writeReport: writeWatchdogReport,
   getCronNextWakeMs: () => getStore().getValue<number>(CRON_NEXT_WAKE_KEY()),
   clearCronNextWake: () => getStore().deleteValue(CRON_NEXT_WAKE_KEY()),
+  runRestoreOracle: (input) =>
+    runRestoreOracleCycle(input, {
+      getMeta: getInitializedMeta,
+      mutate: mutateMeta,
+      probe: probeGatewayReady,
+      prepare: prepareRestoreTarget,
+      now: () => Date.now(),
+    }),
   now: () => Date.now(),
 };
 
@@ -217,7 +237,48 @@ export async function runSandboxWatchdog(
       if (probe.ready) {
         addCheck("probe", "pass", probeStartedAt, "Gateway probe returned the openclaw-app marker.");
         addCheck("reconcile", "skip", deps.now(), "Probe passed; no repair scheduled.");
-        status = failingRequirementIds.length > 0 ? "failed" : "ok";
+
+        // Restore oracle: attempt to seal a fresh restore target when idle
+        const restorePrepareStartedAt = deps.now();
+        try {
+          const oracle = await deps.runRestoreOracle({
+            origin: getPublicOrigin(options.request),
+            reason: "watchdog:restore-prepare",
+          });
+
+          if (oracle.executed && oracle.prepare?.ok) {
+            triggeredRepair = true;
+            addCheck(
+              "restore.prepare",
+              "pass",
+              restorePrepareStartedAt,
+              oracle.prepare.snapshotId
+                ? `Prepared fresh restore target ${oracle.prepare.snapshotId}.`
+                : "Prepared fresh restore target.",
+            );
+            meta = await deps.getMeta();
+            status = failingRequirementIds.length > 0 ? "failed" : "repairing";
+          } else if (oracle.executed) {
+            const message =
+              oracle.prepare?.actions.find((a) => a.status === "failed")?.message ??
+              "Restore prepare failed.";
+            addCheck("restore.prepare", "fail", restorePrepareStartedAt, message);
+            lastError = message;
+            status = "failed";
+          } else {
+            const message =
+              oracle.blockedReason === "already-ready"
+                ? "Restore target already reusable."
+                : `Skipped: ${oracle.blockedReason ?? "unknown"}.`;
+            addCheck("restore.prepare", "skip", restorePrepareStartedAt, message);
+            status = failingRequirementIds.length > 0 ? "failed" : "ok";
+          }
+        } catch (oracleError) {
+          const errMsg = oracleError instanceof Error ? oracleError.message : String(oracleError);
+          addCheck("restore.prepare", "fail", restorePrepareStartedAt, `Oracle error: ${errMsg}`);
+          lastError = errMsg;
+          status = "failed";
+        }
       } else {
         lastError =
           probe.error ??

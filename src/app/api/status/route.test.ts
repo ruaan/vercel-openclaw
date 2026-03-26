@@ -24,6 +24,7 @@ import {
   mutateMeta,
 } from "@/server/store/store";
 import type { RestoreTargetAttestation } from "@/shared/launch-verification";
+import type { RestoreOracleState } from "@/shared/types";
 import {
   callRoute,
   buildPostRequest,
@@ -710,5 +711,66 @@ test("GET /api/status: restoreTarget.attestation for dirty restore target (runti
     assert.equal(att.restorePreparedStatus, "dirty");
     assert.equal(att.restorePreparedReason, "dynamic-config-changed");
     assert.equal(att.restorePreparedAt, 123);
+  });
+});
+
+// ===========================================================================
+// GET /api/status — restore oracle state
+// ===========================================================================
+
+test("GET /api/status: restoreTarget.oracle present with default idle state", async () => {
+  await withTestEnv(async () => {
+    const route = getStatusRoute();
+    const request = buildAuthGetRequest("/api/status");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as {
+      restoreTarget: {
+        oracle: RestoreOracleState;
+      };
+    };
+
+    assert.ok(body.restoreTarget.oracle, "should include restoreTarget.oracle");
+    const oracle = body.restoreTarget.oracle;
+    assert.equal(oracle.status, "idle");
+    assert.equal(oracle.pendingReason, null);
+    assert.equal(oracle.lastEvaluatedAt, null);
+    assert.equal(oracle.lastStartedAt, null);
+    assert.equal(oracle.lastCompletedAt, null);
+    assert.equal(oracle.lastBlockedReason, null);
+    assert.equal(oracle.lastError, null);
+    assert.equal(oracle.consecutiveFailures, 0);
+    assert.equal(oracle.lastResult, null);
+  });
+});
+
+test("GET /api/status: restoreTarget.oracle reflects persisted oracle state", async () => {
+  await withTestEnv(async () => {
+    await mutateMeta((meta) => {
+      meta.restoreOracle.status = "blocked";
+      meta.restoreOracle.pendingReason = "dynamic-config-changed";
+      meta.restoreOracle.lastEvaluatedAt = 1000;
+      meta.restoreOracle.lastBlockedReason = "Sandbox was active 42000ms ago; need at least 300000ms of idle time.";
+      meta.restoreOracle.lastResult = "blocked";
+    });
+
+    const route = getStatusRoute();
+    const request = buildAuthGetRequest("/api/status");
+    const result = await callRoute(route.GET!, request);
+
+    assert.equal(result.status, 200);
+    const body = result.json as {
+      restoreTarget: {
+        oracle: RestoreOracleState;
+      };
+    };
+
+    const oracle = body.restoreTarget.oracle;
+    assert.equal(oracle.status, "blocked");
+    assert.equal(oracle.pendingReason, "dynamic-config-changed");
+    assert.equal(oracle.lastEvaluatedAt, 1000);
+    assert.ok(oracle.lastBlockedReason?.includes("42000ms ago"));
+    assert.equal(oracle.lastResult, "blocked");
   });
 });

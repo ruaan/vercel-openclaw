@@ -963,6 +963,13 @@ export async function ensureRunningSandboxDynamicConfigFresh(input: {
       next.restorePreparedStatus = "dirty";
       next.restorePreparedReason = "dynamic-config-changed";
     }
+
+    // Move oracle to pending unless it is mid-cycle.
+    if (next.restoreOracle.status !== "running") {
+      next.restoreOracle.status = "pending";
+    }
+    next.restoreOracle.pendingReason = "dynamic-config-changed";
+    next.restoreOracle.lastBlockedReason = null;
   });
 
   logInfo("sandbox.config_reconcile.checkpoint_verified", {
@@ -989,6 +996,13 @@ export async function markRestoreTargetDirty(input: {
   return mutateMeta((next) => {
     next.restorePreparedStatus = "dirty";
     next.restorePreparedReason = input.reason;
+
+    // Move oracle to pending unless it is mid-cycle.
+    if (next.restoreOracle.status !== "running") {
+      next.restoreOracle.status = "pending";
+    }
+    next.restoreOracle.pendingReason = input.reason;
+    next.restoreOracle.lastBlockedReason = null;
   });
 }
 
@@ -2923,6 +2937,13 @@ async function restoreSandboxFromSnapshot(
             m.restorePreparedStatus = "dirty";
             m.restorePreparedReason = "static-assets-changed";
           }
+
+          // Move oracle to pending unless it is mid-cycle.
+          if (m.restoreOracle.status !== "running") {
+            m.restoreOracle.status = "pending";
+          }
+          m.restoreOracle.pendingReason = "static-assets-changed";
+          m.restoreOracle.lastBlockedReason = null;
         });
         logInfo("sandbox.restore.background_asset_sync_complete", {
           assetSha256: result.assetSha256,
@@ -3093,6 +3114,16 @@ function recordSnapshotMetadata(
   meta.restorePreparedStatus = "ready";
   meta.restorePreparedReason = "prepared";
   meta.restorePreparedAt = timestamp;
+
+  // Seal oracle state — the snapshot is verified-ready.
+  meta.restoreOracle.status = "ready";
+  meta.restoreOracle.pendingReason = null;
+  meta.restoreOracle.lastCompletedAt = timestamp;
+  meta.restoreOracle.lastBlockedReason = null;
+  meta.restoreOracle.lastError = null;
+  meta.restoreOracle.consecutiveFailures = 0;
+  meta.restoreOracle.lastResult = "prepared";
+
   meta.snapshotHistory = [
     {
       id: randomUUID(),
@@ -3201,6 +3232,19 @@ function clearSandboxRuntimeStateForReset(meta: SingleMeta): void {
   meta.openclawVersion = null;
   meta.lastError = null;
   meta.lifecycleAttemptId = null;
+
+  // Reset oracle to default idle state.
+  meta.restoreOracle = {
+    status: "idle",
+    pendingReason: null,
+    lastEvaluatedAt: null,
+    lastStartedAt: null,
+    lastCompletedAt: null,
+    lastBlockedReason: null,
+    lastError: null,
+    consecutiveFailures: 0,
+    lastResult: null,
+  };
 }
 
 // ---------------------------------------------------------------------------

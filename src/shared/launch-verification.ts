@@ -87,7 +87,8 @@ export type LaunchVerificationPhaseId =
   | "queuePing"
   | "ensureRunning"
   | "chatCompletions"
-  | "wakeFromSleep";
+  | "wakeFromSleep"
+  | "restorePrepared";
 
 export type LaunchVerificationPhaseStatus = "pass" | "fail" | "skip" | "running";
 

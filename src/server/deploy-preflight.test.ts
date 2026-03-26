@@ -1173,7 +1173,7 @@ test("getLaunchVerifyBlocking returns blocking with skip phase IDs when checks f
       assert.ok(result.errorMessage.length > 0, "error message should be non-empty");
       assert.deepEqual(
         [...result.skipPhaseIds],
-        ["queuePing", "ensureRunning", "chatCompletions", "wakeFromSleep"],
+        ["queuePing", "ensureRunning", "chatCompletions", "wakeFromSleep", "restorePrepared"],
         "skip phase IDs should match the canonical set",
       );
       // Error message should include at least one failing check ID

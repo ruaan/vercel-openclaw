@@ -19,6 +19,7 @@ import {
   getSandboxDomain,
   touchRunningSandbox,
   markSandboxUnavailable,
+  resetSandbox,
   CRON_JOBS_KEY,
 } from "@/server/sandbox/lifecycle";
 import {
@@ -4076,6 +4077,11 @@ test("stopSandbox stamps snapshotDynamicConfigHash and snapshotAssetSha256", asy
     assert.equal(meta.restorePreparedStatus, "ready", "Snapshot creation should set status to ready");
     assert.equal(meta.restorePreparedReason, "prepared", "Snapshot creation should set reason to prepared");
     assert.ok(meta.restorePreparedAt, "Snapshot creation should set preparedAt timestamp");
+    // Oracle should be sealed ready after snapshot.
+    assert.equal(meta.restoreOracle.status, "ready", "Oracle should be ready after snapshot");
+    assert.equal(meta.restoreOracle.lastResult, "prepared", "Oracle lastResult should be prepared");
+    assert.equal(meta.restoreOracle.pendingReason, null, "Oracle pendingReason should clear after snapshot");
+    assert.equal(meta.restoreOracle.consecutiveFailures, 0, "Oracle failures should reset after snapshot");
   });
 });
 
@@ -4092,6 +4098,9 @@ test("markRestoreTargetDirty sets status to dirty", async () => {
 
     assert.equal(meta.restorePreparedStatus, "dirty");
     assert.equal(meta.restorePreparedReason, "dynamic-config-changed");
+    assert.equal(meta.restoreOracle.status, "pending", "Oracle should move to pending on dirty");
+    assert.equal(meta.restoreOracle.pendingReason, "dynamic-config-changed");
+    assert.equal(meta.restoreOracle.lastBlockedReason, null, "Blocked reason should clear on dirty");
   });
 });
 
@@ -4137,6 +4146,52 @@ test("isPreparedRestoreReusable returns true only when all hashes match and stat
     false,
     "Should not be reusable when config hash differs",
   );
+});
+
+test("resetSandbox clears restoreOracle to idle defaults", async () => {
+  await withHarness(async (h) => {
+    await h.driveToRunning();
+
+    // Stop to get a sealed oracle
+    await stopSandbox();
+    let meta = await getInitializedMeta();
+    assert.equal(meta.restoreOracle.status, "ready");
+
+    // Dirty it to get a non-idle oracle
+    meta = await markRestoreTargetDirty({ reason: "dynamic-config-changed" });
+    assert.equal(meta.restoreOracle.status, "pending");
+
+    // Reset should restore idle defaults
+    meta = await resetSandbox({ origin: "https://app.example.com", reason: "test-reset" });
+    assert.equal(meta.restoreOracle.status, "idle", "Oracle status should be idle after reset");
+    assert.equal(meta.restoreOracle.pendingReason, null, "Oracle pendingReason should be null after reset");
+    assert.equal(meta.restoreOracle.lastEvaluatedAt, null, "Oracle timestamps should clear after reset");
+    assert.equal(meta.restoreOracle.lastStartedAt, null);
+    assert.equal(meta.restoreOracle.lastCompletedAt, null);
+    assert.equal(meta.restoreOracle.lastBlockedReason, null);
+    assert.equal(meta.restoreOracle.lastError, null);
+    assert.equal(meta.restoreOracle.consecutiveFailures, 0);
+    assert.equal(meta.restoreOracle.lastResult, null);
+  });
+});
+
+test("markRestoreTargetDirty preserves running oracle status", async () => {
+  await withHarness(async (h) => {
+    await h.driveToRunning();
+
+    // Manually set oracle to running to simulate mid-cycle
+    const { mutateMeta } = await import("@/server/store/store");
+    await mutateMeta((m) => {
+      m.restoreOracle.status = "running";
+      m.restoreOracle.lastStartedAt = Date.now();
+    });
+
+    const meta = await markRestoreTargetDirty({ reason: "static-assets-changed" });
+
+    assert.equal(meta.restorePreparedStatus, "dirty");
+    assert.equal(meta.restoreOracle.status, "running", "Should not overwrite running oracle status");
+    assert.equal(meta.restoreOracle.pendingReason, "static-assets-changed", "Should still set pending reason");
+  });
 });
 
 // ---------------------------------------------------------------------------

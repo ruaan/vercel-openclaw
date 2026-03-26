@@ -212,6 +212,7 @@ test("launch-verify POST: preflight failure skips subsequent phases", async () =
       "ensureRunning",
       "chatCompletions",
       "wakeFromSleep",
+      "restorePrepared",
     ]);
 
     assert.equal(body.phases[0].status, "fail");
@@ -267,7 +268,7 @@ test("launch-verify POST (NDJSON): preflight failure skips subsequent phases", a
     assert.equal(preflightPhase.status, "fail", "preflight should fail");
 
     // All runtime phases should be skipped
-    const skippedPhaseIds = ["queuePing", "ensureRunning", "chatCompletions", "wakeFromSleep"] as const;
+    const skippedPhaseIds = ["queuePing", "ensureRunning", "chatCompletions", "wakeFromSleep", "restorePrepared"] as const;
     for (const id of skippedPhaseIds) {
       const phase = finalPhases.get(id);
       assert.ok(phase, `expected ${id} phase event`);
@@ -298,6 +299,7 @@ test("launch-verify POST (NDJSON): preflight failure skips subsequent phases", a
       "ensureRunning",
       "chatCompletions",
       "wakeFromSleep",
+      "restorePrepared",
     ]);
     assert.equal(resultEvent.payload.phases[0].status, "fail");
     for (let i = 1; i < resultEvent.payload.phases.length; i++) {

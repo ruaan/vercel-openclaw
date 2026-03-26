@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import type { RestoreOracleCycleResult } from "@/server/sandbox/restore-oracle";
 import type { SingleMeta } from "@/shared/types";
 import type { WatchdogReport } from "@/shared/watchdog";
 import { runSandboxWatchdog } from "@/server/watchdog/run";
+
+/** Build a partial oracle result — only the fields the watchdog actually reads. */
+function oracleResult(partial: Record<string, unknown>): RestoreOracleCycleResult {
+  return partial as unknown as RestoreOracleCycleResult;
+}
 
 const PREVIOUS: WatchdogReport = {
   deploymentId: "dpl_test",
@@ -45,6 +51,15 @@ function makeDeps(overrides: Partial<Parameters<typeof runSandboxWatchdog>[1]> =
     writeReport: async (next: WatchdogReport) => next,
     getCronNextWakeMs: async () => null as number | null,
     clearCronNextWake: async () => {},
+    runRestoreOracle: async () => oracleResult({
+      executed: false,
+      blockedReason: "already-ready",
+      idleMs: null,
+      minIdleMs: 300_000,
+      attestation: { reusable: true, needsPrepare: false, reasons: [] },
+      plan: { schemaVersion: 1, status: "ready", blocking: false, reasons: [], actions: [] },
+      prepare: null,
+    }),
     now: (() => {
       let current = 0;
       return () => (current += 10);
@@ -424,4 +439,142 @@ test("probe-failed recovery passes schedule callback to reconcile", async () => 
 
   assert.equal(receivedSchedule, fakeSchedule, "schedule callback must be forwarded to reconcile");
   assert.equal(report.status, "repairing");
+});
+
+// ===========================================================================
+// Restore oracle integration (restore.prepare check)
+// ===========================================================================
+
+test("restore.prepare: skip when oracle reports already-ready", async () => {
+  const report = await runSandboxWatchdog(
+    { request: new Request("https://app.test/api/cron/watchdog") },
+    makeDeps({
+      runRestoreOracle: async () => oracleResult({
+        executed: false,
+        blockedReason: "already-ready",
+        idleMs: 600_000,
+        minIdleMs: 300_000,
+        attestation: { reusable: true, needsPrepare: false, reasons: [] },
+        plan: { schemaVersion: 1, status: "ready", blocking: false, reasons: [], actions: [] },
+        prepare: null,
+      }),
+    }),
+  );
+
+  assert.equal(report.status, "ok");
+  const check = findCheck(report, "restore.prepare");
+  assert.ok(check, "should have restore.prepare check");
+  assert.equal(check.status, "skip");
+  assert.ok(check.message.includes("already reusable"));
+});
+
+test("restore.prepare: skip when sandbox recently active", async () => {
+  const report = await runSandboxWatchdog(
+    { request: new Request("https://app.test/api/cron/watchdog") },
+    makeDeps({
+      runRestoreOracle: async () => oracleResult({
+        executed: false,
+        blockedReason: "sandbox-recently-active",
+        idleMs: 60_000,
+        minIdleMs: 300_000,
+        attestation: { reusable: false, needsPrepare: true, reasons: ["snapshot-config-stale"] },
+        plan: { schemaVersion: 1, status: "needs-prepare", blocking: true, reasons: [], actions: [] },
+        prepare: null,
+      }),
+    }),
+  );
+
+  assert.equal(report.status, "ok");
+  const check = findCheck(report, "restore.prepare");
+  assert.ok(check, "should have restore.prepare check");
+  assert.equal(check.status, "skip");
+  assert.ok(check.message.includes("sandbox-recently-active"));
+});
+
+test("restore.prepare: pass when oracle executes and prepares successfully", async () => {
+  const report = await runSandboxWatchdog(
+    { request: new Request("https://app.test/api/cron/watchdog") },
+    makeDeps({
+      runRestoreOracle: async () => oracleResult({
+        executed: true,
+        blockedReason: null,
+        idleMs: 600_000,
+        minIdleMs: 300_000,
+        attestation: { reusable: false, needsPrepare: true, reasons: ["snapshot-config-stale"] },
+        plan: { schemaVersion: 1, status: "needs-prepare", blocking: true, reasons: [], actions: [] },
+        prepare: {
+          ok: true,
+          destructive: true,
+          state: "ready",
+          reason: "prepared",
+          snapshotId: "snap_fresh",
+          snapshotDynamicConfigHash: "hash",
+          runtimeDynamicConfigHash: "hash",
+          snapshotAssetSha256: "sha",
+          runtimeAssetSha256: "sha",
+          preparedAt: Date.now(),
+          actions: [],
+        },
+      }),
+    }),
+  );
+
+  assert.equal(report.status, "repairing");
+  assert.equal(report.triggeredRepair, true);
+  const check = findCheck(report, "restore.prepare");
+  assert.ok(check, "should have restore.prepare check");
+  assert.equal(check.status, "pass");
+  assert.ok(check.message.includes("snap_fresh"));
+});
+
+test("restore.prepare: fail when oracle executes but prepare fails", async () => {
+  const report = await runSandboxWatchdog(
+    { request: new Request("https://app.test/api/cron/watchdog") },
+    makeDeps({
+      runRestoreOracle: async () => oracleResult({
+        executed: true,
+        blockedReason: null,
+        idleMs: 600_000,
+        minIdleMs: 300_000,
+        attestation: { reusable: false, needsPrepare: true, reasons: ["snapshot-config-stale"] },
+        plan: { schemaVersion: 1, status: "needs-prepare", blocking: true, reasons: [], actions: [] },
+        prepare: {
+          ok: false,
+          destructive: true,
+          state: "failed",
+          reason: "prepare-failed",
+          snapshotId: null,
+          snapshotDynamicConfigHash: null,
+          runtimeDynamicConfigHash: null,
+          snapshotAssetSha256: null,
+          runtimeAssetSha256: null,
+          preparedAt: null,
+          actions: [{ id: "snapshot", status: "failed", message: "Snapshot timed out." }],
+        },
+      }),
+    }),
+  );
+
+  assert.equal(report.status, "failed");
+  const check = findCheck(report, "restore.prepare");
+  assert.ok(check, "should have restore.prepare check");
+  assert.equal(check.status, "fail");
+  assert.ok(check.message.includes("Snapshot timed out"));
+});
+
+test("restore.prepare: fail when oracle throws", async () => {
+  const report = await runSandboxWatchdog(
+    { request: new Request("https://app.test/api/cron/watchdog") },
+    makeDeps({
+      runRestoreOracle: async () => {
+        throw new Error("Sandbox API unreachable");
+      },
+    }),
+  );
+
+  assert.equal(report.status, "failed");
+  const check = findCheck(report, "restore.prepare");
+  assert.ok(check, "should have restore.prepare check");
+  assert.equal(check.status, "fail");
+  assert.ok(check.message.includes("Sandbox API unreachable"));
 });

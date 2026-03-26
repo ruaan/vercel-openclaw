@@ -345,6 +345,7 @@ export const LAUNCH_VERIFY_SKIP_PHASE_IDS = [
   "ensureRunning",
   "chatCompletions",
   "wakeFromSleep",
+  "restorePrepared",
 ] as const;
 
 export type LaunchVerifySkipPhaseId = (typeof LAUNCH_VERIFY_SKIP_PHASE_IDS)[number];

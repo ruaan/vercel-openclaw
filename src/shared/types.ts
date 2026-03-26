@@ -240,6 +240,36 @@ export type RestorePreparedReason =
   | "prepare-failed"
   | "prepared";
 
+// ---------------------------------------------------------------------------
+// Restore oracle types
+// ---------------------------------------------------------------------------
+
+export type RestoreOracleStatus =
+  | "idle"
+  | "pending"
+  | "running"
+  | "blocked"
+  | "failed"
+  | "ready";
+
+export type RestoreOracleLastResult =
+  | "already-ready"
+  | "prepared"
+  | "blocked"
+  | "failed";
+
+export type RestoreOracleState = {
+  status: RestoreOracleStatus;
+  pendingReason: RestorePreparedReason | null;
+  lastEvaluatedAt: number | null;
+  lastStartedAt: number | null;
+  lastCompletedAt: number | null;
+  lastBlockedReason: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+  lastResult: RestoreOracleLastResult | null;
+};
+
 export type CronRestoreOutcome =
   | "no-store-jobs"
   | "already-present"
@@ -360,6 +390,8 @@ export type SingleMeta = {
   /** Unique ID for the current lifecycle attempt (create/restore). Used for
    *  orphan detection if the Vercel Sandbox API later supports tags/list. */
   lifecycleAttemptId?: string | null;
+  /** Persistent state for the restore oracle autopilot loop. */
+  restoreOracle: RestoreOracleState;
 };
 
 export const CURRENT_SCHEMA_VERSION = 3;
@@ -418,6 +450,17 @@ export function createDefaultMeta(
     snapshotHistory: [],
     lastRestoreMetrics: null,
     restoreHistory: [],
+    restoreOracle: {
+      status: "idle",
+      pendingReason: null,
+      lastEvaluatedAt: null,
+      lastStartedAt: null,
+      lastCompletedAt: null,
+      lastBlockedReason: null,
+      lastError: null,
+      consecutiveFailures: 0,
+      lastResult: null,
+    },
   };
 }
 
@@ -608,6 +651,9 @@ export function ensureMetaShape(
       typeof (raw as Record<string, unknown>).breakerOpenUntil === "number"
         ? (raw as Record<string, unknown>).breakerOpenUntil as number
         : null,
+    restoreOracle: ensureRestoreOracleState(
+      (raw as Record<string, unknown>).restoreOracle,
+    ),
   };
 }
 
@@ -752,6 +798,66 @@ function isRestorePreparedReason(value: unknown): value is RestorePreparedReason
     typeof value === "string" &&
     RESTORE_PREPARED_REASONS.includes(value as RestorePreparedReason)
   );
+}
+
+const RESTORE_ORACLE_STATUSES: readonly RestoreOracleStatus[] = [
+  "idle",
+  "pending",
+  "running",
+  "blocked",
+  "failed",
+  "ready",
+];
+
+function isRestoreOracleStatus(value: unknown): value is RestoreOracleStatus {
+  return (
+    typeof value === "string" &&
+    RESTORE_ORACLE_STATUSES.includes(value as RestoreOracleStatus)
+  );
+}
+
+const RESTORE_ORACLE_LAST_RESULTS: readonly RestoreOracleLastResult[] = [
+  "already-ready",
+  "prepared",
+  "blocked",
+  "failed",
+];
+
+function isRestoreOracleLastResult(value: unknown): value is RestoreOracleLastResult {
+  return (
+    typeof value === "string" &&
+    RESTORE_ORACLE_LAST_RESULTS.includes(value as RestoreOracleLastResult)
+  );
+}
+
+export function ensureRestoreOracleState(value: unknown): RestoreOracleState {
+  const raw =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+
+  return {
+    status: isRestoreOracleStatus(raw.status) ? raw.status : "idle",
+    pendingReason: isRestorePreparedReason(raw.pendingReason)
+      ? raw.pendingReason
+      : null,
+    lastEvaluatedAt:
+      typeof raw.lastEvaluatedAt === "number" ? raw.lastEvaluatedAt : null,
+    lastStartedAt:
+      typeof raw.lastStartedAt === "number" ? raw.lastStartedAt : null,
+    lastCompletedAt:
+      typeof raw.lastCompletedAt === "number" ? raw.lastCompletedAt : null,
+    lastBlockedReason:
+      typeof raw.lastBlockedReason === "string" ? raw.lastBlockedReason : null,
+    lastError: typeof raw.lastError === "string" ? raw.lastError : null,
+    consecutiveFailures:
+      typeof raw.consecutiveFailures === "number"
+        ? raw.consecutiveFailures
+        : 0,
+    lastResult: isRestoreOracleLastResult(raw.lastResult)
+      ? raw.lastResult
+      : null,
+  };
 }
 
 function isCronRestoreOutcome(value: unknown): value is CronRestoreOutcome {
