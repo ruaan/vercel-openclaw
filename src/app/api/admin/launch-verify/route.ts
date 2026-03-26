@@ -41,16 +41,17 @@ import {
   readChannelReadiness,
   writeChannelReadiness,
 } from "@/server/launch-verify/state";
-import type {
-  ChannelReadiness,
-  LaunchVerificationDiagnostics,
-  LaunchVerificationPayload,
-  LaunchVerificationPhase,
-  LaunchVerificationPhaseId,
-  LaunchVerificationRuntime,
-  LaunchVerificationSandboxHealth,
-  LaunchVerificationStreamEvent,
-  LaunchVerifyCompletionLog,
+import {
+  resolveRestorePreparedPhase,
+  type ChannelReadiness,
+  type LaunchVerificationDiagnostics,
+  type LaunchVerificationPayload,
+  type LaunchVerificationPhase,
+  type LaunchVerificationPhaseId,
+  type LaunchVerificationRuntime,
+  type LaunchVerificationSandboxHealth,
+  type LaunchVerificationStreamEvent,
+  type LaunchVerifyCompletionLog,
 } from "@/shared/launch-verification";
 
 const ENSURE_POLL_MS = 2_000;
@@ -160,6 +161,66 @@ function buildSandboxHealth(input: {
       ? "error"
       : (input.configReconcile?.reason ?? "skipped"),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Shared restore-prepared verification — used by both JSON and NDJSON paths
+// ---------------------------------------------------------------------------
+
+async function runRestorePreparedVerification(input: {
+  origin: string;
+  reason: string;
+}): Promise<string> {
+  const oracle = await runRestoreOracleCycle(
+    {
+      origin: input.origin,
+      reason: input.reason,
+      force: true,
+      minIdleMs: 0,
+    },
+    {
+      getMeta: getInitializedMeta,
+      mutate: mutateMeta,
+      probe: probeGatewayReady,
+      prepare: prepareRestoreTarget,
+      now: () => Date.now(),
+    },
+  );
+
+  if (oracle.attestation.reusable) {
+    logInfo("launch_verify.restore_prepared_resolution", {
+      outcome: "already-reusable",
+    });
+    return "Restore target already reusable.";
+  }
+
+  const finalMeta = await getInitializedMeta();
+  const finalAttestation = buildRestoreTargetAttestation(finalMeta);
+  const resolution = resolveRestorePreparedPhase({
+    blockedReason: oracle.blockedReason,
+    initialAttestation: oracle.attestation,
+    finalAttestation,
+    prepare: oracle.prepare
+      ? {
+          ok: oracle.prepare.ok,
+          snapshotId: oracle.prepare.snapshotId,
+          actions: oracle.prepare.actions,
+        }
+      : null,
+  });
+
+  logInfo("launch_verify.restore_prepared_resolution", {
+    outcome: resolution.ok ? "sealed" : "not-reusable",
+    finalReusable: finalAttestation.reusable,
+    prepareOk: oracle.prepare?.ok ?? null,
+    message: resolution.message,
+  });
+
+  if (!resolution.ok) {
+    throw new Error(resolution.message);
+  }
+
+  return resolution.message;
 }
 
 // ---------------------------------------------------------------------------
@@ -523,37 +584,12 @@ function buildStreamingResponse(
       // Restore prepare: seal a fresh restore target in destructive mode
       if (mode === "destructive") {
         emitRunning("restorePrepared");
-        const restorePreparedPhase = await runPhase("restorePrepared", async () => {
-          const oracle = await runRestoreOracleCycle(
-            {
-              origin,
-              reason: "launch-verify:restore-prepare",
-              force: true,
-              minIdleMs: 0,
-            },
-            {
-              getMeta: getInitializedMeta,
-              mutate: mutateMeta,
-              probe: probeGatewayReady,
-              prepare: prepareRestoreTarget,
-              now: () => Date.now(),
-            },
-          );
-
-          if (oracle.attestation.reusable) {
-            return "Restore target already reusable.";
-          }
-
-          if (oracle.prepare?.ok) {
-            return "Prepared restore target sealed and verified.";
-          }
-
-          throw new Error(
-            `Restore target not reusable: ${
-              oracle.blockedReason ?? oracle.attestation.reasons.join(", ")
-            }`,
-          );
-        });
+        const restorePreparedPhase = await runPhase("restorePrepared", () =>
+          runRestorePreparedVerification({
+            origin,
+            reason: "launch-verify:restore-prepare",
+          }),
+        );
         phases.push(restorePreparedPhase);
         emitPhase(restorePreparedPhase, true);
       } else {
@@ -733,37 +769,12 @@ async function buildJsonResponse(
 
   // Restore prepare: seal a fresh restore target in destructive mode
   if (mode === "destructive") {
-    const restorePreparedPhase = await runPhase("restorePrepared", async () => {
-      const oracle = await runRestoreOracleCycle(
-        {
-          origin,
-          reason: "launch-verify:restore-prepare",
-          force: true,
-          minIdleMs: 0,
-        },
-        {
-          getMeta: getInitializedMeta,
-          mutate: mutateMeta,
-          probe: probeGatewayReady,
-          prepare: prepareRestoreTarget,
-          now: () => Date.now(),
-        },
-      );
-
-      if (oracle.attestation.reusable) {
-        return "Restore target already reusable.";
-      }
-
-      if (oracle.prepare?.ok) {
-        return "Prepared restore target sealed and verified.";
-      }
-
-      throw new Error(
-        `Restore target not reusable: ${
-          oracle.blockedReason ?? oracle.attestation.reasons.join(", ")
-        }`,
-      );
-    });
+    const restorePreparedPhase = await runPhase("restorePrepared", () =>
+      runRestorePreparedVerification({
+        origin,
+        reason: "launch-verify:restore-prepare",
+      }),
+    );
     phases.push(restorePreparedPhase);
   } else {
     phases.push(skipPhase("restorePrepared", "Not run in safe mode."));

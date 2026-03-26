@@ -221,6 +221,76 @@ export type LaunchVerifyCompletionLog = {
   restorePlanActionIds: string[];
 };
 
+// ---------------------------------------------------------------------------
+// Restore seal resolution — pure function for restorePrepared phase verdict
+// ---------------------------------------------------------------------------
+
+export type RestorePreparedPhaseResolutionInput = {
+  blockedReason: string | null;
+  initialAttestation: RestoreTargetAttestation;
+  finalAttestation: RestoreTargetAttestation;
+  prepare: {
+    ok: boolean;
+    snapshotId: string | null;
+    actions: Array<{
+      status: "completed" | "skipped" | "failed";
+      message: string;
+    }>;
+  } | null;
+};
+
+export type RestorePreparedPhaseResolution = {
+  ok: boolean;
+  message: string;
+};
+
+export function resolveRestorePreparedPhase(
+  input: RestorePreparedPhaseResolutionInput,
+): RestorePreparedPhaseResolution {
+  if (input.initialAttestation.reusable) {
+    return {
+      ok: true,
+      message: "Restore target already reusable.",
+    };
+  }
+
+  if (input.finalAttestation.reusable) {
+    return {
+      ok: true,
+      message:
+        input.prepare?.ok && input.prepare.snapshotId
+          ? `Prepared restore target sealed and verified (${input.prepare.snapshotId}).`
+          : "Prepared restore target sealed and verified.",
+    };
+  }
+
+  const failedActionMessage =
+    input.prepare?.actions.find((action) => action.status === "failed")
+      ?.message ?? null;
+
+  const finalReasons =
+    input.finalAttestation.reasons.length > 0
+      ? input.finalAttestation.reasons.join(", ")
+      : null;
+
+  const initialReasons =
+    input.initialAttestation.reasons.length > 0
+      ? input.initialAttestation.reasons.join(", ")
+      : null;
+
+  const failureReason =
+    failedActionMessage ??
+    input.blockedReason ??
+    finalReasons ??
+    initialReasons ??
+    "unknown";
+
+  return {
+    ok: false,
+    message: `Restore target not reusable: ${failureReason}`,
+  };
+}
+
 const REQUIRED_PHASE_IDS: LaunchVerificationPhaseId[] = [
   "preflight",
   "queuePing",
