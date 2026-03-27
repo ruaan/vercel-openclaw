@@ -196,7 +196,7 @@ if (contractEnvNames.size === 0) {
 }
 
 const envDocFiles = {
-  "README.md": path.join(rootDir, "README.md"),
+  "docs/environment-variables.md": path.join(rootDir, "docs", "environment-variables.md"),
   "CLAUDE.md": path.join(rootDir, "CLAUDE.md"),
   "CONTRIBUTING.md": path.join(rootDir, "CONTRIBUTING.md"),
   ".env.example": path.join(rootDir, ".env.example"),
@@ -228,12 +228,11 @@ for (const envName of contractEnvNames) {
 // the docs/env contract guard itself.
 // ---------------------------------------------------------------------------
 
-const wordingDocFiles = ["README.md", "CLAUDE.md", "CONTRIBUTING.md"];
 const wordingRequirements = [
   {
     snippet: "Telegram intentionally does not include the bypass query parameter",
     label: "Telegram bypass behavior",
-    files: wordingDocFiles,
+    files: ["docs/deployment-protection.md", "CLAUDE.md", "CONTRIBUTING.md"],
   },
   {
     snippet: "deployment contract **warns** — it does not fail",
@@ -243,17 +242,17 @@ const wordingRequirements = [
   {
     snippet: "warningChannelIds` is deprecated",
     label: "launch verification deprecated diagnostics field",
-    files: ["README.md", "CONTRIBUTING.md", "CLAUDE.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md", "CLAUDE.md"],
   },
   {
     snippet: "verify.step.start",
     label: "verify.mjs event contract",
-    files: ["README.md", "CONTRIBUTING.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md"],
   },
   {
     snippet: "`0` = pass",
     label: "check-deploy-readiness exit codes",
-    files: ["README.md", "CONTRIBUTING.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md"],
   },
 ];
 
@@ -316,43 +315,43 @@ for (const { file, routes } of routeDocRequirements) {
 
 const docsSurfaceRequirements = [
   {
-    files: ["README.md", "CONTRIBUTING.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md"],
     snippet: "queue-consumers",
     label: "verify.mjs queue-consumers pre-step",
     optional: false,
   },
   {
-    files: ["README.md", "CONTRIBUTING.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md"],
     snippet: "bootstrapExposure",
     label: "check-deploy-readiness bootstrap exposure output",
     optional: false,
   },
   {
-    files: ["README.md", "CONTRIBUTING.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md"],
     snippet: "--protection-bypass",
     label: "check-deploy-readiness protection bypass flag",
     optional: false,
   },
   {
-    files: ["README.md", "CONTRIBUTING.md", "CLAUDE.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md", "CLAUDE.md"],
     snippet: "`GET /api/admin/launch-verify` returns",
     label: "launch-verify GET readiness surface",
     optional: false,
   },
   {
-    files: ["README.md", "CONTRIBUTING.md", "CLAUDE.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md", "CLAUDE.md"],
     snippet: "channelReadiness",
     label: "launch-verify extended response payload",
     optional: false,
   },
   {
-    files: ["README.md", "CONTRIBUTING.md", "CLAUDE.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md", "CLAUDE.md"],
     snippet: "ChannelReadiness",
     label: "launch-verify readiness type docs",
     optional: false,
   },
   {
-    files: ["README.md", "CONTRIBUTING.md", "CLAUDE.md"],
+    files: ["docs/api-reference.md", "CONTRIBUTING.md", "CLAUDE.md"],
     snippet: "terminal `result` event carries the same extended payload",
     label: "launch-verify NDJSON result payload docs",
     optional: false,

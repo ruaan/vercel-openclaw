@@ -300,5 +300,16 @@ Use this log for machine-readable postmortems. Use persisted `channelReadiness` 
 
 See `CLAUDE.md` for the complete route table and detailed system documentation.
 
+## Documentation structure
+
+| Document | Contents |
+| -------- | -------- |
+| `README.md` | Quick-start guide and deploy button |
+| `docs/environment-variables.md` | Full environment variable reference |
+| `docs/api-reference.md` | Machine-readable endpoints, payloads, automation contracts |
+| `docs/deployment-protection.md` | Bypass secrets, webhook URL behavior |
+| `CONTRIBUTING.md` | Architecture, routes, testing, development workflows |
+| `CLAUDE.md` | AI assistant instructions and system internals |
+
 See `SECURITY.md` for vulnerability reporting.
 See `CODE_OF_CONDUCT.md` for community participation standards.
