@@ -456,6 +456,7 @@ a[href]:focus-visible {
 
 .text-input:focus {
   border-color: var(--ring);
+  outline: none;
 }
 
 /* ────── Lists ────── */
