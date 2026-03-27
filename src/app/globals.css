@@ -1241,13 +1241,17 @@ a[href]:focus-visible {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--background);
+  overflow: hidden;
+  min-width: 0;
 }
 
 .channel-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .channel-card.channel-slack .channel-head h3 {
@@ -1344,11 +1348,14 @@ a[href]:focus-visible {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  min-width: 0;
 }
 
 .channel-wizard-step > .muted-copy {
   padding-top: 2px;
   text-wrap: balance;
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .channel-step-number {
