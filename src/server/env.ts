@@ -113,7 +113,8 @@ export function getOpenclawInstanceId(): string {
   return resolveOpenclawInstanceId(
     _instanceIdOverrideForTesting ??
       readInstanceIdOverrideFromGlobal() ??
-      process.env.OPENCLAW_INSTANCE_ID,
+      process.env.OPENCLAW_INSTANCE_ID ??
+      process.env.VERCEL_PROJECT_ID,
   );
 }
 

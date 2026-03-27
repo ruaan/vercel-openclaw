@@ -32,7 +32,9 @@ export function getDefaultOpenclawInstanceId(): string {
       globalThis as typeof globalThis & {
         [INSTANCE_ID_OVERRIDE_GLOBAL_KEY]?: string | null;
       }
-    )[INSTANCE_ID_OVERRIDE_GLOBAL_KEY] ?? process.env.OPENCLAW_INSTANCE_ID,
+    )[INSTANCE_ID_OVERRIDE_GLOBAL_KEY] ??
+      process.env.OPENCLAW_INSTANCE_ID ??
+      process.env.VERCEL_PROJECT_ID,
   );
 }
 

@@ -188,16 +188,18 @@ export function SnapshotsPanel({
         </div>
       </dl>
 
-      {/* Snapshot list */}
-      {loading && snapshots.length === 0 && (
-        <div className="snapshot-loading">
-          <div className="skeleton-line" />
-          <div className="skeleton-line" />
-        </div>
-      )}
-      {!loading && snapshots.length === 0 && (
-        <p className="empty-token">No snapshots in history yet.</p>
-      )}
+      {/* Snapshot list — fixed min-height avoids CLS when count changes */}
+      <div style={{ minHeight: 96 }}>
+        {loading && snapshots.length === 0 && (
+          <div className="snapshot-loading">
+            <div className="skeleton-line" />
+            <div className="skeleton-line" />
+          </div>
+        )}
+        {!loading && snapshots.length === 0 && (
+          <p className="empty-token">No snapshots in history yet.</p>
+        )}
+      </div>
 
       <ul className="token-list">
         {snapshots.map((snap) => {
