@@ -199,9 +199,9 @@ export async function POST(request: Request): Promise<Response> {
         if (extracted.kind === "message") {
           const result = await sendMessage(
             config.accessToken,
-            extracted.message.phoneNumberId,
+            config.phoneNumberId,
             extracted.message.from,
-            "Starting up… I'll respond in a moment.",
+            "Starting up… I will respond in a moment.",
           );
           bootMessageId = result.id;
           logInfo("channels.whatsapp_boot_message_sent", withOperationContext(op, {
