@@ -78,7 +78,7 @@ test("setup: returns 410 on Vercel deployment (VERCEL env set)", async () => {
     },
     async () => {
       const { GET } = await import("@/app/api/setup/route");
-      const res = await GET();
+      const res = await GET(new Request("http://localhost/api/setup"));
       assert.equal(res.status, 410, `Expected 410, got ${res.status}`);
       const body = (await res.json()) as { error: string };
       assert.equal(body.error, "SETUP_ENDPOINT_SEALED");
@@ -97,7 +97,7 @@ test("setup: returns 410 on Vercel deployment (VERCEL_ENV set)", async () => {
     },
     async () => {
       const { GET } = await import("@/app/api/setup/route");
-      const res = await GET();
+      const res = await GET(new Request("http://localhost/api/setup"));
       assert.equal(res.status, 410, `Expected 410, got ${res.status}`);
     },
   );
@@ -114,7 +114,7 @@ test("setup: returns 410 on Vercel deployment (VERCEL_URL set)", async () => {
     },
     async () => {
       const { GET } = await import("@/app/api/setup/route");
-      const res = await GET();
+      const res = await GET(new Request("http://localhost/api/setup"));
       assert.equal(res.status, 410, `Expected 410, got ${res.status}`);
       const body = (await res.json()) as { error: string; message: string };
       assert.equal(body.error, "SETUP_ENDPOINT_SEALED");
@@ -134,7 +134,7 @@ test("setup: never returns admin secret on Vercel even without ADMIN_SECRET env"
     },
     async () => {
       const { GET } = await import("@/app/api/setup/route");
-      const res = await GET();
+      const res = await GET(new Request("http://localhost/api/setup"));
       assert.equal(res.status, 410);
       const text = await res.text();
       // Ensure no 64-char hex secret leaked
@@ -154,7 +154,7 @@ test("setup: local dev with explicit ADMIN_SECRET returns source=env (no secret 
     },
     async () => {
       const { GET } = await import("@/app/api/setup/route");
-      const res = await GET();
+      const res = await GET(new Request("http://localhost/api/setup"));
       assert.equal(res.status, 200);
       const body = (await res.json()) as { source: string; secret?: string };
       assert.equal(body.source, "env");
@@ -174,7 +174,7 @@ test("setup: local dev without ADMIN_SECRET returns 200 or 503 (never a secret o
     },
     async () => {
       const { GET } = await import("@/app/api/setup/route");
-      const res = await GET();
+      const res = await GET(new Request("http://localhost/api/setup"));
       // In test environments the memory store may not persist the generated
       // secret, yielding 503. Either outcome is acceptable — the important
       // invariant is that 200 returns source=generated with a secret, and
