@@ -9,6 +9,12 @@ import { SlackPanel } from "@/components/panels/slack-panel";
 import { WhatsAppPanel } from "@/components/panels/whatsapp-panel";
 import { DiscordPanel } from "@/components/panels/discord-panel";
 
+type PreflightCheck = {
+  id: string;
+  status: "pass" | "warn" | "fail";
+  message: string;
+};
+
 type PreflightAction = {
   id: string;
   status: "required" | "recommended";
@@ -19,6 +25,7 @@ type PreflightAction = {
 
 type PreflightData = {
   ok: boolean;
+  checks: PreflightCheck[];
   actions: PreflightAction[];
 };
 
@@ -37,6 +44,17 @@ async function loadPreflightData(): Promise<PreflightData | null> {
     headers: { accept: "application/json" },
   });
   return res.ok ? ((await res.json()) as PreflightData) : null;
+}
+
+export function getPreflightBlockerIds(
+  preflight: Pick<PreflightData, "ok" | "checks"> | null,
+): Set<string> | null {
+  if (!preflight || preflight.ok) return null;
+  return new Set(
+    preflight.checks
+      .filter((c) => c.status === "fail")
+      .map((c) => c.id),
+  );
 }
 
 export function ChannelsPanel({
@@ -64,16 +82,7 @@ export function ChannelsPanel({
     if (nextPreflight) setPreflight(nextPreflight);
   }
 
-  // When preflight blockers are shown globally, tell cards which issue IDs
-  // are already displayed so they can suppress duplicate notices.
-  const preflightBlockerIds =
-    preflight && !preflight.ok
-      ? new Set(
-          preflight.actions
-            .filter((a) => a.status === "required")
-            .map((a) => a.id),
-        )
-      : null;
+  const preflightBlockerIds = getPreflightBlockerIds(preflight);
 
   return (
     <article className="panel-card full-span">
