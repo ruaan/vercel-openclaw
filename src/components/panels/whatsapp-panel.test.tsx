@@ -25,7 +25,6 @@ function makeConnectability(
 
 const RUN_ACTION: RunAction = async () => {};
 const REQUEST_JSON: RequestJson = async () => null;
-const REFRESH = async () => {};
 
 function makeStatus(
   whatsappOverrides: Partial<StatusPayload["channels"]["whatsapp"]> = {},
@@ -157,7 +156,6 @@ function renderPanel(status: StatusPayload): string {
       busy={false}
       runAction={RUN_ACTION}
       requestJson={REQUEST_JSON}
-      refresh={REFRESH}
     />,
   );
 }
@@ -173,13 +171,13 @@ test("getWhatsAppWebhookUrl builds the verification endpoint from an origin", ()
 test("WhatsAppPanel renders the business credential setup flow", () => {
   const html = renderPanel(makeStatus());
 
-  assert.ok(html.includes("Connect WhatsApp Business"));
+  assert.ok(html.includes("Connect WhatsApp"));
   assert.ok(html.includes("Phone Number ID"));
   assert.ok(html.includes("Access Token"));
   assert.ok(html.includes("Verify Token"));
   assert.ok(html.includes("App Secret"));
   assert.ok(html.includes("Business Account ID"));
-  assert.ok(html.includes("Verification endpoint"));
+  assert.ok(html.includes("Webhook URL"));
   assert.ok(
     html.includes(
       "Resolve the deployment blockers above before saving WhatsApp credentials.",
@@ -208,7 +206,6 @@ test("WhatsAppPanel renders connected details for configured accounts", () => {
   assert.ok(html.includes("Webhook URL"));
   assert.ok(html.includes("linked"));
   assert.ok(html.includes("https://openclaw.example/api/channels/whatsapp/webhook"));
-  assert.ok(html.includes("Connection"));
   assert.ok(html.includes("Update credentials"));
   assert.ok(html.includes("Disconnect"));
 });

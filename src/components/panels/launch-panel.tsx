@@ -2,18 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import type { StatusPayload, RequestJson } from "@/components/admin-types";
-import type {
-  LaunchVerificationPayload,
-  LaunchVerificationPhase,
-  ChannelReadiness,
-  RestoreTargetInspectionPayload,
+import {
+  LAUNCH_PHASE_COUNT,
+  type LaunchVerificationPayload,
+  type LaunchVerificationPhase,
+  type ChannelReadiness,
+  type RestoreTargetInspectionPayload,
 } from "@/shared/launch-verification";
 
 type LaunchPanelProps = {
-  status: StatusPayload;
   busy: boolean;
-  requestJson: RequestJson;
 };
 
 function phaseStatusIcon(phase: LaunchVerificationPhase): string {
@@ -138,7 +136,7 @@ type StreamResultEvent = {
 };
 type StreamEvent = StreamPhaseEvent | StreamResultEvent;
 
-export function LaunchPanel({ status, busy, requestJson }: LaunchPanelProps) {
+export function LaunchPanel({ busy }: LaunchPanelProps) {
   const [result, setResult] = useState<LaunchVerificationPayload | null>(null);
   const [readiness, setReadiness] = useState<ChannelReadiness | null>(null);
   const [restoreReadiness, setRestoreReadiness] = useState<RestoreReadinessViewModel | null>(null);
@@ -269,12 +267,12 @@ export function LaunchPanel({ status, busy, requestJson }: LaunchPanelProps) {
   const completedStreamCount = streamingPhases.filter(
     (p) => p.status !== "running",
   ).length;
-  const totalPhaseCount = 6;
+  const totalPhaseCount = LAUNCH_PHASE_COUNT;
   const progressPct = isStreaming
     ? Math.round((completedStreamCount / totalPhaseCount) * 100)
     : 0;
 
-  const showDetails = expanded || isStreaming || isFailed || !isVerified;
+  const showDetails = expanded || isStreaming || isFailed;
 
   return (
     <article className="panel-card full-span">
@@ -282,7 +280,6 @@ export function LaunchPanel({ status, busy, requestJson }: LaunchPanelProps) {
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div>
             <p className="eyebrow">Deployment Diagnostics</p>
-            {!isVerified && <h2>Verify end-to-end connectivity</h2>}
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -329,23 +326,35 @@ export function LaunchPanel({ status, busy, requestJson }: LaunchPanelProps) {
       )}
 
       {!isVerified && !isStreaming && (
-        <div className="hero-actions">
-          <button
-            className="button primary"
-            disabled={busy || running}
-            onClick={() => void runVerification("destructive")}
-            title="Runs full verification including stop/restore cycle"
-          >
-            {running ? "Verifying\u2026" : "Run Verification"}
-          </button>
-          <button
-            className="button ghost"
-            disabled={busy || running}
-            onClick={() => void runVerification("safe")}
-            title="Quick diagnostic \u2014 does not unlock channels"
-          >
-            Quick Check
-          </button>
+        <div className="launch-verified-summary">
+          <span className="muted-copy">Not yet verified</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            {showPersistedPhases && (
+              <button
+                className="button ghost"
+                disabled={busy || running}
+                onClick={() => setExpanded((v) => !v)}
+              >
+                {expanded ? "Hide details" : "Show details"}
+              </button>
+            )}
+            <button
+              className="button ghost"
+              disabled={busy || running}
+              onClick={() => void runVerification("safe")}
+              title="Quick diagnostic — does not unlock channels"
+            >
+              Quick Check
+            </button>
+            <button
+              className="button primary"
+              disabled={busy || running}
+              onClick={() => void runVerification("destructive")}
+              title="Full verification including stop/restore cycle"
+            >
+              {running ? "Verifying\u2026" : "Verify"}
+            </button>
+          </div>
         </div>
       )}
 

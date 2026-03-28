@@ -14,7 +14,7 @@ type SlackPanelProps = {
   busy: boolean;
   runAction: RunAction;
   requestJson: RequestJson;
-  refresh: () => Promise<void>;
+  preflightBlockerIds?: Set<string> | null;
 };
 
 export function SlackPanel({
@@ -22,7 +22,7 @@ export function SlackPanel({
   busy,
   runAction,
   requestJson,
-  refresh,
+  preflightBlockerIds,
 }: SlackPanelProps) {
   const [signingSecret, setSigningSecret] = useState("");
   const [botToken, setBotToken] = useState("");
@@ -153,7 +153,7 @@ export function SlackPanel({
 
       {panelError ? <p className="error-banner">{panelError}</p> : null}
       {sl.lastError ? <p className="error-banner">{sl.lastError}</p> : null}
-      <ConnectabilityNotice connectability={sl.connectability} />
+      <ConnectabilityNotice connectability={sl.connectability} suppressedIds={preflightBlockerIds} />
 
       {sl.configured && !editing ? (
         <div className="channel-connected-view">
@@ -330,9 +330,7 @@ export function SlackPanel({
 
           {!editing ? (
             <div className="stack">
-              <span className="field-label">
-                {editing ? "" : "3. Webhook URL"}
-              </span>
+              <span className="field-label">3. Webhook URL</span>
               <p className="muted-copy">
                 After saving, paste this URL in your Slack app&apos;s Event
                 Subscriptions page.
@@ -378,11 +376,6 @@ export function SlackPanel({
               </button>
             ) : null}
           </div>
-          {!sl.connectability.canConnect ? (
-            <p className="muted-copy">
-              Resolve the deployment blockers above before saving Slack credentials.
-            </p>
-          ) : null}
         </form>
       )}
       <ConfirmDialog {...dialogProps} />

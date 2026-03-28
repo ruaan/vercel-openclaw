@@ -16,7 +16,6 @@ import type { SingleStatus } from "@/shared/types";
 
 type StatusPanelProps = {
   status: StatusPayload;
-  statusVersion?: number;
   busy: boolean;
   pendingAction: string | null;
   runAction: RunAction;

@@ -4,16 +4,22 @@ import type { ChannelConnectability } from "@/shared/channel-connectability";
 
 export function ConnectabilityNotice({
   connectability,
+  suppressedIds,
 }: {
   connectability: ChannelConnectability;
+  suppressedIds?: Set<string> | null;
 }) {
-  if (connectability.issues.length === 0) {
+  const visibleIssues = suppressedIds
+    ? connectability.issues.filter((issue) => !suppressedIds.has(issue.id))
+    : connectability.issues;
+
+  if (visibleIssues.length === 0) {
     return null;
   }
 
   return (
     <div className="stack" style={{ marginBottom: 12 }}>
-      {connectability.issues.map((issue) => (
+      {visibleIssues.map((issue) => (
         <div
           key={`${connectability.channel}:${issue.id}`}
           className={

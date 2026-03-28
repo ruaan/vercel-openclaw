@@ -47,7 +47,6 @@ export function AdminShell({
   initialStatus?: StatusPayload | null;
 }) {
   const [status, setStatus] = useState<StatusPayload | null>(initialStatus);
-  const [statusVersion, setStatusVersion] = useState(0);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [loginSecret, setLoginSecret] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -77,7 +76,6 @@ export function AdminShell({
 
       const payload = (await response.json()) as StatusPayload;
       setStatus(payload);
-      setStatusVersion((current) => current + 1);
     } catch (error) {
       if (error instanceof TypeError || error instanceof DOMException) {
         if (userInitiated) {
@@ -318,7 +316,6 @@ export function AdminShell({
                 <section {...getPanelProps("status")}>
                   <StatusPanel
                     status={status}
-                    statusVersion={statusVersion}
                     busy={busy}
                     pendingAction={pendingAction}
                     runAction={runAction}
@@ -350,9 +347,7 @@ export function AdminShell({
                       refresh={refreshPassive}
                     />
                     <LaunchPanel
-                      status={status}
                       busy={busy}
-                      requestJson={requestJson}
                     />
                   </div>
                 </section>

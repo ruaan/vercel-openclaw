@@ -15,7 +15,7 @@ type DiscordPanelProps = {
   busy: boolean;
   runAction: RunAction;
   requestJson: RequestJson;
-  refresh: () => Promise<void>;
+  preflightBlockerIds?: Set<string> | null;
 };
 
 export function DiscordPanel({
@@ -23,7 +23,7 @@ export function DiscordPanel({
   busy,
   runAction,
   requestJson,
-  refresh,
+  preflightBlockerIds,
 }: DiscordPanelProps) {
   const [botToken, setBotToken] = useState("");
   const [showToken, setShowToken] = useState(false);
@@ -159,7 +159,7 @@ export function DiscordPanel({
       {dc.endpointError ? (
         <p className="error-banner">{dc.endpointError}</p>
       ) : null}
-      <ConnectabilityNotice connectability={dc.connectability} />
+      <ConnectabilityNotice connectability={dc.connectability} suppressedIds={preflightBlockerIds} />
 
       {dc.configured && !editing ? (
         <div className="channel-connected-view">
@@ -278,7 +278,7 @@ export function DiscordPanel({
                 setEditing(true);
               }}
             >
-              Update token
+              Update credentials
             </button>
             <button
               className="button ghost"
@@ -292,7 +292,7 @@ export function DiscordPanel({
       ) : (
         <form className="channel-wizard" onSubmit={(e) => { e.preventDefault(); void handleConnect(); }}>
           <p className="channel-wizard-title">
-            {editing ? "Update Bot Token" : "Connect Discord Bot"}
+            {editing ? "Update Credentials" : "Connect Discord"}
           </p>
 
           {!editing ? (
@@ -423,7 +423,7 @@ export function DiscordPanel({
               className="button primary"
               disabled={pending || !dc.connectability.canConnect || !botToken.trim()}
             >
-              {pending ? "Connecting..." : "Connect"}
+              {pending ? "Saving\u2026" : editing ? "Update Credentials" : "Save Credentials"}
             </button>
             {editing ? (
               <button
@@ -439,11 +439,6 @@ export function DiscordPanel({
               </button>
             ) : null}
           </div>
-          {!dc.connectability.canConnect ? (
-            <p className="muted-copy">
-              Resolve the deployment blockers above before saving the Discord bot token.
-            </p>
-          ) : null}
         </form>
       )}
       <ConfirmDialog {...dialogProps} />

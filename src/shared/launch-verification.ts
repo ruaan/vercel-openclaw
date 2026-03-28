@@ -371,6 +371,8 @@ const REQUIRED_PHASE_IDS: LaunchVerificationPhaseId[] = [
   "restorePrepared",
 ];
 
+export const LAUNCH_PHASE_COUNT = REQUIRED_PHASE_IDS.length;
+
 export function isChannelReady(payload: LaunchVerificationPayload): boolean {
   if (payload.mode !== "destructive") return false;
   const phaseMap = new Map(payload.phases.map((p) => [p.id, p.status]));

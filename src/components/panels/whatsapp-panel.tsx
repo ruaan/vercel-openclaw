@@ -15,7 +15,7 @@ type WhatsAppPanelProps = {
   busy: boolean;
   runAction: RunAction;
   requestJson: RequestJson;
-  refresh: () => Promise<void>;
+  preflightBlockerIds?: Set<string> | null;
 };
 
 type WhatsAppDraft = {
@@ -61,7 +61,7 @@ export function WhatsAppPanel({
   busy,
   runAction,
   requestJson,
-  refresh,
+  preflightBlockerIds,
 }: WhatsAppPanelProps) {
   const wa = status.channels.whatsapp;
   const [draft, setDraft] = useState<WhatsAppDraft>(EMPTY_DRAFT);
@@ -72,7 +72,6 @@ export function WhatsAppPanel({
   });
   const [editing, setEditing] = useState(false);
   const [panelError, setPanelError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
   const { confirm, dialogProps } = useConfirm();
   const origin = useSyncExternalStore(
@@ -217,7 +216,7 @@ export function WhatsAppPanel({
 
       {panelError ? <p className="error-banner">{panelError}</p> : null}
       {wa.lastError ? <p className="error-banner">{wa.lastError}</p> : null}
-      <ConnectabilityNotice connectability={wa.connectability} />
+      <ConnectabilityNotice connectability={wa.connectability} suppressedIds={preflightBlockerIds} />
 
       {wa.configured && !editing ? (
         <div className="channel-connected-view">
@@ -242,10 +241,6 @@ export function WhatsAppPanel({
               </button>
             </div>
           </div>
-          <div className="channel-detail-row">
-            <span className="field-label">Connection</span>
-            <code className="inline-code">{wa.status}</code>
-          </div>
           <div className="inline-actions">
             <button
               className="button secondary"
@@ -261,16 +256,6 @@ export function WhatsAppPanel({
             >
               Disconnect
             </button>
-            <button
-              className="button ghost"
-              disabled={busy || refreshing}
-              onClick={() => {
-                setRefreshing(true);
-                void refresh().finally(() => setRefreshing(false));
-              }}
-            >
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </button>
           </div>
         </div>
       ) : (
@@ -282,7 +267,7 @@ export function WhatsAppPanel({
           }}
         >
           <p className="channel-wizard-title">
-            {editing ? "Update WhatsApp Credentials" : "Connect WhatsApp Business"}
+            {editing ? "Update Credentials" : "Connect WhatsApp"}
           </p>
 
           {!editing ? (
@@ -369,10 +354,10 @@ export function WhatsAppPanel({
 
           <div className="stack">
             <span className="field-label">
-              {editing ? "Verification endpoint" : "4. Verification endpoint"}
+              {editing ? "Webhook URL" : "4. Webhook URL"}
             </span>
             <p className="muted-copy">
-              Use this URL as the Meta webhook callback for WhatsApp verification.
+              Paste this URL in your Meta app&apos;s webhook settings.
             </p>
             <div className="channel-copy-row">
               <code className="inline-code channel-copy-code">
@@ -407,11 +392,6 @@ export function WhatsAppPanel({
               </button>
             ) : null}
           </div>
-          {!wa.connectability.canConnect ? (
-            <p className="muted-copy">
-              Resolve the deployment blockers above before saving WhatsApp credentials.
-            </p>
-          ) : null}
         </form>
       )}
       <ConfirmDialog {...dialogProps} />

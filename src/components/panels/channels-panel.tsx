@@ -7,6 +7,7 @@ import type {
 import { TelegramPanel } from "@/components/panels/telegram-panel";
 import { SlackPanel } from "@/components/panels/slack-panel";
 import { WhatsAppPanel } from "@/components/panels/whatsapp-panel";
+import { DiscordPanel } from "@/components/panels/discord-panel";
 
 type PreflightAction = {
   id: string;
@@ -63,6 +64,17 @@ export function ChannelsPanel({
     if (nextPreflight) setPreflight(nextPreflight);
   }
 
+  // When preflight blockers are shown globally, tell cards which issue IDs
+  // are already displayed so they can suppress duplicate notices.
+  const preflightBlockerIds =
+    preflight && !preflight.ok
+      ? new Set(
+          preflight.actions
+            .filter((a) => a.status === "required")
+            .map((a) => a.id),
+        )
+      : null;
+
   return (
     <article className="panel-card full-span">
       <div className="panel-head">
@@ -106,21 +118,28 @@ export function ChannelsPanel({
           busy={busy}
           runAction={runAction}
           requestJson={requestJson}
-          refresh={refresh}
+          preflightBlockerIds={preflightBlockerIds}
         />
         <TelegramPanel
           status={status}
           busy={busy}
           runAction={runAction}
           requestJson={requestJson}
-          refresh={refresh}
+          preflightBlockerIds={preflightBlockerIds}
+        />
+        <DiscordPanel
+          status={status}
+          busy={busy}
+          runAction={runAction}
+          requestJson={requestJson}
+          preflightBlockerIds={preflightBlockerIds}
         />
         <WhatsAppPanel
           status={status}
           busy={busy}
           runAction={runAction}
           requestJson={requestJson}
-          refresh={refresh}
+          preflightBlockerIds={preflightBlockerIds}
         />
       </div>
     </article>

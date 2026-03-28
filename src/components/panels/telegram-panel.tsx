@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ChannelPill } from "@/components/ui/badge";
 import { ConfirmDialog, useConfirm } from "@/components/ui/confirm-dialog";
 import { ConnectabilityNotice } from "@/components/panels/connectability-notice";
 import type {
@@ -13,7 +14,7 @@ type TelegramPanelProps = {
   busy: boolean;
   runAction: RunAction;
   requestJson: RequestJson;
-  refresh: () => Promise<void>;
+  preflightBlockerIds?: Set<string> | null;
 };
 
 export function TelegramPanel({
@@ -21,15 +22,15 @@ export function TelegramPanel({
   busy,
   runAction,
   requestJson,
-  refresh,
+  preflightBlockerIds,
 }: TelegramPanelProps) {
   const [botToken, setBotToken] = useState("");
   const [showToken, setShowToken] = useState(false);
   const [preview, setPreview] = useState<TelegramPreviewPayload | null>(null);
   const [editing, setEditing] = useState(false);
   const [panelError, setPanelError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [syncingCommands, setSyncingCommands] = useState(false);
+  const [copied, setCopied] = useState(false);
   const { confirm, dialogProps } = useConfirm();
 
   const tg = status.channels.telegram;
@@ -132,44 +133,29 @@ export function TelegramPanel({
               : "Not configured"}
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span
-            className={`channel-pill ${
-              tg.commandSyncStatus === "synced"
-                ? "good"
-                : tg.commandSyncStatus === "error"
-                  ? "bad"
-                  : ""
-            }`}
-          >
-            {tg.commandSyncStatus === "synced"
-              ? "commands synced"
-              : tg.commandSyncStatus === "error"
-                ? "command sync error"
-                : "commands unsynced"}
-          </span>
-          <span
-            className={`channel-pill ${
-              tg.status === "connected"
-                ? "good"
-                : tg.status === "error"
-                  ? "bad"
-                  : ""
-            }`}
-          >
-            {tg.status === "connected"
-              ? "connected"
-              : tg.status === "error"
-                ? "error"
-                : "offline"}
-          </span>
-        </div>
+        <ChannelPill
+          variant={
+            tg.configured
+              ? tg.status === "error"
+                ? "bad"
+                : "good"
+              : "idle"
+          }
+        >
+          {tg.configured
+            ? tg.status === "error"
+              ? "error"
+              : "connected"
+            : "offline"}
+        </ChannelPill>
       </div>
 
       {panelError ? <p className="error-banner">{panelError}</p> : null}
       {tg.lastError ? <p className="error-banner">{tg.lastError}</p> : null}
-      {tg.commandSyncError ? <p className="error-banner">{tg.commandSyncError}</p> : null}
-      <ConnectabilityNotice connectability={tg.connectability} />
+      {tg.commandSyncError ? (
+        <p className="error-banner">Command sync: {tg.commandSyncError}</p>
+      ) : null}
+      <ConnectabilityNotice connectability={tg.connectability} suppressedIds={preflightBlockerIds} />
 
       {tg.configured && !editing ? (
         <div className="channel-connected-view">
@@ -181,7 +167,23 @@ export function TelegramPanel({
           </div>
           <div className="channel-detail-row">
             <span className="field-label">Webhook URL</span>
-            <code className="inline-code">{tg.webhookUrl ?? "\u2014"}</code>
+            <div className="channel-copy-row">
+              <code className="inline-code channel-copy-code">
+                {tg.webhookUrl ?? "\u2014"}
+              </code>
+              {tg.webhookUrl ? (
+                <button
+                  className="button ghost channel-copy-btn"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(tg.webhookUrl!);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                  }}
+                >
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              ) : null}
+            </div>
           </div>
           <div className="channel-detail-row">
             <span className="field-label">Commands</span>
@@ -201,7 +203,7 @@ export function TelegramPanel({
                 setEditing(true);
               }}
             >
-              Update token
+              Update credentials
             </button>
             <button
               className="button secondary"
@@ -217,22 +219,12 @@ export function TelegramPanel({
             >
               Disconnect
             </button>
-            <button
-              className="button ghost"
-              disabled={busy || refreshing}
-              onClick={() => {
-                setRefreshing(true);
-                void refresh().finally(() => setRefreshing(false));
-              }}
-            >
-              {refreshing ? "Refreshing\u2026" : "Refresh"}
-            </button>
           </div>
         </div>
       ) : (
         <form className="channel-wizard" onSubmit={(e) => { e.preventDefault(); void handleConnect(); }}>
           <p className="channel-wizard-title">
-            {editing ? "Update Bot Token" : "Connect Telegram Bot"}
+            {editing ? "Update Credentials" : "Connect Telegram"}
           </p>
 
           {!editing && (
@@ -316,7 +308,7 @@ export function TelegramPanel({
               className="button primary"
               disabled={busy || !tg.connectability.canConnect || !botToken.trim()}
             >
-              {editing ? "Update" : "Save & Connect"}
+              {editing ? "Update Credentials" : "Save Credentials"}
             </button>
             {editing && (
               <button
@@ -334,11 +326,6 @@ export function TelegramPanel({
               </button>
             )}
           </div>
-          {!tg.connectability.canConnect ? (
-            <p className="muted-copy">
-              Resolve the deployment blockers above before saving the Telegram bot token.
-            </p>
-          ) : null}
         </form>
       )}
       <ConfirmDialog {...dialogProps} />
