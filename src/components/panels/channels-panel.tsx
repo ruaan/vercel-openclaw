@@ -258,6 +258,122 @@ type StreamResultEvent = {
 };
 type StreamEvent = StreamPhaseEvent | StreamResultEvent;
 
+/* ── Structured verification telemetry ── */
+
+type VerificationRunMode = "safe" | "destructive";
+
+type ChannelsPanelEvent =
+  | {
+      event: "channels.preflight.refresh";
+      source: "channels-panel";
+      ts: string;
+      ok: boolean | null;
+      blockerIds: string[];
+      requiredActionIds: string[];
+    }
+  | {
+      event: "channels.preflight.error";
+      source: "channels-panel";
+      ts: string;
+      error: string;
+    }
+  | {
+      event: "channels.readiness.refresh";
+      source: "channels-panel";
+      ts: string;
+      ok: boolean;
+      verifiedAt: string | null;
+    }
+  | {
+      event: "channels.verify.start";
+      source: "channels-panel";
+      ts: string;
+      requestId: string;
+      mode: VerificationRunMode;
+    }
+  | {
+      event: "channels.verify.phase";
+      source: "channels-panel";
+      ts: string;
+      requestId: string;
+      mode: VerificationRunMode;
+      phaseId: string;
+      phaseStatus: LaunchVerificationPhase["status"];
+      durationMs: number;
+      message: string;
+      error?: string;
+    }
+  | {
+      event: "channels.verify.result";
+      source: "channels-panel";
+      ts: string;
+      requestId: string;
+      mode: VerificationRunMode;
+      ok: boolean;
+      totalMs: number;
+      verifiedAt: string | null;
+    }
+  | {
+      event: "channels.verify.error";
+      source: "channels-panel";
+      ts: string;
+      requestId: string;
+      mode: VerificationRunMode;
+      error: string;
+    };
+
+export function createVerificationRequestId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `verify-${crypto.randomUUID()}`;
+  }
+  return `verify-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function emitChannelsPanelEvent(
+  event: Omit<ChannelsPanelEvent, "source" | "ts">,
+): void {
+  const payload = {
+    source: "channels-panel" as const,
+    ts: new Date().toISOString(),
+    ...event,
+  };
+
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("openclaw:channels-panel", { detail: payload }),
+    );
+  }
+
+  const serialized = JSON.stringify(payload);
+  if (payload.event.endsWith(".error")) {
+    console.error(`[openclaw.channels] ${serialized}`);
+    return;
+  }
+  console.info(`[openclaw.channels] ${serialized}`);
+}
+
+export function formatLaunchVerificationFetchError(
+  payload: { error?: { message?: string }; message?: string } | null,
+  status: number,
+): string {
+  const explicit = payload?.error?.message ?? payload?.message;
+  if (explicit && explicit.trim().length > 0) {
+    return explicit;
+  }
+  return `Verification request failed (HTTP ${status}). Refresh the panel or open /api/admin/launch-verify.`;
+}
+
+export function getVerificationSurfaceState(args: {
+  readiness: ChannelReadiness | null;
+  verifyResult: LaunchVerificationPayload | null;
+  verifyRunning: boolean;
+}): "idle" | "running" | "verified" | "failed" {
+  if (args.verifyRunning) return "running";
+  if (args.verifyResult) return args.verifyResult.ok ? "verified" : "failed";
+  if (args.readiness?.ready) return "verified";
+  return "idle";
+}
+
 /* ── Main component ── */
 
 export function ChannelsPanel({
@@ -283,6 +399,8 @@ export function ChannelsPanel({
   const [streamingPhases, setStreamingPhases] = useState<LaunchVerificationPhase[]>([]);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const verifyRequestIdRef = useRef("");
+  const verifyModeRef = useRef<VerificationRunMode | "">("");
 
   const preflightSummary = summarizePreflight(preflight);
   const preflightBlockerIds =
@@ -316,6 +434,15 @@ export function ChannelsPanel({
   const isFailed = verifyResult && !verifyResult.ok;
   const showDetails = detailsExpanded || isStreaming || isFailed;
 
+  const verificationSurfaceState = getVerificationSurfaceState({
+    readiness,
+    verifyResult,
+    verifyRunning,
+  });
+  const verificationPhaseCount = isStreaming
+    ? streamingPhases.length
+    : verifyResult?.phases.length ?? readiness?.phases.length ?? 0;
+
   /* ── Preflight fetching ── */
 
   async function refreshPreflight(): Promise<void> {
@@ -328,9 +455,16 @@ export function ChannelsPanel({
         return;
       }
 
+      const summary = summarizePreflight(nextPreflight);
       setPreflight(nextPreflight);
       setPreflightError(null);
       setPreflightLoadedAt(Date.now());
+      emitChannelsPanelEvent({
+        event: "channels.preflight.refresh",
+        ok: summary.ok,
+        blockerIds: summary.blockerIds,
+        requiredActionIds: summary.requiredActionIds,
+      });
     } catch (error) {
       if (!mountedRef.current || requestId !== preflightRequestIdRef.current) {
         return;
@@ -338,6 +472,10 @@ export function ChannelsPanel({
 
       const message = formatPreflightFetchError(error);
       setPreflightError(message);
+      emitChannelsPanelEvent({
+        event: "channels.preflight.error",
+        error: message,
+      });
     }
   }
 
@@ -370,11 +508,20 @@ export function ChannelsPanel({
 
   /* ── Launch verification ── */
 
-  async function runVerification(mode: "safe" | "destructive"): Promise<void> {
+  async function runVerification(mode: VerificationRunMode): Promise<void> {
+    const requestId = createVerificationRequestId();
+    verifyRequestIdRef.current = requestId;
+    verifyModeRef.current = mode;
     setVerifyRunning(true);
     setStreamingPhases([]);
     setVerifyResult(null);
     setDetailsExpanded(false);
+
+    emitChannelsPanelEvent({
+      event: "channels.verify.start",
+      requestId,
+      mode,
+    });
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -390,17 +537,47 @@ export function ChannelsPanel({
         signal: controller.signal,
       });
 
-      if (response.status === 401) return;
+      if (response.status === 401) {
+        const message = "Verification requires an authenticated session.";
+        emitChannelsPanelEvent({
+          event: "channels.verify.error",
+          requestId,
+          mode,
+          error: message,
+        });
+        toast.error(message);
+        return;
+      }
 
       if (!response.ok) {
-        const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
-        toast.error(payload?.error?.message ?? `HTTP ${response.status}`);
+        const payload = (await response.json().catch(() => null)) as
+          | { error?: { message?: string }; message?: string }
+          | null;
+        const message = formatLaunchVerificationFetchError(
+          payload,
+          response.status,
+        );
+        emitChannelsPanelEvent({
+          event: "channels.verify.error",
+          requestId,
+          mode,
+          error: message,
+        });
+        toast.error(message);
         return;
       }
 
       const reader = response.body?.getReader();
       if (!reader) {
-        toast.error("No response stream");
+        const message =
+          "Verification stream was empty. Refresh the panel or open /api/admin/launch-verify.";
+        emitChannelsPanelEvent({
+          event: "channels.verify.error",
+          requestId,
+          mode,
+          error: message,
+        });
+        toast.error(message);
         return;
       }
 
@@ -421,8 +598,20 @@ export function ChannelsPanel({
           try {
             const event = JSON.parse(trimmed) as StreamEvent;
             if (event.type === "phase") {
+              emitChannelsPanelEvent({
+                event: "channels.verify.phase",
+                requestId,
+                mode,
+                phaseId: event.phase.id,
+                phaseStatus: event.phase.status,
+                durationMs: event.phase.durationMs,
+                message: event.phase.message,
+                error: event.phase.error,
+              });
               setStreamingPhases((prev) => {
-                const existing = prev.findIndex((p) => p.id === event.phase.id);
+                const existing = prev.findIndex(
+                  (p) => p.id === event.phase.id,
+                );
                 if (existing >= 0) {
                   const next = [...prev];
                   next[existing] = event.phase;
@@ -430,28 +619,65 @@ export function ChannelsPanel({
                 }
                 return [...prev, event.phase];
               });
-            } else if (event.type === "result") {
-              setVerifyResult(event.payload);
-              setStreamingPhases([]);
-              if (event.payload.channelReadiness) {
-                setReadiness(event.payload.channelReadiness);
-              }
-              if (!event.payload.ok) {
-                setDetailsExpanded(true);
-                const failing = event.payload.phases.find((p) => p.status === "fail");
-                if (failing) {
-                  toast.error(`Verification failed at ${failing.id}: ${failing.error ?? failing.message}`);
-                }
+              continue;
+            }
+
+            const resultTotalMs =
+              new Date(event.payload.completedAt).getTime() -
+              new Date(event.payload.startedAt).getTime();
+            emitChannelsPanelEvent({
+              event: "channels.verify.result",
+              requestId,
+              mode,
+              ok: event.payload.ok,
+              totalMs: resultTotalMs,
+              verifiedAt:
+                event.payload.channelReadiness?.verifiedAt ?? null,
+            });
+            setVerifyResult(event.payload);
+            setStreamingPhases([]);
+            if (event.payload.channelReadiness) {
+              setReadiness(event.payload.channelReadiness);
+            }
+            if (!event.payload.ok) {
+              setDetailsExpanded(true);
+              const failing = event.payload.phases.find(
+                (p) => p.status === "fail",
+              );
+              if (failing) {
+                toast.error(
+                  `Verification failed at ${failing.id}: ${failing.error ?? failing.message}`,
+                );
               }
             }
           } catch {
-            // Skip malformed lines
+            emitChannelsPanelEvent({
+              event: "channels.verify.error",
+              requestId,
+              mode,
+              error: `Malformed verification stream event: ${trimmed.slice(0, 160)}`,
+            });
           }
         }
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      toast.error(err instanceof Error ? err.message : String(err));
+      if (err instanceof DOMException && err.name === "AbortError") {
+        emitChannelsPanelEvent({
+          event: "channels.verify.error",
+          requestId,
+          mode,
+          error: "Verification aborted",
+        });
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      emitChannelsPanelEvent({
+        event: "channels.verify.error",
+        requestId,
+        mode,
+        error: message,
+      });
+      toast.error(message);
     } finally {
       abortRef.current = null;
       setVerifyRunning(false);
@@ -464,6 +690,11 @@ export function ChannelsPanel({
     const nextReadiness = await loadPersistedReadiness();
     if (!mountedRef.current) return;
     setReadiness(nextReadiness);
+    emitChannelsPanelEvent({
+      event: "channels.readiness.refresh",
+      ok: nextReadiness?.ready === true,
+      verifiedAt: nextReadiness?.verifiedAt ?? null,
+    });
   }
 
   return (
@@ -474,6 +705,17 @@ export function ChannelsPanel({
       }
       data-preflight-blocker-ids={preflightSummary.blockerIds.join(",")}
       data-preflight-required-action-ids={preflightSummary.requiredActionIds.join(",")}
+      data-verification-state={verificationSurfaceState}
+      data-verification-request-id={verifyRequestIdRef.current}
+      data-verification-mode={verifyModeRef.current}
+      data-verification-ok={
+        verifyResult
+          ? String(verifyResult.ok)
+          : readiness?.ready
+            ? "true"
+            : "false"
+      }
+      data-verification-phase-count={String(verificationPhaseCount)}
     >
       <div className="panel-head">
         <div>

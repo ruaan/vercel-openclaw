@@ -72,6 +72,10 @@ type StreamResultEvent = {
 };
 type StreamEvent = StreamPhaseEvent | StreamResultEvent;
 
+/**
+ * @deprecated Launch verification now lives inside ChannelsPanel.
+ * Keep this file only as a migration shim until all imports are removed.
+ */
 export function LaunchPanel({ busy }: LaunchPanelProps) {
   const [result, setResult] = useState<LaunchVerificationPayload | null>(null);
   const [readiness, setReadiness] = useState<ChannelReadiness | null>(null);

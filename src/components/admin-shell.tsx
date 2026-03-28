@@ -19,6 +19,8 @@ import type {
   StatusPayload,
 } from "@/components/admin-types";
 
+// Verification stays inside the Channels surface.
+// Do not add a separate launch/verification tab or card.
 const TABS = [
   { id: "status", label: "Status" },
   { id: "firewall", label: "Firewall" },

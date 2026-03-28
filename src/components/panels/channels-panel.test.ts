@@ -10,6 +10,8 @@ import {
   summarizePreflight,
   formatPreflightFetchError,
   getVerificationViewModel,
+  formatLaunchVerificationFetchError,
+  getVerificationSurfaceState,
 } from "./channels-panel";
 
 test("getPreflightBlockerIds returns failing check IDs", () => {
@@ -172,4 +174,90 @@ test("getVerificationViewModel clears back to unverified when readiness is absen
   assert.equal(view.badgeText, "");
   assert.equal(view.summaryText, "Not yet verified");
   assert.equal(view.primaryActionClassName, "button primary");
+});
+
+/* ── formatLaunchVerificationFetchError tests ── */
+
+test("formatLaunchVerificationFetchError prefers explicit nested message", () => {
+  assert.equal(
+    formatLaunchVerificationFetchError(
+      { error: { message: "Launch verify endpoint timed out" } },
+      504,
+    ),
+    "Launch verify endpoint timed out",
+  );
+});
+
+test("formatLaunchVerificationFetchError falls back to actionable default", () => {
+  assert.equal(
+    formatLaunchVerificationFetchError(null, 502),
+    "Verification request failed (HTTP 502). Refresh the panel or open /api/admin/launch-verify.",
+  );
+});
+
+test("formatLaunchVerificationFetchError prefers top-level message when nested is absent", () => {
+  assert.equal(
+    formatLaunchVerificationFetchError(
+      { message: "Service unavailable" },
+      503,
+    ),
+    "Service unavailable",
+  );
+});
+
+/* ── getVerificationSurfaceState tests ── */
+
+test("getVerificationSurfaceState returns running when verifyRunning is true", () => {
+  assert.equal(
+    getVerificationSurfaceState({
+      readiness: null,
+      verifyResult: null,
+      verifyRunning: true,
+    }),
+    "running",
+  );
+});
+
+test("getVerificationSurfaceState returns verified when result ok", () => {
+  assert.equal(
+    getVerificationSurfaceState({
+      readiness: null,
+      verifyResult: { ok: true } as LaunchVerificationPayload,
+      verifyRunning: false,
+    }),
+    "verified",
+  );
+});
+
+test("getVerificationSurfaceState returns failed when result not ok", () => {
+  assert.equal(
+    getVerificationSurfaceState({
+      readiness: null,
+      verifyResult: { ok: false } as LaunchVerificationPayload,
+      verifyRunning: false,
+    }),
+    "failed",
+  );
+});
+
+test("getVerificationSurfaceState returns verified from readiness when no result", () => {
+  assert.equal(
+    getVerificationSurfaceState({
+      readiness: { ready: true } as ChannelReadiness,
+      verifyResult: null,
+      verifyRunning: false,
+    }),
+    "verified",
+  );
+});
+
+test("getVerificationSurfaceState returns idle when nothing is set", () => {
+  assert.equal(
+    getVerificationSurfaceState({
+      readiness: null,
+      verifyResult: null,
+      verifyRunning: false,
+    }),
+    "idle",
+  );
 });

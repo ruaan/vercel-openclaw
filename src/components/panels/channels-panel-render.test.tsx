@@ -182,6 +182,23 @@ test("ChannelsPanel consistent action labels across all unconfigured channel car
   assert.ok(saveCount >= 3, `at least 3 cards show Save Credentials (found ${saveCount})`);
 });
 
+test("ChannelsPanel exposes machine-readable verification state on the consolidated surface", () => {
+  const html = renderChannelsPanel();
+
+  assert.ok(
+    html.includes("data-verification-state="),
+    "verification state attribute must be present",
+  );
+  assert.ok(
+    html.includes("data-verification-ok="),
+    "verification ok attribute must be present",
+  );
+  assert.ok(
+    html.includes("data-verification-phase-count="),
+    "verification phase count attribute must be present",
+  );
+});
+
 test("ChannelsPanel keeps verification controls inside the consolidated channels surface", () => {
   const html = renderChannelsPanel();
 
