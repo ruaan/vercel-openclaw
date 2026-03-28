@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import * as workflowApi from "workflow/api";
 
 import { getPublicOrigin } from "@/server/public-url";
@@ -11,8 +12,6 @@ import { extractRequestId, logInfo, logWarn } from "@/server/log";
 import { createOperationContext, withOperationContext } from "@/server/observability/operation-context";
 import { getSandboxDomain } from "@/server/sandbox/lifecycle";
 import { getInitializedMeta, getStore } from "@/server/store/store";
-
-const FORWARD_TIMEOUT_MS = 10_000;
 const SLACK_FORWARD_HEADERS = [
   "x-slack-signature",
   "x-slack-request-timestamp",
@@ -237,68 +236,65 @@ export async function POST(request: Request): Promise<Response> {
     bodyLength: rawBody.length,
   }));
 
-  // --- Fast path: forward raw event to OpenClaw's native Slack HTTP handler ---
-  // OpenClaw in HTTP mode handles Slack events, slash commands, and interactivity
-  // natively on the main gateway port at /slack/events.  Forward the raw body
-  // (not re-serialized) so OpenClaw can re-verify the Slack signature.
+  // --- Fast path: fire-and-forget to OpenClaw's native Slack HTTP handler ---
+  // When the sandbox is running, delegate entirely to the native handler.
+  // Return 200 immediately and forward via after() so the function stays
+  // alive just long enough to deliver the payload.  Never fall through to
+  // the workflow path — the native handler owns the message.
   if (meta.status === "running" && meta.sandboxId) {
-    try {
-      const sandboxUrl = await getSandboxDomain();
-      const forwardUrl = `${sandboxUrl}/slack/events`;
-      const forwardHeaders: Record<string, string> = {
-        "content-type": request.headers.get("content-type") ?? "application/json",
-      };
-      for (const h of SLACK_FORWARD_HEADERS) {
-        const v = request.headers.get(h);
-        if (v) forwardHeaders[h] = v;
-      }
+    const capturedSandboxId = meta.sandboxId;
+    const forwardHeaders: Record<string, string> = {
+      "content-type": request.headers.get("content-type") ?? "application/json",
+    };
+    for (const h of SLACK_FORWARD_HEADERS) {
+      const v = request.headers.get(h);
+      if (v) forwardHeaders[h] = v;
+    }
 
-      logInfo("channels.slack_fast_path_forwarding", withOperationContext(op, {
-        sandboxId: meta.sandboxId,
-        forwardUrl,
-        forwardHeaderKeys: Object.keys(forwardHeaders),
-        hasSlackSignature: Boolean(forwardHeaders["x-slack-signature"]),
-        hasSlackTimestamp: Boolean(forwardHeaders["x-slack-request-timestamp"]),
-        ...eventInfo,
-      }));
+    after(async () => {
+      try {
+        const sandboxUrl = await getSandboxDomain();
+        const forwardUrl = `${sandboxUrl}/slack/events`;
 
-      const resp = await fetch(forwardUrl, {
-        method: "POST",
-        headers: forwardHeaders,
-        body: rawBody,
-        signal: AbortSignal.timeout(FORWARD_TIMEOUT_MS),
-      });
-      if (resp.ok) {
-        const respBody = await resp.text();
-        logInfo("channels.slack_fast_path_ok", withOperationContext(op, {
-          sandboxId: meta.sandboxId,
-          responseStatus: resp.status,
-          responseBodyLength: respBody.length,
+        logInfo("channels.slack_fast_path_forwarding", withOperationContext(op, {
+          sandboxId: capturedSandboxId,
+          forwardUrl,
+          forwardHeaderKeys: Object.keys(forwardHeaders),
+          hasSlackSignature: Boolean(forwardHeaders["x-slack-signature"]),
+          hasSlackTimestamp: Boolean(forwardHeaders["x-slack-request-timestamp"]),
           ...eventInfo,
         }));
-        // Proxy the response — Slack slash commands and interactivity expect
-        // response bodies from the webhook endpoint.
-        return new Response(respBody, {
-          status: resp.status,
-          headers: { "content-type": resp.headers.get("content-type") ?? "application/json" },
+
+        const resp = await fetch(forwardUrl, {
+          method: "POST",
+          headers: forwardHeaders,
+          body: rawBody,
         });
+        if (resp.ok) {
+          logInfo("channels.slack_fast_path_ok", withOperationContext(op, {
+            sandboxId: capturedSandboxId,
+            responseStatus: resp.status,
+            ...eventInfo,
+          }));
+        } else {
+          const errorBody = await resp.text().catch(() => "");
+          logWarn("channels.slack_fast_path_non_ok", withOperationContext(op, {
+            status: resp.status,
+            sandboxId: capturedSandboxId,
+            responseBody: errorBody.slice(0, 500),
+            ...eventInfo,
+          }));
+        }
+      } catch (error) {
+        logWarn("channels.slack_fast_path_failed", withOperationContext(op, {
+          error: error instanceof Error ? error.message : String(error),
+          errorName: error instanceof Error ? error.name : undefined,
+          sandboxId: capturedSandboxId,
+          ...eventInfo,
+        }));
       }
-      const errorBody = await resp.text().catch(() => "");
-      logWarn("channels.slack_fast_path_non_ok", withOperationContext(op, {
-        status: resp.status,
-        sandboxId: meta.sandboxId,
-        responseBody: errorBody.slice(0, 500),
-        ...eventInfo,
-      }));
-    } catch (error) {
-      logWarn("channels.slack_fast_path_failed", withOperationContext(op, {
-        error: error instanceof Error ? error.message : String(error),
-        errorName: error instanceof Error ? error.name : undefined,
-        sandboxId: meta.sandboxId,
-        ...eventInfo,
-      }));
-    }
-    // Fall through to queue-based path
+    });
+    return Response.json({ ok: true });
   } else {
     logInfo("channels.slack_fast_path_skipped", withOperationContext(op, {
       reason: meta.status !== "running" ? `sandbox_status_${meta.status}` : "no_sandbox_id",

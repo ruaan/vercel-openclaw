@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import * as workflowApi from "workflow/api";
 
 import { getPublicOrigin } from "@/server/public-url";
@@ -10,8 +11,6 @@ import { createOperationContext, withOperationContext } from "@/server/observabi
 import { OPENCLAW_TELEGRAM_WEBHOOK_PORT } from "@/server/openclaw/config";
 import { getSandboxDomain } from "@/server/sandbox/lifecycle";
 import { getInitializedMeta, getStore } from "@/server/store/store";
-
-const FORWARD_TIMEOUT_MS = 10_000;
 
 type TelegramWebhookDedupLock = {
   key: string;
@@ -118,38 +117,41 @@ export async function POST(request: Request): Promise<Response> {
 
     logInfo("channels.telegram_webhook_accepted", withOperationContext(op));
 
-    // --- Fast path: forward raw update to OpenClaw's native Telegram handler ---
-    // When the sandbox is running, OpenClaw handles the full Telegram lifecycle
-    // natively (images, replies, Bot API calls) on port 8787.  This avoids the
-    // app-layer image download/re-upload pipeline.
+    // --- Fast path: fire-and-forget to OpenClaw's native Telegram handler ---
+    // When the sandbox is running, delegate entirely to the native handler on
+    // port 8787.  Return 200 immediately and forward via after() so the
+    // function stays alive just long enough to deliver the payload.  Never
+    // fall through to the workflow path — the native handler owns the message.
     if (meta.status === "running" && meta.sandboxId) {
-      try {
-        const sandboxWebhookUrl = await getSandboxDomain(OPENCLAW_TELEGRAM_WEBHOOK_PORT);
-        const forwardUrl = `${sandboxWebhookUrl}/telegram-webhook`;
-        const forwardResponse = await fetch(forwardUrl, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-telegram-bot-api-secret-token": secretHeader,
-          },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(FORWARD_TIMEOUT_MS),
-        });
-        if (forwardResponse.ok) {
-          logInfo("channels.telegram_fast_path_ok", withOperationContext(op, { sandboxId: meta.sandboxId }));
-          return Response.json({ ok: true });
+      const capturedSandboxId = meta.sandboxId;
+      after(async () => {
+        try {
+          const sandboxWebhookUrl = await getSandboxDomain(OPENCLAW_TELEGRAM_WEBHOOK_PORT);
+          const forwardUrl = `${sandboxWebhookUrl}/telegram-webhook`;
+          const forwardResponse = await fetch(forwardUrl, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-telegram-bot-api-secret-token": secretHeader,
+            },
+            body: JSON.stringify(payload),
+          });
+          if (forwardResponse.ok) {
+            logInfo("channels.telegram_fast_path_ok", withOperationContext(op, { sandboxId: capturedSandboxId }));
+          } else {
+            logWarn("channels.telegram_fast_path_non_ok", withOperationContext(op, {
+              status: forwardResponse.status,
+              sandboxId: capturedSandboxId,
+            }));
+          }
+        } catch (error) {
+          logWarn("channels.telegram_fast_path_failed", withOperationContext(op, {
+            error: error instanceof Error ? error.message : String(error),
+            sandboxId: capturedSandboxId,
+          }));
         }
-        logWarn("channels.telegram_fast_path_non_ok", withOperationContext(op, {
-          status: forwardResponse.status,
-          sandboxId: meta.sandboxId,
-        }));
-      } catch (error) {
-        logWarn("channels.telegram_fast_path_failed", withOperationContext(op, {
-          error: error instanceof Error ? error.message : String(error),
-          sandboxId: meta.sandboxId,
-        }));
-      }
-      // Fall through to queue-based path
+      });
+      return Response.json({ ok: true });
     }
 
     // Send "Starting up" boot message from the webhook route (before workflow)

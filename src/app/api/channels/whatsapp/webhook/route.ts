@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import * as workflowApi from "workflow/api";
 
 import { hasWhatsAppBusinessCredentials } from "@/shared/channels";
@@ -10,8 +11,6 @@ import { extractRequestId, logError, logInfo, logWarn } from "@/server/log";
 import { createOperationContext, withOperationContext } from "@/server/observability/operation-context";
 import { getSandboxDomain } from "@/server/sandbox/lifecycle";
 import { getInitializedMeta, getStore } from "@/server/store/store";
-
-const FORWARD_TIMEOUT_MS = 10_000;
 const WHATSAPP_FORWARD_HEADERS = [
   "x-hub-signature-256",
   "content-type",
@@ -155,40 +154,47 @@ export async function POST(request: Request): Promise<Response> {
       hasMessageId: Boolean(messageId),
     }));
 
+    // --- Fast path: fire-and-forget to OpenClaw's native WhatsApp handler ---
+    // When the sandbox is running, delegate entirely to the native handler.
+    // Return 200 immediately and forward via after() so the function stays
+    // alive just long enough to deliver the payload.  Never fall through to
+    // the workflow path — the native handler owns the message.
     if (meta.status === "running" && meta.sandboxId) {
-      try {
-        const sandboxUrl = await getSandboxDomain();
-        const forwardHeaders: Record<string, string> = {};
-        for (const headerName of WHATSAPP_FORWARD_HEADERS) {
-          const headerValue = request.headers.get(headerName);
-          if (headerValue) {
-            forwardHeaders[headerName] = headerValue;
-          }
+      const capturedSandboxId = meta.sandboxId;
+      const forwardHeaders: Record<string, string> = {};
+      for (const headerName of WHATSAPP_FORWARD_HEADERS) {
+        const headerValue = request.headers.get(headerName);
+        if (headerValue) {
+          forwardHeaders[headerName] = headerValue;
         }
-
-        const forwardResponse = await fetch(`${sandboxUrl}/whatsapp-webhook`, {
-          method: "POST",
-          headers: forwardHeaders,
-          body: rawBody,
-          signal: AbortSignal.timeout(FORWARD_TIMEOUT_MS),
-        });
-        if (forwardResponse.ok) {
-          logInfo("channels.whatsapp_fast_path_ok", withOperationContext(op, {
-            sandboxId: meta.sandboxId,
-          }));
-          return Response.json({ ok: true });
-        }
-
-        logWarn("channels.whatsapp_fast_path_non_ok", withOperationContext(op, {
-          sandboxId: meta.sandboxId,
-          status: forwardResponse.status,
-        }));
-      } catch (error) {
-        logWarn("channels.whatsapp_fast_path_failed", withOperationContext(op, {
-          sandboxId: meta.sandboxId,
-          error: error instanceof Error ? error.message : String(error),
-        }));
       }
+
+      after(async () => {
+        try {
+          const sandboxUrl = await getSandboxDomain();
+          const forwardResponse = await fetch(`${sandboxUrl}/whatsapp-webhook`, {
+            method: "POST",
+            headers: forwardHeaders,
+            body: rawBody,
+          });
+          if (forwardResponse.ok) {
+            logInfo("channels.whatsapp_fast_path_ok", withOperationContext(op, {
+              sandboxId: capturedSandboxId,
+            }));
+          } else {
+            logWarn("channels.whatsapp_fast_path_non_ok", withOperationContext(op, {
+              sandboxId: capturedSandboxId,
+              status: forwardResponse.status,
+            }));
+          }
+        } catch (error) {
+          logWarn("channels.whatsapp_fast_path_failed", withOperationContext(op, {
+            sandboxId: capturedSandboxId,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+      });
+      return Response.json({ ok: true });
     }
 
     let bootMessageId: string | null = null;
