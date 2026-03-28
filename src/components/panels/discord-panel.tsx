@@ -8,8 +8,6 @@ import type {
   RequestJson,
 } from "@/components/admin-types";
 
-type SetupPhase = "idle" | "validating" | "saving" | "endpoint" | "command" | "done";
-
 type DiscordPanelProps = {
   status: StatusPayload;
   busy: boolean;
@@ -32,38 +30,27 @@ export function DiscordPanel({
   const [forceOverwrite, setForceOverwrite] = useState(false);
   const [editing, setEditing] = useState(false);
   const [panelError, setPanelError] = useState<string | null>(null);
-  const [setupPhase, setSetupPhase] = useState<SetupPhase>("idle");
+  const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
 
   const { confirm, dialogProps } = useConfirm();
   const dc = status.channels.discord;
-  const pending = busy || (setupPhase !== "idle" && setupPhase !== "done");
+  const pending = busy || saving;
 
   function clearDrafts(): void {
     setBotToken("");
     setShowToken(false);
     setForceOverwrite(false);
     setPanelError(null);
-    setSetupPhase("idle");
+    setSaving(false);
   }
 
   async function handleConnect(): Promise<void> {
     if (!botToken.trim() || pending) return;
     setPanelError(null);
+    setSaving(true);
 
     try {
-      setSetupPhase("validating");
-      await delay(120);
-      setSetupPhase("saving");
-      await delay(120);
-      if (autoEndpoint) {
-        setSetupPhase("endpoint");
-        await delay(120);
-      }
-      if (autoCommand) {
-        setSetupPhase("command");
-      }
-
       await requestJson("/api/channels/discord", {
         label: "Save Discord",
         successMessage: "Discord connected",
@@ -77,14 +64,10 @@ export function DiscordPanel({
         }),
       });
 
-      setSetupPhase("done");
       setEditing(false);
-      setTimeout(() => {
-        setSetupPhase("idle");
-        clearDrafts();
-      }, 600);
+      clearDrafts();
     } catch (error) {
-      setSetupPhase("idle");
+      setSaving(false);
       setPanelError(
         error instanceof Error ? error.message : "Failed to connect",
       );
@@ -163,112 +146,47 @@ export function DiscordPanel({
 
       {dc.configured && !editing ? (
         <div className="channel-connected-view">
-          <div className="channel-status-checklist">
-            <div className="channel-check-item">
-              <span
-                className={`channel-check-dot ${dc.configured ? "good" : "bad"}`}
-              />
-              <span>Token validated</span>
-            </div>
-            <div className="channel-check-item">
-              <span
-                className={`channel-check-dot ${dc.endpointConfigured ? "good" : "warn"}`}
-              />
-              <span>
-                Interactions endpoint{" "}
-                {dc.endpointConfigured ? "configured" : "not confirmed"}
-              </span>
-            </div>
-            <div className="channel-check-item">
-              <span
-                className={`channel-check-dot ${dc.commandRegistered ? "good" : "warn"}`}
-              />
-              <span>
-                /ask command{" "}
-                {dc.commandRegistered ? "registered" : "not registered"}
-              </span>
-              {!dc.commandRegistered ? (
-                <button
-                  className="button ghost channel-inline-action"
-                  disabled={pending}
-                  onClick={() => void handleRegisterCommand()}
-                >
-                  Register
-                </button>
-              ) : null}
-            </div>
-            <div className="channel-check-item">
-              <span className="channel-check-dot good" />
-              <span>Bot invite</span>
-              {dc.inviteUrl ? (
-                <a
-                  className="button ghost channel-inline-action"
-                  href={dc.inviteUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Invite bot
-                </a>
-              ) : null}
+          <div className="channel-detail-row">
+            <span className="field-label">Application</span>
+            <code className="inline-code">
+              {dc.appName ?? dc.applicationId ?? "—"}
+            </code>
+          </div>
+          <div className="channel-detail-row">
+            <span className="field-label">Webhook URL</span>
+            <div className="channel-copy-row">
+              <code className="inline-code channel-copy-code">
+                {dc.webhookUrl}
+              </code>
+              <button
+                className="button ghost channel-copy-btn"
+                onClick={() => handleCopy("webhook", dc.webhookUrl)}
+              >
+                {copied === "webhook" ? "Copied" : "Copy"}
+              </button>
             </div>
           </div>
-
-          <details className="channel-details">
-            <summary>Details</summary>
-            <div className="channel-details-body">
-              <div className="channel-detail-row">
-                <span className="field-label">Application ID</span>
-                <div className="channel-copy-row">
-                  <code className="inline-code channel-copy-code">
-                    {dc.applicationId ?? "—"}
-                  </code>
-                  <button
-                    className="button ghost channel-copy-btn"
-                    onClick={() =>
-                      handleCopy("app-id", dc.applicationId)
-                    }
-                    disabled={!dc.applicationId}
-                  >
-                    {copied === "app-id" ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              </div>
-              <div className="channel-detail-row">
-                <span className="field-label">Public Key</span>
-                <div className="channel-copy-row">
-                  <code className="inline-code channel-copy-code">
-                    {dc.publicKey ?? "—"}
-                  </code>
-                  <button
-                    className="button ghost channel-copy-btn"
-                    onClick={() =>
-                      handleCopy("pub-key", dc.publicKey)
-                    }
-                    disabled={!dc.publicKey}
-                  >
-                    {copied === "pub-key" ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              </div>
-              <div className="channel-detail-row">
-                <span className="field-label">Webhook URL</span>
-                <div className="channel-copy-row">
-                  <code className="inline-code channel-copy-code">
-                    {dc.webhookUrl}
-                  </code>
-                  <button
-                    className="button ghost channel-copy-btn"
-                    onClick={() =>
-                      handleCopy("webhook", dc.webhookUrl)
-                    }
-                  >
-                    {copied === "webhook" ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </details>
-
+          <div className="channel-detail-row">
+            <span className="field-label">Endpoint</span>
+            <code className="inline-code">
+              {dc.endpointConfigured ? "configured" : "not confirmed"}
+            </code>
+          </div>
+          <div className="channel-detail-row">
+            <span className="field-label">/ask command</span>
+            <code className="inline-code">
+              {dc.commandRegistered ? "registered" : "not registered"}
+            </code>
+            {!dc.commandRegistered ? (
+              <button
+                className="button ghost channel-inline-action"
+                disabled={pending}
+                onClick={() => void handleRegisterCommand()}
+              >
+                Register
+              </button>
+            ) : null}
+          </div>
           <div className="inline-actions">
             <button
               className="button secondary"
@@ -280,6 +198,16 @@ export function DiscordPanel({
             >
               Update credentials
             </button>
+            {dc.inviteUrl ? (
+              <a
+                className="button secondary"
+                href={dc.inviteUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Invite bot
+              </a>
+            ) : null}
             <button
               className="button ghost"
               disabled={pending}
@@ -296,38 +224,18 @@ export function DiscordPanel({
           </p>
 
           {!editing ? (
-            <div className="channel-wizard-steps">
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">1</span>
-                <div className="channel-step-body">
-                  <span className="muted-copy">
-                    Create a Discord app + bot
-                  </span>
-                  <div style={{ marginTop: 8 }}>
-                    <a
-                      className="button secondary"
-                      href="https://discord.com/developers/applications?new_application=true"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Open Discord Developer Portal
-                    </a>
-                  </div>
-                </div>
-              </div>
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">2</span>
-                <span className="muted-copy">
-                  Copy Bot Token: Developer Portal → Bot → Reset Token / Copy.
-                </span>
-              </div>
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">3</span>
-                <span className="muted-copy">
-                  Paste token below and click Connect.
-                </span>
-              </div>
-            </div>
+            <p className="muted-copy">
+              Paste the bot token from{" "}
+              <a
+                href="https://discord.com/developers/applications?new_application=true"
+                target="_blank"
+                rel="noreferrer"
+                className="channel-link"
+              >
+                Discord Developer Portal
+              </a>{" "}
+              → Bot → Reset Token.
+            </p>
           ) : null}
 
           <div className="stack">
@@ -387,43 +295,13 @@ export function DiscordPanel({
             </label>
           ) : null}
 
-          {(setupPhase !== "idle" && setupPhase !== "done") || setupPhase === "done" ? (
-            <div className="channel-setup-progress">
-              <span className="field-label">Setup progress</span>
-              <div className="channel-progress-list">
-                <ProgressStep
-                  label="Validating token..."
-                  phase="validating"
-                  current={setupPhase}
-                />
-                <ProgressStep
-                  label="Saving credentials..."
-                  phase="saving"
-                  current={setupPhase}
-                />
-                <ProgressStep
-                  label="Configuring endpoint..."
-                  phase="endpoint"
-                  current={setupPhase}
-                  enabled={autoEndpoint}
-                />
-                <ProgressStep
-                  label="Registering /ask..."
-                  phase="command"
-                  current={setupPhase}
-                  enabled={autoCommand}
-                />
-              </div>
-            </div>
-          ) : null}
-
           <div className="inline-actions">
             <button
               type="submit"
               className="button primary"
               disabled={pending || !dc.connectability.canConnect || !botToken.trim()}
             >
-              {pending ? "Saving\u2026" : editing ? "Update Credentials" : "Save Credentials"}
+              {saving ? "Saving\u2026" : editing ? "Update Credentials" : "Save Credentials"}
             </button>
             {editing ? (
               <button
@@ -444,49 +322,4 @@ export function DiscordPanel({
       <ConfirmDialog {...dialogProps} />
     </section>
   );
-}
-
-const PHASE_ORDER: SetupPhase[] = ["validating", "saving", "endpoint", "command"];
-
-function ProgressStep({
-  label,
-  phase,
-  current,
-  enabled = true,
-}: {
-  label: string;
-  phase: SetupPhase;
-  current: SetupPhase;
-  enabled?: boolean;
-}) {
-  if (!enabled) {
-    return (
-      <div className="channel-progress-step skipped">
-        <span className="channel-progress-dot skipped" />
-        <span>{label}</span>
-      </div>
-    );
-  }
-
-  const phaseIdx = PHASE_ORDER.indexOf(phase);
-  const currentIdx = PHASE_ORDER.indexOf(current);
-  const isDone = current === "done" || (currentIdx >= 0 && phaseIdx < currentIdx);
-  const isActive = current === phase;
-
-  return (
-    <div
-      className={`channel-progress-step ${isDone ? "complete" : isActive ? "active" : "pending"}`}
-    >
-      <span
-        className={`channel-progress-dot ${isDone ? "good" : isActive ? "active" : "pending"}`}
-      />
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

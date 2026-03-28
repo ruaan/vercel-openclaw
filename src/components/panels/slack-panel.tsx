@@ -178,11 +178,6 @@ export function SlackPanel({
               </button>
             </div>
           </div>
-          {sl.configuredAt ? (
-            <p className="muted-copy">
-              Saved {formatTimestamp(sl.configuredAt)}
-            </p>
-          ) : null}
           <div className="inline-actions">
             <button
               className="button secondary"
@@ -210,40 +205,24 @@ export function SlackPanel({
           </p>
 
           {!editing ? (
-            <div className="channel-wizard-steps">
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">1</span>
-                <div className="channel-step-body">
-                  <span className="muted-copy">
-                    Create a Slack app with permissions pre-configured.
-                  </span>
-                  <div className="inline-actions" style={{ marginTop: 8 }}>
-                    <button
-                      type="button"
-                      className="button secondary"
-                      disabled={busy}
-                      onClick={() => void handleCreateApp()}
-                    >
-                      Create Slack App
-                    </button>
-                    <span className="muted-copy">or</span>
-                    <a
-                      className="button ghost"
-                      href="https://api.slack.com/apps"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Open existing app
-                    </a>
-                  </div>
-                </div>
-              </div>
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">2</span>
-                <span className="muted-copy">
-                  Paste your credentials below.
-                </span>
-              </div>
+            <div className="inline-actions" style={{ marginBottom: 8 }}>
+              <button
+                type="button"
+                className="button secondary"
+                disabled={busy}
+                onClick={() => void handleCreateApp()}
+              >
+                Create Slack App
+              </button>
+              <span className="muted-copy">or</span>
+              <a
+                className="button ghost"
+                href="https://api.slack.com/apps"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open existing app
+              </a>
             </div>
           ) : null}
 
@@ -330,10 +309,9 @@ export function SlackPanel({
 
           {!editing ? (
             <div className="stack">
-              <span className="field-label">3. Webhook URL</span>
+              <span className="field-label">Webhook URL</span>
               <p className="muted-copy">
-                After saving, paste this URL in your Slack app&apos;s Event
-                Subscriptions page.
+                Paste in Event Subscriptions after saving.
               </p>
               <div className="channel-copy-row">
                 <code className="inline-code channel-copy-code">
@@ -381,13 +359,4 @@ export function SlackPanel({
       <ConfirmDialog {...dialogProps} />
     </section>
   );
-}
-
-function formatTimestamp(timestamp: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
 }

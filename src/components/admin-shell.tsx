@@ -8,7 +8,6 @@ import { BrandIcon } from "@/components/ui/brand-icon";
 import { StatusPanel } from "@/components/panels/status-panel";
 import { FirewallPanel } from "@/components/panels/firewall-panel";
 import { ChannelsPanel } from "@/components/panels/channels-panel";
-import { LaunchPanel } from "@/components/panels/launch-panel";
 import { SshPanel } from "@/components/panels/ssh-panel";
 import { LogsPanel } from "@/components/panels/logs-panel";
 import { SnapshotsPanel } from "@/components/panels/snapshots-panel";
@@ -337,19 +336,14 @@ export function AdminShell({
               )}
               {isMounted("channels") && (
                 <section {...getPanelProps("channels")}>
-                  <div className="tab-panel-stack">
-                    <ChannelsPanel
-                      active={activeTab === "channels"}
-                      status={status}
-                      busy={busy}
-                      runAction={runAction}
-                      requestJson={requestJson}
-                      refresh={refreshPassive}
-                    />
-                    <LaunchPanel
-                      busy={busy}
-                    />
-                  </div>
+                  <ChannelsPanel
+                    active={activeTab === "channels"}
+                    status={status}
+                    busy={busy}
+                    runAction={runAction}
+                    requestJson={requestJson}
+                    refresh={refreshPassive}
+                  />
                 </section>
               )}
               {isMounted("terminal") && (

@@ -228,36 +228,18 @@ export function TelegramPanel({
           </p>
 
           {!editing && (
-            <div className="channel-wizard-steps">
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">1</span>
-                <span className="muted-copy">
-                  Open{" "}
-                  <a
-                    href="https://t.me/BotFather"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="channel-link"
-                  >
-                    @BotFather
-                  </a>{" "}
-                  on Telegram and create a bot with <code>/newbot</code>
-                </span>
-              </div>
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">2</span>
-                <span className="muted-copy">
-                  Copy the bot token and paste it below
-                </span>
-              </div>
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">3</span>
-                <span className="muted-copy">
-                  Click <strong>Preview bot</strong> to validate, then{" "}
-                  <strong>Save &amp; Connect</strong>
-                </span>
-              </div>
-            </div>
+            <p className="muted-copy">
+              Paste the token from{" "}
+              <a
+                href="https://t.me/BotFather"
+                target="_blank"
+                rel="noreferrer"
+                className="channel-link"
+              >
+                @BotFather
+              </a>{" "}
+              (<code>/newbot</code>).
+            </p>
           )}
 
           <div className="stack">

@@ -271,26 +271,18 @@ export function WhatsAppPanel({
           </p>
 
           {!editing ? (
-            <div className="channel-wizard-steps">
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">1</span>
-                <span className="muted-copy">
-                  Create or open your Meta app and copy the WhatsApp Business API credentials.
-                </span>
-              </div>
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">2</span>
-                <span className="muted-copy">
-                  Paste the five values below and save the channel config.
-                </span>
-              </div>
-              <div className="channel-wizard-step">
-                <span className="channel-step-number">3</span>
-                <span className="muted-copy">
-                  Register the verification endpoint shown below in the Meta webhook settings.
-                </span>
-              </div>
-            </div>
+            <p className="muted-copy">
+              Paste credentials from the{" "}
+              <a
+                href="https://developers.facebook.com/apps/"
+                target="_blank"
+                rel="noreferrer"
+                className="channel-link"
+              >
+                Meta Developer Portal
+              </a>{" "}
+              WhatsApp product.
+            </p>
           ) : null}
 
           <CredentialField
@@ -353,11 +345,9 @@ export function WhatsAppPanel({
           />
 
           <div className="stack">
-            <span className="field-label">
-              {editing ? "Webhook URL" : "4. Webhook URL"}
-            </span>
+            <span className="field-label">Webhook URL</span>
             <p className="muted-copy">
-              Paste this URL in your Meta app&apos;s webhook settings.
+              Paste in Meta webhook settings after saving.
             </p>
             <div className="channel-copy-row">
               <code className="inline-code channel-copy-code">
