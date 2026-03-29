@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { toWorkflowProcessingError } from "@/server/workflows/channels/drain-channel-workflow";
+import type { SingleMeta } from "@/shared/types";
+import {
+  processChannelStep,
+  toWorkflowProcessingError,
+  type DrainChannelWorkflowDependencies,
+} from "@/server/workflows/channels/drain-channel-workflow";
 
 class TestRetryableError extends Error {
   retryAfter?: string;
@@ -28,15 +33,123 @@ class TestFatalError extends Error {
   }
 }
 
+function asMeta(meta: Partial<SingleMeta>): SingleMeta {
+  return meta as SingleMeta;
+}
+
+function createWorkflowDependencies(
+  overrides: Partial<DrainChannelWorkflowDependencies> = {},
+): DrainChannelWorkflowDependencies {
+  return {
+    processChannelJob: async () => {
+      throw new Error("not implemented in test");
+    },
+    isRetryable: () => false,
+    createSlackAdapter: () => ({}) as never,
+    createTelegramAdapter: () => ({}) as never,
+    createDiscordAdapter: () => ({}) as never,
+    createWhatsAppAdapter: () => ({}) as never,
+    reconcileDiscordIntegration: async () => null,
+    runWithBootMessages: async () => ({
+      meta: asMeta({ status: "running", sandboxId: "sbx-stale" }),
+      bootMessageSent: false,
+    }),
+    ensureSandboxReady: async () =>
+      asMeta({
+        status: "running",
+        sandboxId: "sbx-restored",
+        channels: { telegram: null, slack: null, discord: null, whatsapp: null },
+      }),
+    getSandboxDomain: async () => "https://sandbox.example.test",
+    waitForNativeHandler: async () => {},
+    forwardToNativeHandler: async () => ({ ok: true, status: 200 }),
+    buildExistingBootHandle: async () => undefined,
+    RetryableError: TestRetryableError as never,
+    FatalError: TestFatalError as never,
+    ...overrides,
+  };
+}
+
+test("processChannelStep always ensures sandbox readiness before native forward", async () => {
+  let ensureCalls = 0;
+  let forwardedSandboxId: string | null = null;
+
+  const dependencies = createWorkflowDependencies({
+    runWithBootMessages: async () => ({
+      meta: asMeta({ status: "running", sandboxId: "sbx-stale" }),
+      bootMessageSent: false,
+    }),
+    ensureSandboxReady: async () => {
+      ensureCalls += 1;
+      return asMeta({
+        status: "running",
+        sandboxId: "sbx-restored",
+        channels: { telegram: null, slack: null, discord: null, whatsapp: null },
+      });
+    },
+    forwardToNativeHandler: async (_channel: unknown, _payload: unknown, meta: SingleMeta) => {
+      forwardedSandboxId = meta.sandboxId ?? null;
+      return { ok: true, status: 200 };
+    },
+  });
+
+  await processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies);
+
+  assert.equal(ensureCalls, 1);
+  assert.equal(forwardedSandboxId, "sbx-restored");
+});
+
+test("processChannelStep converts native handler timeout into RetryableError", async () => {
+  const dependencies = createWorkflowDependencies({
+    waitForNativeHandler: async () => {
+      throw new Error("native_handler_timeout channel=telegram timeoutMs=30000");
+    },
+  });
+
+  await assert.rejects(
+    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies),
+    (error: unknown) => {
+      assert.ok(error instanceof TestRetryableError);
+      assert.equal((error as TestRetryableError).retryAfter, "15s");
+      return true;
+    },
+  );
+});
+
+test("processChannelStep converts native forward 502 into RetryableError", async () => {
+  const dependencies = createWorkflowDependencies({
+    forwardToNativeHandler: async () => ({ ok: false, status: 502 }),
+  });
+
+  await assert.rejects(
+    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies),
+    (error: unknown) => {
+      assert.ok(error instanceof TestRetryableError);
+      assert.equal((error as TestRetryableError).retryAfter, "15s");
+      return true;
+    },
+  );
+});
+
+test("processChannelStep keeps native forward 404 fatal", async () => {
+  const dependencies = createWorkflowDependencies({
+    forwardToNativeHandler: async () => ({ ok: false, status: 404 }),
+  });
+
+  await assert.rejects(
+    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies),
+    (error: unknown) => {
+      assert.ok(error instanceof TestFatalError);
+      return true;
+    },
+  );
+});
+
 test("toWorkflowProcessingError returns RetryableError for sandbox_not_ready", () => {
   const error = toWorkflowProcessingError(
     "slack",
     new Error("sandbox_not_ready: gateway probe still loading"),
-    {
-      RetryableError: TestRetryableError as never,
-      FatalError: TestFatalError as never,
-      isRetryable: () => false,
-    },
+    createWorkflowDependencies(),
   );
 
   assert.ok(error instanceof TestRetryableError);
@@ -47,13 +160,41 @@ test("toWorkflowProcessingError returns RetryableError for SANDBOX_READY_TIMEOUT
   const error = toWorkflowProcessingError(
     "telegram",
     new Error("SANDBOX_READY_TIMEOUT: sandbox did not become ready in time"),
-    {
-      RetryableError: TestRetryableError as never,
-      FatalError: TestFatalError as never,
-      isRetryable: () => false,
-    },
+    createWorkflowDependencies(),
   );
 
   assert.ok(error instanceof TestRetryableError);
   assert.equal((error as TestRetryableError).retryAfter, "15s");
+});
+
+test("toWorkflowProcessingError returns RetryableError for native_handler_timeout", () => {
+  const error = toWorkflowProcessingError(
+    "telegram",
+    new Error("native_handler_timeout channel=telegram timeoutMs=30000"),
+    createWorkflowDependencies(),
+  );
+
+  assert.ok(error instanceof TestRetryableError);
+  assert.equal((error as TestRetryableError).retryAfter, "15s");
+});
+
+test("toWorkflowProcessingError returns RetryableError for native_forward_failed 503", () => {
+  const error = toWorkflowProcessingError(
+    "telegram",
+    new Error("native_forward_failed status=503"),
+    createWorkflowDependencies(),
+  );
+
+  assert.ok(error instanceof TestRetryableError);
+  assert.equal((error as TestRetryableError).retryAfter, "15s");
+});
+
+test("toWorkflowProcessingError returns FatalError for native_forward_failed 404", () => {
+  const error = toWorkflowProcessingError(
+    "telegram",
+    new Error("native_forward_failed status=404"),
+    createWorkflowDependencies(),
+  );
+
+  assert.ok(error instanceof TestFatalError);
 });

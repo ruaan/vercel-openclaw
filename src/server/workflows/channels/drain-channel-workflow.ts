@@ -17,6 +17,13 @@ export type DrainChannelWorkflowDependencies = {
   createTelegramAdapter: typeof import("@/server/channels/telegram/adapter").createTelegramAdapter;
   createDiscordAdapter: typeof import("@/server/channels/discord/adapter").createDiscordAdapter;
   createWhatsAppAdapter: typeof import("@/server/channels/whatsapp/adapter").createWhatsAppAdapter;
+  reconcileDiscordIntegration: typeof import("@/server/channels/discord/reconcile").reconcileDiscordIntegration;
+  runWithBootMessages: typeof import("@/server/channels/core/boot-messages").runWithBootMessages;
+  ensureSandboxReady: typeof import("@/server/sandbox/lifecycle").ensureSandboxReady;
+  getSandboxDomain: typeof import("@/server/sandbox/lifecycle").getSandboxDomain;
+  waitForNativeHandler: typeof waitForNativeHandler;
+  forwardToNativeHandler: typeof forwardToNativeHandler;
+  buildExistingBootHandle: typeof buildExistingBootHandle;
   RetryableError: typeof import("workflow").RetryableError;
   FatalError: typeof import("workflow").FatalError;
 };
@@ -50,10 +57,18 @@ export async function processChannelStep(
 
   const resolvedDependencies =
     dependencies ?? (await loadDrainChannelWorkflowDependencies());
+  const {
+    reconcileDiscordIntegration,
+    runWithBootMessages,
+    ensureSandboxReady,
+    getSandboxDomain,
+    waitForNativeHandler,
+    forwardToNativeHandler,
+    buildExistingBootHandle,
+  } = resolvedDependencies;
 
   if (channel === "discord") {
     try {
-      const { reconcileDiscordIntegration } = await import("@/server/channels/discord/reconcile");
       await reconcileDiscordIntegration();
     } catch (err) {
       logWarn("channels.discord_integration_reconcile_failed", {
@@ -71,9 +86,6 @@ export async function processChannelStep(
     // --- Phase 1: Wake the sandbox with boot message updates ---
     // Use runWithBootMessages to poll sandbox status and progressively
     // update the boot message ("Restoring…" → "Starting gateway…" → etc.)
-    const { runWithBootMessages } = await import("@/server/channels/core/boot-messages");
-    const { ensureSandboxReady, getSandboxDomain } = await import("@/server/sandbox/lifecycle");
-
     // runWithBootMessages needs an adapter for the boot message handle.
     // We only need the existing boot handle (already built above).
     // Use a minimal adapter shim — the real message extraction is not needed
@@ -88,26 +100,29 @@ export async function processChannelStep(
       existingBootHandle,
     });
 
-    let readyMeta = bootResult.meta;
-    if (readyMeta.status !== "running" || !readyMeta.sandboxId) {
-      readyMeta = await ensureSandboxReady({
-        origin,
-        reason: `channel:${channel}`,
-        timeoutMs: WORKFLOW_SANDBOX_READY_TIMEOUT_MS,
-      });
-    }
+    const readyMeta = await ensureSandboxReady({
+      origin,
+      reason: `channel:${channel}`,
+      timeoutMs: WORKFLOW_SANDBOX_READY_TIMEOUT_MS,
+    });
+
+    logInfo("channels.workflow_sandbox_ready", {
+      channel,
+      requestId,
+      bootResultStatus: bootResult.meta.status,
+      sandboxId: readyMeta.sandboxId,
+    });
 
     // --- Phase 2: Wait for native handler + forward raw payload ---
     // The gateway (port 3000) is ready, but the native channel handler
     // (e.g. port 8787 for Telegram) may need a few more seconds to start.
     // Poll until the native handler is reachable before forwarding.
-    const meta = await getInitializedMeta();
-    await waitForNativeHandler(channel as ChannelName, meta, getSandboxDomain);
+    await waitForNativeHandler(channel as ChannelName, readyMeta, getSandboxDomain);
 
     const forwardResult = await forwardToNativeHandler(
       channel as ChannelName,
       payload,
-      meta,
+      readyMeta,
       getSandboxDomain,
     );
 
@@ -136,6 +151,16 @@ export async function processChannelStep(
 
 const NATIVE_HANDLER_POLL_INTERVAL_MS = 1_000;
 const NATIVE_HANDLER_POLL_TIMEOUT_MS = 30_000;
+const NATIVE_HANDLER_TIMEOUT_ERROR = "native_handler_timeout";
+
+function buildNativeHandlerTimeoutError(
+  channel: ChannelName,
+  timeoutMs: number,
+): Error {
+  return new Error(
+    `${NATIVE_HANDLER_TIMEOUT_ERROR} channel=${channel} timeoutMs=${timeoutMs}`,
+  );
+}
 
 /**
  * Wait for the native channel handler to be fully ready.
@@ -189,7 +214,11 @@ async function waitForNativeHandler(
     }
     await new Promise((r) => setTimeout(r, NATIVE_HANDLER_POLL_INTERVAL_MS));
   }
-  logWarn("channels.native_handler_poll_timeout", { channel, timeoutMs: NATIVE_HANDLER_POLL_TIMEOUT_MS });
+  logWarn("channels.native_handler_poll_timeout", {
+    channel,
+    timeoutMs: NATIVE_HANDLER_POLL_TIMEOUT_MS,
+  });
+  throw buildNativeHandlerTimeoutError(channel, NATIVE_HANDLER_POLL_TIMEOUT_MS);
 }
 
 /**
@@ -334,6 +363,16 @@ export function buildQueuedChannelJob(
 const WORKFLOW_SANDBOX_READY_TIMEOUT_MS = 120_000;
 const WORKFLOW_RETRY_AFTER = "15s";
 
+function parseNativeForwardFailedStatus(errorMsg: string): number | null {
+  const match = /native_forward_failed status=(\d+)/.exec(errorMsg);
+  if (!match) {
+    return null;
+  }
+
+  const status = Number.parseInt(match[1], 10);
+  return Number.isNaN(status) ? null : status;
+}
+
 export function toWorkflowProcessingError(
   channel: string,
   error: unknown,
@@ -345,10 +384,20 @@ export function toWorkflowProcessingError(
   // Sandbox readiness failures are transient infrastructure issues while the
   // sandbox is restoring. Retry the workflow step so the webhook can recover
   // once the sandbox becomes available again.
-  if (errorMsg.includes("sandbox_not_ready") || errorMsg.includes("SANDBOX_READY_TIMEOUT")) {
+  const nativeForwardFailedStatus = parseNativeForwardFailedStatus(errorMsg);
+  if (
+    errorMsg.includes("sandbox_not_ready") ||
+    errorMsg.includes("SANDBOX_READY_TIMEOUT") ||
+    errorMsg.includes(NATIVE_HANDLER_TIMEOUT_ERROR) ||
+    (nativeForwardFailedStatus !== null && nativeForwardFailedStatus >= 500)
+  ) {
     return new dependencies.RetryableError(message, {
       retryAfter: WORKFLOW_RETRY_AFTER,
     });
+  }
+
+  if (nativeForwardFailedStatus !== null) {
+    return new dependencies.FatalError(message);
   }
 
   if (dependencies.isRetryable(error)) {
@@ -367,6 +416,9 @@ async function loadDrainChannelWorkflowDependencies(): Promise<DrainChannelWorkf
     { createTelegramAdapter },
     { createDiscordAdapter },
     { createWhatsAppAdapter },
+    { reconcileDiscordIntegration },
+    { runWithBootMessages },
+    { ensureSandboxReady, getSandboxDomain },
     { RetryableError, FatalError },
   ] = await Promise.all([
     import("@/server/channels/driver"),
@@ -374,6 +426,9 @@ async function loadDrainChannelWorkflowDependencies(): Promise<DrainChannelWorkf
     import("@/server/channels/telegram/adapter"),
     import("@/server/channels/discord/adapter"),
     import("@/server/channels/whatsapp/adapter"),
+    import("@/server/channels/discord/reconcile"),
+    import("@/server/channels/core/boot-messages"),
+    import("@/server/sandbox/lifecycle"),
     import("workflow"),
   ]);
 
@@ -384,6 +439,13 @@ async function loadDrainChannelWorkflowDependencies(): Promise<DrainChannelWorkf
     createTelegramAdapter,
     createDiscordAdapter,
     createWhatsAppAdapter,
+    reconcileDiscordIntegration,
+    runWithBootMessages,
+    ensureSandboxReady,
+    getSandboxDomain,
+    waitForNativeHandler,
+    forwardToNativeHandler,
+    buildExistingBootHandle,
     RetryableError,
     FatalError,
   };
