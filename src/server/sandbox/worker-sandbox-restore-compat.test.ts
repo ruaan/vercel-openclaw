@@ -1042,3 +1042,131 @@ test("worker-sandbox launcher prints non-ok host responses to stderr and exits n
   assert.deepEqual(result.stdout, []);
   assert.deepEqual(result.stderr, [errorText]);
 });
+
+test("restored OpenClaw can spawn multiple child sandboxes without mutating singleton state", async () => {
+  const h = createScenarioHarness();
+  try {
+    await h.mutateMeta((meta) => {
+      meta.status = "stopped";
+      meta.snapshotId = "snap-multi-child-worker-sandbox";
+      meta.gatewayToken = "test-gw-token";
+      meta.snapshotAssetSha256 = null;
+      meta.snapshotDynamicConfigHash = null;
+      meta.snapshotConfigHash = null;
+      meta.lastRestoreMetrics = null;
+      meta.sandboxId = null;
+      meta.portUrls = null;
+    });
+
+    h.fakeFetch.onGet(/fake\.vercel\.run/, () =>
+      new Response('<div id="openclaw-app">ready</div>', { status: 200 }),
+    );
+
+    const callbacks: Array<() => Promise<void> | void> = [];
+    await ensureSandboxRunning({
+      origin: "https://test.example.com",
+      reason: "restore-multi-child-worker-sandbox",
+      schedule(cb) {
+        callbacks.push(cb);
+      },
+    });
+
+    assert.equal(callbacks.length, 1);
+    await callbacks[0]!();
+
+    const before = await getInitializedMeta();
+    const createCountBefore = h.controller.eventsOfKind("create").length;
+
+    const route = getWorkerSandboxRoute();
+    const token = await buildWorkerSandboxBearerToken();
+
+    const requests = [
+      {
+        task: "first-child",
+        files: [
+          {
+            path: "/workspace/input.txt",
+            contentBase64: Buffer.from("first\n", "utf8").toString("base64"),
+          },
+        ],
+        command: { cmd: "cat", args: ["/workspace/input.txt"] },
+        capturePaths: ["/workspace/input.txt"],
+        vcpus: 1,
+        sandboxTimeoutMs: 300_000,
+      },
+      {
+        task: "second-child",
+        files: [
+          {
+            path: "/workspace/input.txt",
+            contentBase64: Buffer.from("second\n", "utf8").toString("base64"),
+          },
+        ],
+        command: { cmd: "cat", args: ["/workspace/input.txt"] },
+        capturePaths: ["/workspace/input.txt"],
+        vcpus: 1,
+        sandboxTimeoutMs: 300_000,
+      },
+    ];
+
+    const responses: WorkerSandboxExecuteResponse[] = [];
+    for (const requestBody of requests) {
+      const req = buildPostRequest(
+        "/api/internal/worker-sandboxes/execute",
+        JSON.stringify(requestBody),
+        { authorization: `Bearer ${token}` },
+      );
+      const result = await callRoute(route.POST, req);
+      assert.equal(
+        result.status,
+        200,
+        `expected 200 for ${requestBody.task} but got ${result.status}: ${result.text}`,
+      );
+      const body = result.json as WorkerSandboxExecuteResponse;
+      responses.push(body);
+      assert.equal(body.ok, true);
+      assert.equal(body.task, requestBody.task);
+      assert.equal(body.exitCode, 0);
+      assert.equal(body.capturedFiles.length, 1);
+      assert.equal(
+        Buffer.from(body.capturedFiles[0]!.contentBase64, "base64").toString(
+          "utf8",
+        ),
+        Buffer.from(
+          requestBody.files[0]!.contentBase64,
+          "base64",
+        ).toString("utf8"),
+      );
+    }
+
+    assert.ok(responses[0]!.sandboxId);
+    assert.ok(responses[1]!.sandboxId);
+    assert.notEqual(responses[0]!.sandboxId, responses[1]!.sandboxId);
+
+    const after = await getInitializedMeta();
+    assert.equal(after.status, before.status, "status must not change");
+    assert.equal(
+      after.sandboxId,
+      before.sandboxId,
+      "sandboxId must not change",
+    );
+    assert.equal(
+      after.snapshotId,
+      before.snapshotId,
+      "snapshotId must not change",
+    );
+
+    assert.equal(
+      h.controller.eventsOfKind("create").length,
+      createCountBefore + requests.length,
+      "restored OpenClaw should spawn one child sandbox per request",
+    );
+    assert.equal(
+      h.controller.eventsOfKind("stop").length,
+      requests.length,
+      "each child sandbox should be stopped after its job finishes",
+    );
+  } finally {
+    h.teardown();
+  }
+});

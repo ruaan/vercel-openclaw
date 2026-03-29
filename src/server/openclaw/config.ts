@@ -2291,11 +2291,26 @@ name: worker-sandbox
 description: Execute a bounded job in a fresh Vercel Sandbox created by the host app.
 ---
 
-Use this when you need isolated compute, temporary filesystem state, or extra packages for a short task.
+Use this when you need isolated compute, temporary filesystem state, extra packages, or a clean throwaway environment for a short task.
 
+Prefer this skill when the user asks to:
+- process one or more files or images in a separate sandbox
+- install temporary packages or CLIs for a one-off job
+- run code that should not change the main OpenClaw sandbox
+- launch multiple independent child sandboxes; for more than one child sandbox, repeat this launcher once per job
+
+Workflow:
 1. Write a JSON request file that matches WorkerSandboxExecuteRequest.
 2. Run: \`node ${OPENCLAW_WORKER_SANDBOX_SCRIPT_PATH} /path/to/request.json\`
 3. Parse the JSON response and inspect \`capturedFiles\`, \`stdout\`, and \`stderr\`.
+4. For multiple child sandboxes, create one request file per job and run the launcher once per job.
+
+Rules:
+- Put all input files under \`/workspace/\`.
+- Put all files you want returned under \`/workspace/\` and list them in \`capturePaths\`.
+- Default to \`vcpus: 1\` unless the job really needs more CPU.
+- Keep jobs short and self-contained.
+- Do not assume anything written in the child sandbox persists after the job finishes.
 
 ### WorkerSandboxExecuteRequest shape
 
@@ -2305,6 +2320,19 @@ Use this when you need isolated compute, temporary filesystem state, or extra pa
   "files": [{ "path": "/workspace/input.txt", "contentBase64": "<base64>" }],
   "command": { "cmd": "bash", "args": ["-lc", "your command here"] },
   "capturePaths": ["/workspace/output.txt"],
+  "vcpus": 1,
+  "sandboxTimeoutMs": 300000
+}
+\`\`\`
+
+### Example: round-trip one image through a child sandbox
+
+\`\`\`json
+{
+  "task": "copy-image",
+  "files": [{ "path": "/workspace/input.png", "contentBase64": "<base64>" }],
+  "command": { "cmd": "bash", "args": ["-lc", "cp /workspace/input.png /workspace/output.png"] },
+  "capturePaths": ["/workspace/output.png"],
   "vcpus": 1,
   "sandboxTimeoutMs": 300000
 }

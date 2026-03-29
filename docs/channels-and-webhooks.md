@@ -16,10 +16,18 @@ There are two different gates here:
 Before the admin panel can save Slack or Telegram config, the deployment needs:
 
 - **A resolvable public HTTPS origin.** The app must be able to build a canonical webhook URL. If it cannot, channel connect is blocked.
-- **AI Gateway auth available.** On Vercel deployments, this means OIDC. If AI Gateway auth is `unavailable`, channel connect is blocked.
+- **AI Gateway auth available.** On Vercel deployments this is usually OIDC. `AI_GATEWAY_API_KEY` can still act as a fallback when OIDC is unavailable. If AI Gateway auth is `unavailable`, channel connect is blocked.
 - **Upstash Redis configured.** Channels rely on durable state for webhook queues and session history. On Vercel deployments, missing Upstash is a hard blocker. In local or non-Vercel environments it is a warning only.
 
 If any of those hard blockers are present, the channel config route returns HTTP 409 with a `CHANNEL_CONNECT_BLOCKED` error and a machine-readable list of issues.
+
+These warnings do **not** block channel save by themselves:
+
+- `OPENCLAW_PACKAGE_SPEC` not pinned
+- `VERCEL_AUTOMATION_BYPASS_SECRET` not set
+- `CRON_SECRET` not set
+
+They still matter for deterministic restores, protected webhook reachability, and cron recovery, but they are not part of the channel connectability hard-blocker set.
 
 Destructive launch verification is a separate operational proof step. It is what proves queue delivery, sandbox boot or restore, real completions, wake-from-sleep, and restore-target sealing. The app does not currently use `channelReadiness.ready` as a save-time blocker; it is the signal that tells operators whether the current deployment is truly channel-ready.
 
@@ -38,6 +46,16 @@ The operator rule is simple:
 - Use **preflight** to see whether channel setup is blocked by config.
 - Use **safe mode** to prove the live runtime path without testing sleep and restore.
 - Use **destructive mode** before calling the deployment channel-ready.
+
+## Recommended operator order
+
+1. Run preflight.
+2. Fix hard blockers until the channel reports `canConnect: true`.
+3. Run destructive launch verification.
+4. Save the channel credentials or register the webhook.
+5. Send a real test message.
+
+Channel save and channel readiness are separate. A channel can be connectable before the current deployment is fully verified for real traffic.
 
 ## Slack
 
@@ -101,7 +119,7 @@ When the sandbox is stopped and a channel message arrives, both platforms use a 
 4. The reply is delivered back to the originating channel.
 5. **Telegram only:** the boot message is deleted after the reply is delivered.
 
-The Workflow-based path is durable — it survives function restarts and retries on transient failures. This is why channels require Upstash: the durable state backing makes delivery reliable even when the sandbox needs to wake up.
+The Workflow-based path is durable — it survives function restarts and retries on transient failures. On deployed Vercel environments, that durability depends on Upstash-backed state and missing Upstash is a hard blocker for channel setup. In local or non-Vercel environments the app can still run with the in-memory store, but queue state and wake/retry durability do not survive cold starts.
 
 ## Troubleshooting
 
