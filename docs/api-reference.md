@@ -228,50 +228,150 @@ Sample request outcome: `PUT /api/channels/telegram` while the deployment cannot
 
 ### `GET /api/status`
 
-The main operator summary endpoint. Returns the current sandbox state, gateway readiness, timeout information, firewall policy, channel config, and restore-target health in a single response.
+The main operator summary endpoint. Returns everything about the current sandbox in one response: lifecycle state, gateway readiness, timeout data, firewall policy, public channel state, restore-target health, recent lifecycle metrics, setup progress, and the authenticated user.
+
+This is the endpoint the admin UI polls. It is also the first thing most automation reads.
 
 #### Cached vs live mode
 
-- **`GET /api/status`** — returns cached gateway readiness from the last probe and an **estimated** timeout based on `lastAccessedAt` plus the configured sleep window. This is cheap and does not touch the sandbox.
-- **`GET /api/status?health=1`** — performs a **live** gateway probe against the sandbox, queries the Sandbox SDK for the real timeout, and persists the probe result for future cached reads. Use this when you need to know the actual current state rather than a best-guess estimate.
+- **`GET /api/status`** — returns cached gateway readiness from the last probe and an **estimated** timeout calculated from `lastKeepaliveAt` plus the configured sleep window. Cheap — does not touch the sandbox or Sandbox SDK.
+- **`GET /api/status?health=1`** — performs a **live** gateway probe against the sandbox, reads the real timeout from the Sandbox SDK, and persists the probe result for future cached reads. Use this when you need ground truth rather than a best-guess estimate.
 
 The `timeoutSource` field tells you which mode produced the response:
 
 | `timeoutSource` | Meaning |
 | --- | --- |
-| `estimated` | Timeout was calculated from `lastAccessedAt` + `sleepAfterMs`. The sandbox may have already timed out. |
+| `estimated` | Timeout was calculated from `lastKeepaliveAt` + `sleepAfterMs`. The sandbox may have already timed out. |
 | `live` | Timeout was read from the Sandbox SDK during this request. This is the ground truth. |
-| `none` | Timeout information is not available (sandbox is not running). |
 
 When the cached path estimates that the timeout has already elapsed and the metadata still says `running`, the endpoint automatically reconciles: it queries the Sandbox SDK for the real status and updates the stored metadata before responding. This means even the cached path self-corrects stale "running" states.
 
-#### Key response fields
+#### Response areas
+
+The response is a flat JSON object with several logical areas described below. Every field listed here comes directly from the route handler in `src/app/api/status/route.ts`.
+
+##### Top-level identity and state
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `status` | string | Sandbox lifecycle status: `uninitialized`, `creating`, `setup`, `booting`, `running`, `stopped`, `restoring`, `error` |
+| `authMode` | `"admin-secret"` \| `"sign-in-with-vercel"` | Active auth mode for the deployment |
+| `storeBackend` | `"upstash"` \| `"memory"` | Which persistence backend is in use |
+| `persistentStore` | boolean | `true` when `storeBackend` is not `"memory"` |
+| `status` | string | Sandbox lifecycle state: `uninitialized`, `creating`, `setup`, `booting`, `running`, `stopped`, `restoring`, or `error` |
 | `sandboxId` | string \| null | Current sandbox ID, if one exists |
-| `snapshotId` | string \| null | Current snapshot ID used for restores |
-| `gatewayReady` | boolean | Whether the gateway is responding (derived from `gatewayStatus`) |
-| `gatewayStatus` | string | `ready`, `not-ready`, or `unknown` |
-| `gatewayCheckedAt` | number \| null | Unix timestamp (ms) of the last gateway probe result |
-| `timeoutRemainingMs` | number \| null | Milliseconds until the sandbox sleeps, or `null` when unknown |
-| `timeoutSource` | string | `estimated`, `live`, or `none` — how the timeout was determined |
-| `sleepAfterMs` | number | Configured sandbox sleep window in milliseconds |
-| `heartbeatIntervalMs` | number | How often the UI sends heartbeat POSTs to keep the sandbox alive |
-| `restoreTarget` | object | Restore-readiness assessment (see below) |
-| `setupProgress` | object \| null | Present only during `creating`, `setup`, `booting`, or `error` states |
+| `snapshotId` | string \| null | Most recent snapshot ID used for restores |
+| `lastError` | string \| null | Human-readable error from the last failed lifecycle operation |
 
-The `restoreTarget` object contains:
+##### Gateway readiness
 
-- `restorePreparedStatus` — `unknown`, `dirty`, `preparing`, `ready`, or `failed`
-- `restorePreparedReason` — why the status is what it is (e.g. `prepared`, `dynamic-config-changed`)
-- `attestation` — machine-readable check of whether the current snapshot is reusable
-- `plan` — what action the app thinks should happen next to make the restore target ready
+| Field | Type | Description |
+| --- | --- | --- |
+| `gatewayReady` | boolean | Shorthand derived from `gatewayStatus` — `true` only when `gatewayStatus` is `"ready"` |
+| `gatewayStatus` | `"ready"` \| `"not-ready"` \| `"unknown"` | Result of the most recent gateway probe |
+| `gatewayCheckedAt` | number \| null | Unix timestamp (ms) when gateway readiness was last probed. `null` when no probe has run for the current sandbox. |
+| `gatewayUrl` | `"/gateway"` | Admin-facing path to the proxied OpenClaw UI |
+
+In cached mode (`timeoutSource: "estimated"`), `gatewayStatus` reflects the last persisted probe — it is not re-checked. A cached `"ready"` means the gateway was ready at `gatewayCheckedAt`, not necessarily right now. `"unknown"` means no probe has ever run for this sandbox ID.
+
+##### Timeout
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `lastKeepaliveAt` | number \| null | Last recorded sandbox access time (Unix ms). `null` before the first access. |
+| `sleepAfterMs` | number | Configured sleep window in milliseconds |
+| `heartbeatIntervalMs` | number | How often the UI sends heartbeat POSTs to keep the sandbox alive (derived from sleep window) |
+| `timeoutRemainingMs` | number \| null | Milliseconds until sandbox sleep, or `null` when no timeout can be calculated |
+| `timeoutSource` | `"estimated"` \| `"live"` | How the timeout was determined (see cached vs live mode above) |
+
+##### Firewall
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `firewall.mode` | `"disabled"` \| `"learning"` \| `"enforcing"` | Current firewall mode |
+| `firewall.learnedDomains` | string[] | Domains observed during learning mode |
+| `firewall.wouldBlock` | string[] | Domains that **would** be blocked if the current learned policy were switched to enforcing mode |
+
+`wouldBlock` is computed on-the-fly from `learnedDomains` and the current allowlist. It is useful for previewing what enforcing mode would do without switching.
+
+##### Channels
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `channels` | object | Keyed by channel name (e.g. `"slack"`, `"telegram"`). Each channel object contains public operator-visible state. |
+| `channels.<name>.configured` | boolean | Whether credentials are saved for this channel |
+| `channels.<name>.webhookUrl` | string \| null | Operator-visible display URL (no bypass secret). `null` when the public origin cannot be resolved. |
+| `channels.<name>.status` | string | Channel connection status |
+| `channels.<name>.connectability` | object | Config-gate result for this channel — whether saving credentials would succeed right now |
+| `channels.<name>.connectability.canConnect` | boolean | `true` when all deployment prerequisites are met for this channel |
+| `channels.<name>.connectability.status` | `"pass"` \| `"fail"` \| `"warn"` | Aggregate connectability check result |
+| `channels.<name>.connectability.issues` | array | Specific blockers or warnings preventing connection |
+
+Connectability is a **config-time** check. It tells you whether deployment prerequisites (public origin, AI gateway, store) are in place. It does **not** tell you whether the channel has been proven to work end-to-end — that stronger guarantee comes from destructive launch verification.
+
+##### Restore target
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `restoreTarget.restorePreparedStatus` | `"unknown"` \| `"dirty"` \| `"preparing"` \| `"ready"` \| `"failed"` | Current restore-target health |
+| `restoreTarget.restorePreparedReason` | string \| null | Why the status is what it is (e.g. `"prepared"`, `"dynamic-config-changed"`, `"snapshot-missing"`) |
+| `restoreTarget.restorePreparedAt` | number \| null | When the restore target was last prepared (Unix ms) |
+| `restoreTarget.snapshotDynamicConfigHash` | string \| null | Config hash baked into the current snapshot |
+| `restoreTarget.runtimeDynamicConfigHash` | string \| null | Config hash the running deployment wants |
+| `restoreTarget.snapshotAssetSha256` | string \| null | Static asset hash in the snapshot |
+| `restoreTarget.runtimeAssetSha256` | string \| null | Static asset hash the running deployment expects |
+| `restoreTarget.attestation` | object | Machine-readable check of whether the snapshot is reusable |
+| `restoreTarget.attestation.reusable` | boolean | `true` when the snapshot can be restored without resync |
+| `restoreTarget.attestation.needsPrepare` | boolean | `true` when a prepare cycle is needed before the snapshot is reusable |
+| `restoreTarget.attestation.reasons` | string[] | Why the snapshot is not reusable (empty when `reusable` is `true`) |
+| `restoreTarget.plan` | object | Machine-readable next actions to make the restore target ready |
+| `restoreTarget.plan.schemaVersion` | number | Always `1` |
+| `restoreTarget.plan.status` | string | Plan status (e.g. `"ready"`, `"action-needed"`) |
+| `restoreTarget.plan.blocking` | boolean | `true` when the plan has unresolved blocking actions |
+| `restoreTarget.plan.reasons` | string[] | Human-readable reasons behind the plan |
+| `restoreTarget.plan.actions` | array | Ordered list of actions to take |
+| `restoreTarget.oracle` | object \| null | Background restore-prepare/oracle state |
 
 Read `attestation.reusable` and `plan.blocking` together: if the attestation says the snapshot is reusable and the plan is not blocking, the next restore will be fast and clean. If `attestation.reusable` is `false`, check `attestation.reasons` for what changed.
 
-#### Example: `GET /api/status?health=1`
+##### Lifecycle
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `lifecycle.lastRestoreMetrics` | object \| null | Per-phase timings from the most recent restore. `null` when no restore has run. |
+| `lifecycle.lastRestoreMetrics.totalMs` | number | Total restore duration in milliseconds |
+| `lifecycle.lastRestoreMetrics.vcpus` | number | vCPU count used for the restore |
+| `lifecycle.lastRestoreMetrics.dynamicConfigReason` | string | `"hash-match"`, `"hash-miss"`, or `"no-snapshot-hash"` |
+| `lifecycle.lastRestoreMetrics.skippedDynamicConfigSync` | boolean | Whether dynamic config sync was skipped (hash matched) |
+| `lifecycle.lastRestoreMetrics.dynamicConfigHash` | string \| null | Config hash recorded during the restore |
+| `lifecycle.restoreHistory` | array | Up to 5 most recent restore timing records (same shape as `lastRestoreMetrics`) |
+| `lifecycle.lastTokenRefreshAt` | number \| null | When the AI gateway token was last refreshed (Unix ms) |
+| `lifecycle.lastTokenSource` | string \| null | Token source (e.g. `"oidc"`) |
+| `lifecycle.lastTokenExpiresAt` | number \| null | When the current token expires (Unix ms) |
+| `lifecycle.lastTokenRefreshError` | string \| null | Error from the last failed token refresh, or `null` |
+| `lifecycle.consecutiveTokenRefreshFailures` | number | Count of consecutive token refresh failures. `0` when healthy. |
+| `lifecycle.breakerOpenUntil` | number \| null | If the token refresh circuit breaker is open, the Unix ms timestamp when it will close. `null` when the breaker is closed. |
+
+##### Setup progress
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `setupProgress` | object \| null | Non-null only when `status` is `creating`, `setup`, `booting`, or `error`. Contains live output from the sandbox bootstrap process. |
+| `setupProgress.attemptId` | string | Lifecycle attempt ID this progress belongs to |
+| `setupProgress.phase` | string | Current setup phase (e.g. `"installing-openclaw"`, `"starting-gateway"`) |
+| `setupProgress.phaseLabel` | string | Human-readable label for the phase |
+| `setupProgress.preview` | string \| null | Most recent line of output suitable for display |
+| `setupProgress.lines` | array | Buffered output lines, each with `ts`, `stream`, and `text` |
+
+When `status` is `running` or `stopped`, `setupProgress` is always `null` regardless of what is in the store.
+
+##### User
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `user.sub` | string | User subject exposed by this route. Today this endpoint returns `"admin"` in both auth modes. |
+| `user.name` | string | User display name exposed by this route. Today this endpoint returns `"Admin"`. |
+
+#### Example: cached response (`GET /api/status`)
 
 ```json
 {
@@ -289,12 +389,27 @@ Read `attestation.reusable` and `plan.blocking` together: if the attestation say
   "lastKeepaliveAt": 1759999950000,
   "sleepAfterMs": 1800000,
   "heartbeatIntervalMs": 300000,
-  "timeoutRemainingMs": 1420000,
-  "timeoutSource": "live",
+  "timeoutRemainingMs": 1600000,
+  "timeoutSource": "estimated",
   "firewall": {
     "mode": "learning",
     "learnedDomains": ["api.openai.com"],
     "wouldBlock": []
+  },
+  "channels": {
+    "telegram": {
+      "configured": true,
+      "webhookUrl": "https://app.example.com/api/channels/telegram/webhook",
+      "status": "connected",
+      "connectability": {
+        "channel": "telegram",
+        "mode": "webhook-proxied",
+        "canConnect": true,
+        "status": "pass",
+        "webhookUrl": "https://app.example.com/api/channels/telegram/webhook",
+        "issues": []
+      }
+    }
   },
   "restoreTarget": {
     "restorePreparedStatus": "ready",
@@ -319,7 +434,90 @@ Read `attestation.reusable` and `plan.blocking` together: if the attestation say
     "oracle": null
   },
   "lifecycle": {
-    "lastRestoreMetrics": null,
+    "lastRestoreMetrics": {
+      "totalMs": 42350,
+      "vcpus": 2,
+      "dynamicConfigReason": "hash-match",
+      "skippedDynamicConfigSync": true,
+      "dynamicConfigHash": "abc123",
+      "skippedStaticAssetSync": true,
+      "assetSha256": "def456",
+      "recordedAt": 1759998000000,
+      "sandboxCreateMs": 12000,
+      "tokenWriteMs": 150,
+      "assetSyncMs": 0,
+      "startupScriptMs": 800,
+      "forcePairMs": 300,
+      "firewallSyncMs": 200,
+      "localReadyMs": 18000,
+      "publicReadyMs": 10900
+    },
+    "restoreHistory": [],
+    "lastTokenRefreshAt": 1759999900000,
+    "lastTokenSource": "oidc",
+    "lastTokenExpiresAt": 1760000200000,
+    "lastTokenRefreshError": null,
+    "consecutiveTokenRefreshFailures": 0,
+    "breakerOpenUntil": null
+  },
+  "setupProgress": null,
+  "user": { "sub": "admin", "name": "Admin" }
+}
+```
+
+#### Example: live response (`GET /api/status?health=1`)
+
+```json
+{
+  "authMode": "admin-secret",
+  "storeBackend": "upstash",
+  "persistentStore": true,
+  "status": "running",
+  "sandboxId": "sbx_123",
+  "snapshotId": "snap_456",
+  "gatewayReady": false,
+  "gatewayStatus": "not-ready",
+  "gatewayCheckedAt": 1760000300000,
+  "gatewayUrl": "/gateway",
+  "lastError": null,
+  "lastKeepaliveAt": 1759999950000,
+  "sleepAfterMs": 1800000,
+  "heartbeatIntervalMs": 300000,
+  "timeoutRemainingMs": 905000,
+  "timeoutSource": "live",
+  "firewall": {
+    "mode": "learning",
+    "learnedDomains": [],
+    "wouldBlock": []
+  },
+  "channels": {},
+  "restoreTarget": {
+    "restorePreparedStatus": "dirty",
+    "restorePreparedReason": "dynamic-config-changed",
+    "restorePreparedAt": null,
+    "snapshotDynamicConfigHash": "old-hash",
+    "runtimeDynamicConfigHash": "new-hash",
+    "snapshotAssetSha256": "def456",
+    "runtimeAssetSha256": "def456",
+    "attestation": {
+      "reusable": false,
+      "needsPrepare": true,
+      "reasons": ["snapshot-config-stale", "restore-target-dirty"]
+    },
+    "plan": {
+      "schemaVersion": 1,
+      "status": "action-needed",
+      "blocking": true,
+      "reasons": ["Snapshot config hash does not match runtime config"],
+      "actions": [{ "id": "prepare-restore-target", "label": "Prepare restore target" }]
+    },
+    "oracle": null
+  },
+  "lifecycle": {
+    "lastRestoreMetrics": {
+      "totalMs": 42350,
+      "dynamicConfigReason": "hash-miss"
+    },
     "restoreHistory": [],
     "lastTokenRefreshAt": null,
     "lastTokenSource": null,
@@ -328,15 +526,39 @@ Read `attestation.reusable` and `plan.blocking` together: if the attestation say
     "consecutiveTokenRefreshFailures": 0,
     "breakerOpenUntil": null
   },
-  "setupProgress": null
+  "setupProgress": null,
+  "user": { "sub": "admin", "name": "Admin" }
 }
 ```
 
-When `timeoutSource` is `estimated` instead of `live`, `timeoutRemainingMs` is a best-effort calculation. If you need to make decisions based on the timeout (e.g. whether to snapshot before sleep), use `?health=1`.
+#### Interpretation guidance
 
-#### `POST /api/status`
+These distinctions are easy to confuse and worth calling out explicitly:
 
-The heartbeat endpoint. The admin UI calls this periodically to keep the sandbox alive. Returns `{ ok: true, status: "<current status>" }`. Calling this extends the sandbox timeout by touching the `lastAccessedAt` timestamp.
+**Gateway readiness vs sandbox lifecycle state.** `gatewayReady: false` does **not** automatically mean the sandbox is stopped. The sandbox can be `running` while the gateway probe fails — for example, during a gateway restart or if the OpenClaw process crashed inside a running sandbox. Conversely, `gatewayReady: true` from a cached probe only means the gateway was reachable at `gatewayCheckedAt`. To know right now, use `?health=1`.
+
+**Channel connectability vs destructive launch verification.** `channels.<name>.connectability.canConnect: true` means the deployment prerequisites for saving channel credentials are met (public origin, AI gateway, store). It does **not** mean the channel has been proven to deliver messages end-to-end. That stronger guarantee requires destructive launch verification (`POST /api/admin/launch-verify` in destructive mode), which exercises the full wake → chat completions → channel round-trip path.
+
+**Restore-target readiness vs simple reachability.** `restorePreparedStatus: "ready"` means the current snapshot has been verified as a reusable restore target — its config hash and asset hash match the running deployment. This is a stronger statement than "the sandbox is reachable." A `"dirty"` restore target means the next restore will work but will need to resync config or assets, adding time. Check `attestation.reasons` for specifics.
+
+See [Channels and Webhooks](channels-and-webhooks.md) for the connectability-vs-readiness distinction, and [Sandbox Lifecycle and Restore](lifecycle-and-restore.md) for restore-target semantics.
+
+### `POST /api/status`
+
+Heartbeat endpoint. The admin UI calls this periodically to keep the sandbox alive. It touches the stored keepalive timestamp (`lastAccessedAt` in metadata, exposed as `lastKeepaliveAt` in `GET /api/status`), which extends the sandbox timeout window.
+
+Use this when the UI only needs to keep the sandbox alive. Use `GET /api/status?health=1` when you need a live readiness probe and fresh timeout data.
+
+Returns:
+
+```json
+{
+  "ok": true,
+  "status": "running"
+}
+```
+
+`status` reflects the sandbox lifecycle state after the touch. If the sandbox is not running, the touch is a no-op and `status` reflects the current state.
 
 ## Structured output contracts
 
