@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
+  OPENCLAW_CONFIG_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
-  OPENCLAW_WORKER_SANDBOX_SKILL_PATH,
+  OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_WORKER_SANDBOX_SCRIPT_PATH,
+  OPENCLAW_WORKER_SANDBOX_SKILL_PATH,
+  buildWorkerSandboxScript,
 } from "@/server/openclaw/config";
 import { buildRestoreAssetManifest } from "@/server/openclaw/restore-assets";
 import { ensureSandboxRunning } from "@/server/sandbox/lifecycle";
@@ -19,6 +26,80 @@ function getWorkerSandboxRoute() {
   return require("@/app/api/internal/worker-sandboxes/execute/route") as {
     POST: (request: Request) => Promise<Response>;
   };
+}
+
+async function runWorkerSandboxScriptForTest(options: {
+  scriptContent: string;
+  gatewayToken: string;
+  configJson: string;
+  requestJson: string;
+  fetchImpl: typeof fetch;
+}): Promise<{ exitCode: number; stdout: string[]; stderr: string[] }> {
+  const dir = await mkdtemp(join(tmpdir(), "worker-sandbox-script-"));
+  const tokenPath = join(dir, "gateway-token.txt");
+  const configPath = join(dir, "openclaw.json");
+  const requestPath = join(dir, "request.json");
+  const scriptPath = join(dir, "execute.mjs");
+
+  const patchedScript = options.scriptContent
+    .replaceAll(OPENCLAW_GATEWAY_TOKEN_PATH, tokenPath)
+    .replaceAll(OPENCLAW_CONFIG_PATH, configPath);
+
+  await writeFile(tokenPath, options.gatewayToken, "utf8");
+  await writeFile(configPath, options.configJson, "utf8");
+  await writeFile(requestPath, options.requestJson, "utf8");
+  await writeFile(scriptPath, patchedScript, "utf8");
+
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+
+  const previousArgv = process.argv.slice();
+  const mutableGlobal = globalThis as typeof globalThis & {
+    fetch: typeof fetch;
+  };
+  const previousFetch = mutableGlobal.fetch;
+  const previousLog = console.log;
+  const previousError = console.error;
+  const previousExit = process.exit;
+
+  let exitCode = 0;
+  try {
+    mutableGlobal.fetch = options.fetchImpl;
+    console.log = (...args: unknown[]) => {
+      stdout.push(args.map((value) => String(value)).join(" "));
+    };
+    console.error = (...args: unknown[]) => {
+      stderr.push(args.map((value) => String(value)).join(" "));
+    };
+    process.exit = ((code?: number) => {
+      throw new Error(`__worker_sandbox_exit__:${code ?? 0}`);
+    }) as typeof process.exit;
+
+    process.argv = ["node", scriptPath, requestPath];
+
+    try {
+      await import(`${pathToFileURL(scriptPath).href}?t=${Date.now()}`);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      if (!message.startsWith("__worker_sandbox_exit__:")) {
+        throw error;
+      }
+      exitCode = Number.parseInt(
+        message.replace("__worker_sandbox_exit__:", ""),
+        10,
+      );
+    }
+  } finally {
+    process.argv = previousArgv;
+    mutableGlobal.fetch = previousFetch;
+    console.log = previousLog;
+    console.error = previousError;
+    process.exit = previousExit;
+    await rm(dir, { recursive: true, force: true });
+  }
+
+  return { exitCode, stdout, stderr };
 }
 
 test("restore preloads worker-sandbox assets before boot for pre-feature snapshots", async () => {
@@ -301,4 +382,179 @@ test("legacy snapshot restore can still execute a worker sandbox request without
   } finally {
     h.teardown();
   }
+});
+
+test("legacy snapshot restore leaves a runnable worker-sandbox launcher in the restored sandbox", async () => {
+  const h = createScenarioHarness();
+  try {
+    await h.mutateMeta((meta) => {
+      meta.status = "stopped";
+      meta.snapshotId = "snap-legacy-worker-sandbox-script";
+      meta.gatewayToken = "test-gw-token";
+      meta.snapshotAssetSha256 = null;
+      meta.snapshotDynamicConfigHash = null;
+      meta.snapshotConfigHash = null;
+      meta.lastRestoreMetrics = null;
+      meta.sandboxId = null;
+      meta.portUrls = null;
+    });
+
+    h.fakeFetch.onGet(/fake\.vercel\.run/, () =>
+      new Response('<div id="openclaw-app">ready</div>', { status: 200 }),
+    );
+
+    const callbacks: Array<() => Promise<void> | void> = [];
+    await ensureSandboxRunning({
+      origin: "https://test.example.com",
+      reason: "restore-legacy-worker-sandbox-script",
+      schedule(cb) {
+        callbacks.push(cb);
+      },
+    });
+
+    assert.equal(callbacks.length, 1);
+    await callbacks[0]!();
+
+    const restoredHandle = h.controller.lastCreated()!;
+    const scriptFile = restoredHandle.writtenFiles.find(
+      (file) => file.path === OPENCLAW_WORKER_SANDBOX_SCRIPT_PATH,
+    );
+    const configFile = restoredHandle.writtenFiles.find(
+      (file) => file.path === OPENCLAW_CONFIG_PATH,
+    );
+
+    assert.ok(
+      scriptFile,
+      "restore should rewrite worker-sandbox script for legacy snapshots",
+    );
+    assert.ok(
+      configFile,
+      "restore should rewrite openclaw.json for legacy snapshots",
+    );
+
+    const before = await getInitializedMeta();
+    const createCountBefore = h.controller.eventsOfKind("create").length;
+
+    const route = getWorkerSandboxRoute();
+
+    let seenUrl: string | null = null;
+    let seenAuth: string | null = null;
+
+    const requestBody = {
+      task: "process-image",
+      files: [
+        {
+          path: "/workspace/input.txt",
+          contentBase64: Buffer.from(
+            "hello from restored sandbox\n",
+            "utf8",
+          ).toString("base64"),
+        },
+      ],
+      command: { cmd: "cat", args: ["/workspace/input.txt"] },
+      capturePaths: ["/workspace/input.txt"],
+      vcpus: 1,
+      sandboxTimeoutMs: 300_000,
+    };
+
+    const scriptRun = await runWorkerSandboxScriptForTest({
+      scriptContent: scriptFile.content.toString("utf8"),
+      gatewayToken: before.gatewayToken,
+      configJson: configFile.content.toString("utf8"),
+      requestJson: JSON.stringify(requestBody),
+      fetchImpl: async (input, init) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        seenUrl = url;
+        const headers = new Headers(init?.headers);
+        seenAuth = headers.get("authorization");
+        return route.POST(
+          new Request(url, {
+            method: init?.method ?? "GET",
+            headers,
+            body: init?.body,
+          }),
+        );
+      },
+    });
+
+    assert.equal(scriptRun.exitCode, 0);
+    assert.equal(scriptRun.stderr.length, 0);
+    assert.equal(
+      seenUrl,
+      "https://test.example.com/api/internal/worker-sandboxes/execute",
+    );
+
+    const expectedToken = await buildWorkerSandboxBearerToken();
+    assert.equal(seenAuth, `Bearer ${expectedToken}`);
+
+    const body = JSON.parse(
+      scriptRun.stdout.join("\n"),
+    ) as WorkerSandboxExecuteResponse;
+    assert.equal(body.ok, true);
+    assert.equal(body.task, "process-image");
+    assert.equal(body.exitCode, 0);
+    assert.equal(body.capturedFiles.length, 1);
+    assert.equal(body.capturedFiles[0]!.path, "/workspace/input.txt");
+    assert.equal(
+      Buffer.from(body.capturedFiles[0]!.contentBase64, "base64").toString(
+        "utf8",
+      ),
+      "hello from restored sandbox\n",
+    );
+
+    const after = await getInitializedMeta();
+    assert.equal(after.status, before.status, "status must not change");
+    assert.equal(
+      after.sandboxId,
+      before.sandboxId,
+      "sandboxId must not change",
+    );
+    assert.equal(
+      after.snapshotId,
+      before.snapshotId,
+      "snapshotId must not change",
+    );
+    assert.equal(
+      h.controller.eventsOfKind("create").length,
+      createCountBefore + 1,
+      "restored OpenClaw should spawn exactly one child sandbox",
+    );
+  } finally {
+    h.teardown();
+  }
+});
+
+test("worker-sandbox launcher exits clearly when restored config has no allowed origin", async () => {
+  const result = await runWorkerSandboxScriptForTest({
+    scriptContent: buildWorkerSandboxScript(),
+    gatewayToken: "gw-token",
+    configJson: JSON.stringify({
+      gateway: {
+        controlUi: {
+          allowedOrigins: [],
+        },
+      },
+    }),
+    requestJson: JSON.stringify({
+      task: "no-origin",
+      command: { cmd: "echo", args: ["ok"] },
+    }),
+    fetchImpl: async () => {
+      throw new Error(
+        "fetch should not be called when allowed origin is missing",
+      );
+    },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.stdout.length, 0);
+  assert.match(
+    result.stderr.join("\n"),
+    /Could not resolve host origin from openclaw\.json/,
+  );
 });
