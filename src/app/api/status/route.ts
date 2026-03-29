@@ -164,13 +164,6 @@ export async function GET(request: Request): Promise<Response> {
       },
       setupProgress,
       user: { sub: "admin", name: "Admin" },
-      _debug: await (async () => {
-        try {
-          const { instanceKeyPrefix } = await import("@/server/store/keyspace");
-          const raw = await getStore().getValue<string>(`${instanceKeyPrefix()}debug:workflow-step`);
-          return raw ? JSON.parse(raw) : null;
-        } catch { return null; }
-      })(),
     });
 
     if (auth.setCookieHeader) {

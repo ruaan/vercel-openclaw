@@ -142,41 +142,9 @@ export async function processChannelStep(
     const options = buildChannelJobOptions(channel, resolvedDependencies);
     const job = buildQueuedChannelJob(payload, origin, requestId);
 
-    const { getStore } = await import("@/server/store/store");
-    const { instanceKeyPrefix } = await import("@/server/store/keyspace");
-    const debugKey = `${instanceKeyPrefix()}debug:workflow-step`;
-    const store = getStore();
-    await store.setValue(debugKey, JSON.stringify({
-      phase: "starting",
-      channel,
-      requestId,
-      bootMessageId: bootMessageId ?? null,
-      ts: Date.now(),
-    }), 300);
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await resolvedDependencies.processChannelJob(options as any, job, undefined, existingBootHandle);
-
-    await store.setValue(debugKey, JSON.stringify({
-      phase: "completed",
-      channel,
-      requestId,
-      ts: Date.now(),
-    }), 300);
   } catch (error) {
-    try {
-      const { getStore } = await import("@/server/store/store");
-      const { instanceKeyPrefix } = await import("@/server/store/keyspace");
-      const store = getStore();
-      await store.setValue(`${instanceKeyPrefix()}debug:workflow-step`, JSON.stringify({
-        phase: "error",
-        channel,
-        requestId,
-        error: error instanceof Error ? error.message : String(error),
-        errorName: error instanceof Error ? error.name : undefined,
-        ts: Date.now(),
-      }), 300);
-    } catch { /* ignore store errors in diagnostic */ }
     throw toWorkflowProcessingError(channel, error, resolvedDependencies);
   }
 }
