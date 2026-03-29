@@ -14,6 +14,7 @@ import {
   ChannelInfoRow,
   ChannelSecretField,
   ChannelTextField,
+  getChannelActionLabel,
 } from "@/components/panels/channel-panel-shared";
 
 type WhatsAppPanelProps = {
@@ -142,8 +143,8 @@ export function WhatsAppPanel({
 
     setPanelError(null);
     const result = await requestJson("/api/channels/whatsapp", {
-      label: "Save WhatsApp",
-      successMessage: "WhatsApp connected",
+      label: getChannelActionLabel("whatsapp", editing ? "update" : "connect"),
+      successMessage: editing ? "WhatsApp credentials updated" : "WhatsApp connected",
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -177,7 +178,7 @@ export function WhatsAppPanel({
 
     setPanelError(null);
     const success = await runAction("/api/channels/whatsapp", {
-      label: "Disconnect WhatsApp",
+      label: getChannelActionLabel("whatsapp", "disconnect"),
       successMessage: "WhatsApp disconnected",
       method: "DELETE",
     });
@@ -211,6 +212,8 @@ export function WhatsAppPanel({
 
   return (
     <ChannelCardFrame
+      channel="whatsapp"
+      configured={wa.configured}
       channelClassName="channel-whatsapp"
       title="WhatsApp"
       summary={

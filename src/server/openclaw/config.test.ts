@@ -16,6 +16,10 @@ import {
   buildTtsScript,
   buildStructuredExtractSkill,
   buildStructuredExtractScript,
+  buildEmbeddingsSkill,
+  buildEmbeddingsScript,
+  buildSemanticSearchSkill,
+  buildSemanticSearchScript,
   OPENCLAW_TELEGRAM_WEBHOOK_HOST,
   OPENCLAW_TELEGRAM_INTERNAL_WEBHOOK_PATH,
   TELEGRAM_PUBLIC_WEBHOOK_PATH,
@@ -564,4 +568,34 @@ test("toWhatsAppGatewayConfig extracts gateway-relevant fields", () => {
     groupAllowFrom: ["+1"],
     groups: ["g1"],
   });
+});
+
+// --- Embeddings skill ---
+
+test("buildEmbeddingsSkill returns valid skill metadata", () => {
+  const skill = buildEmbeddingsSkill();
+  assert.ok(skill.includes("name: embeddings"));
+  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+});
+
+test("buildEmbeddingsScript uses /v1/embeddings", () => {
+  const script = buildEmbeddingsScript();
+  assert.ok(script.includes("/v1/embeddings"));
+  assert.ok(script.includes("text-embedding-3-small"));
+});
+
+// --- Semantic Search skill ---
+
+test("buildSemanticSearchSkill returns valid skill metadata", () => {
+  const skill = buildSemanticSearchSkill();
+  assert.ok(skill.includes("name: semantic-search"));
+  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+});
+
+test("buildSemanticSearchScript uses embeddings and cosine similarity", () => {
+  const script = buildSemanticSearchScript();
+  assert.ok(script.includes("/v1/embeddings"));
+  assert.ok(script.includes("cosineSimilarity"));
+  assert.ok(script.includes("schemaVersion: 1"));
+  assert.ok(script.includes("queryDimensions = dimensions ?? index.dimensions ?? undefined"));
 });

@@ -239,7 +239,7 @@ const REQUEST_JSON_FAILURE: RequestJson = async () => ({
 
 /* ── Conditional endpoint row when endpointUrl diverges from webhookUrl ── */
 
-test("DiscordPanel shows separate Endpoint row when endpointUrl differs from webhookUrl", () => {
+test("DiscordPanel absorbs distinct endpoint into health row instead of adding a fourth row", () => {
   const html = renderPanel(
     makeStatus({
       configured: true,
@@ -248,23 +248,21 @@ test("DiscordPanel shows separate Endpoint row when endpointUrl differs from web
       webhookUrl: "https://openclaw.example/api/channels/discord/webhook",
       endpointUrl: "https://old-deploy.example/api/channels/discord/webhook",
       endpointConfigured: true,
-      commandRegistered: true,
+      commandRegistered: false,
       inviteUrl: "https://discord.com/oauth2/authorize?client_id=app-123",
       connectability: makeConnectability("discord"),
     }),
   );
 
-  // 4 detail rows: Application, Webhook URL, Endpoint (divergent), Health
+  // Still exactly 3 detail rows: Application, Webhook URL, Health
   const detailRows = html.match(/channel-detail-row/g) ?? [];
-  assert.equal(detailRows.length, 4, `expected 4 detail rows when endpoint diverges (found ${detailRows.length})`);
-  assert.ok(html.includes("Endpoint"), "shows separate Endpoint row");
-  assert.ok(
-    html.includes("https://old-deploy.example/api/channels/discord/webhook"),
-    "endpoint row shows the divergent URL",
-  );
+  assert.equal(detailRows.length, 3, `expected 3 detail rows even with distinct endpoint (found ${detailRows.length})`);
+  assert.ok(!/>Endpoint<\/span>/.test(html), "does not render a separate Endpoint row");
+  assert.ok(html.includes("Custom endpoint configured"), "health row absorbs endpoint status");
+  assert.ok(html.includes("Copy endpoint"), "distinct endpoint remains accessible without adding a row");
 });
 
-test("DiscordPanel hides Endpoint row when endpointUrl matches webhookUrl", () => {
+test("DiscordPanel shows plain endpoint status when endpointUrl matches webhookUrl", () => {
   const html = renderPanel(
     makeStatus({
       configured: true,
@@ -281,6 +279,8 @@ test("DiscordPanel hides Endpoint row when endpointUrl matches webhookUrl", () =
   const detailRows = html.match(/channel-detail-row/g) ?? [];
   assert.equal(detailRows.length, 3, `expected 3 detail rows when endpoint matches (found ${detailRows.length})`);
   assert.ok(!/>Endpoint<\/span>/.test(html), "no separate Endpoint row when URLs match");
+  assert.ok(html.includes("Endpoint configured"), "health shows plain endpoint status");
+  assert.ok(!html.includes("Custom endpoint configured"), "no custom label when URLs match");
 });
 
 /* ── Type contract: failure stubs satisfy RunAction and RequestJson ── */

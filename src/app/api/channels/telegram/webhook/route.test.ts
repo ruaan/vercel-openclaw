@@ -106,6 +106,39 @@ test("Telegram webhook: valid event enqueues job and returns 200", async () => {
 });
 
 // ===========================================================================
+// Stale running status — fast path failure triggers wake
+// ===========================================================================
+
+test("Telegram webhook: fast path connection failure reconciles status and starts workflow", async () => {
+  await withHarness(async (h) => {
+    await configureTelegram(h);
+    // Simulate stale "running" status — sandbox is actually dead
+    await h.mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-stale-dead";
+      meta.snapshotId = "snap-123";
+    });
+    // Fast path fetch will throw (no handler registered for the sandbox domain)
+    // Boot message succeeds
+    h.fakeFetch.onPost(/api\.telegram\.org/, () =>
+      Response.json({ ok: true, result: { message_id: 1 } }),
+    );
+    const route = getTelegramWebhookRoute();
+    const startMock = mock.method(telegramWebhookWorkflowRuntime, "start", async () => {});
+    const req = buildTelegramWebhook({ webhookSecret: TELEGRAM_WEBHOOK_SECRET });
+    try {
+      const result = await callRoute(route.POST, req);
+      assert.equal(result.status, 200);
+      // Workflow should have been started (wake path), not silently dropped
+      assert.equal(startMock.mock.callCount(), 1, "workflow start should be called to wake the sandbox");
+      resetAfterCallbacks();
+    } finally {
+      startMock.mock.restore();
+    }
+  });
+});
+
+// ===========================================================================
 // Dedup
 // ===========================================================================
 

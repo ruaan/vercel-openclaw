@@ -18,6 +18,10 @@ import {
   buildTtsScript,
   buildStructuredExtractSkill,
   buildStructuredExtractScript,
+  buildEmbeddingsSkill,
+  buildEmbeddingsScript,
+  buildSemanticSearchSkill,
+  buildSemanticSearchScript,
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   BUN_BIN,
   BUN_DOWNLOAD_SHA256,
@@ -41,6 +45,10 @@ import {
   OPENCLAW_TTS_SCRIPT_PATH,
   OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
   OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
+  OPENCLAW_EMBEDDINGS_SKILL_PATH,
+  OPENCLAW_EMBEDDINGS_SCRIPT_PATH,
+  OPENCLAW_SEMANTIC_SEARCH_SKILL_PATH,
+  OPENCLAW_SEMANTIC_SEARCH_SCRIPT_PATH,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
   OPENCLAW_TELEGRAM_BOT_TOKEN_PATH,
@@ -327,6 +335,22 @@ export async function setupOpenClaw(
     {
       path: OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
       content: Buffer.from(buildStructuredExtractScript()),
+    },
+    {
+      path: OPENCLAW_EMBEDDINGS_SKILL_PATH,
+      content: Buffer.from(buildEmbeddingsSkill()),
+    },
+    {
+      path: OPENCLAW_EMBEDDINGS_SCRIPT_PATH,
+      content: Buffer.from(buildEmbeddingsScript()),
+    },
+    {
+      path: OPENCLAW_SEMANTIC_SEARCH_SKILL_PATH,
+      content: Buffer.from(buildSemanticSearchSkill()),
+    },
+    {
+      path: OPENCLAW_SEMANTIC_SEARCH_SCRIPT_PATH,
+      content: Buffer.from(buildSemanticSearchScript()),
     },
     ...(options.telegramBotToken
       ? [{ path: OPENCLAW_TELEGRAM_BOT_TOKEN_PATH, content: Buffer.from(options.telegramBotToken) }]

@@ -21,6 +21,10 @@ import {
   OPENCLAW_TTS_SCRIPT_PATH,
   OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
   OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
+  OPENCLAW_EMBEDDINGS_SKILL_PATH,
+  OPENCLAW_EMBEDDINGS_SCRIPT_PATH,
+  OPENCLAW_SEMANTIC_SEARCH_SKILL_PATH,
+  OPENCLAW_SEMANTIC_SEARCH_SCRIPT_PATH,
   OPENCLAW_STARTUP_SCRIPT_PATH,
   OPENCLAW_STATE_DIR,
 } from "@/server/openclaw/config";
@@ -135,6 +139,10 @@ test("setupOpenClaw writes all required config files", async () => {
       OPENCLAW_TTS_SCRIPT_PATH,
       OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
       OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
+      OPENCLAW_EMBEDDINGS_SKILL_PATH,
+      OPENCLAW_EMBEDDINGS_SCRIPT_PATH,
+      OPENCLAW_SEMANTIC_SEARCH_SKILL_PATH,
+      OPENCLAW_SEMANTIC_SEARCH_SCRIPT_PATH,
     ];
 
     for (const p of expectedPaths) {
@@ -1312,6 +1320,50 @@ test("setupOpenClaw plugin install is idempotent — does not fail on repeat", a
       (c) => c.cmd === OPENCLAW_BIN && c.args?.[0] === "plugins",
     );
     assert.equal(pluginCmds.length, 1, "plugin install should run exactly once per setup call");
+  } finally {
+    h.teardown();
+  }
+});
+
+test("setupOpenClaw writes embeddings skill and script with expected content", async () => {
+  const h = createScenarioHarness();
+  try {
+    const handle = await createHandle(h);
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      apiKey: "ak",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    const skill = handle.writtenFiles.find((f) => f.path === OPENCLAW_EMBEDDINGS_SKILL_PATH);
+    assert.ok(skill, "embeddings skill file not written");
+    assert.ok(skill.content.toString().includes("name: embeddings"));
+
+    const script = handle.writtenFiles.find((f) => f.path === OPENCLAW_EMBEDDINGS_SCRIPT_PATH);
+    assert.ok(script, "embeddings script file not written");
+    assert.ok(script.content.toString().includes("/v1/embeddings"));
+  } finally {
+    h.teardown();
+  }
+});
+
+test("setupOpenClaw writes semantic-search skill and script with expected content", async () => {
+  const h = createScenarioHarness();
+  try {
+    const handle = await createHandle(h);
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok",
+      apiKey: "ak",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    const skill = handle.writtenFiles.find((f) => f.path === OPENCLAW_SEMANTIC_SEARCH_SKILL_PATH);
+    assert.ok(skill, "semantic-search skill file not written");
+    assert.ok(skill.content.toString().includes("name: semantic-search"));
+
+    const script = handle.writtenFiles.find((f) => f.path === OPENCLAW_SEMANTIC_SEARCH_SCRIPT_PATH);
+    assert.ok(script, "semantic-search script file not written");
+    assert.ok(script.content.toString().includes("cosineSimilarity"));
   } finally {
     h.teardown();
   }

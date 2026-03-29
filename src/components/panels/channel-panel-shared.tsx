@@ -5,12 +5,40 @@ import { ChannelPill } from "@/components/ui/badge";
 import { ConnectabilityNotice } from "@/components/panels/connectability-notice";
 import type { ChannelConnectability } from "@/shared/channel-connectability";
 
+export type SupportedChannelName = "slack" | "telegram" | "discord" | "whatsapp";
+
+export type ChannelActionKind = "connect" | "update" | "disconnect";
+
+const CHANNEL_DISPLAY_NAMES: Record<SupportedChannelName, string> = {
+  slack: "Slack",
+  telegram: "Telegram",
+  discord: "Discord",
+  whatsapp: "WhatsApp",
+};
+
+export function getChannelActionLabel(
+  channel: SupportedChannelName,
+  kind: ChannelActionKind,
+): string {
+  const name = CHANNEL_DISPLAY_NAMES[channel];
+  switch (kind) {
+    case "connect":
+      return `Connect ${name}`;
+    case "update":
+      return `Update ${name} credentials`;
+    case "disconnect":
+      return `Disconnect ${name}`;
+  }
+}
+
 export type ChannelPillModel = {
   label: string;
   variant: "good" | "bad" | "idle";
 };
 
 export function ChannelCardFrame({
+  channel,
+  configured,
   channelClassName,
   title,
   summary,
@@ -20,6 +48,8 @@ export function ChannelCardFrame({
   suppressedIds,
   children,
 }: {
+  channel: SupportedChannelName;
+  configured: boolean;
   channelClassName: string;
   title: string;
   summary: string;
@@ -33,7 +63,18 @@ export function ChannelCardFrame({
     (value): value is string => Boolean(value && value.trim()),
   );
   return (
-    <section className={`channel-card ${channelClassName}`}>
+    <section
+      className={`channel-card ${channelClassName}`}
+      data-channel={channel}
+      data-configured={String(configured)}
+      data-can-connect={String(connectability.canConnect)}
+      data-channel-pill={pill.label}
+      data-connectability-status={connectability.status}
+      data-connectability-issue-ids={connectability.issues
+        .map((issue) => issue.id)
+        .join(",")}
+      data-visible-error-count={String(visibleErrors.length)}
+    >
       <div className="channel-head">
         <div>
           <h3>{title}</h3>

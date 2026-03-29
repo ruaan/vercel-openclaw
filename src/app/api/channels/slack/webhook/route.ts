@@ -9,7 +9,7 @@ import {
 } from "@/server/channels/slack/adapter";
 import { extractRequestId, logInfo, logWarn } from "@/server/log";
 import { createOperationContext, withOperationContext } from "@/server/observability/operation-context";
-import { getSandboxDomain } from "@/server/sandbox/lifecycle";
+import { getSandboxDomain, reconcileStaleRunningStatus } from "@/server/sandbox/lifecycle";
 import { getInitializedMeta, getStore } from "@/server/store/store";
 const SLACK_FORWARD_HEADERS = [
   "x-slack-signature",
@@ -235,14 +235,17 @@ export async function POST(request: Request): Promise<Response> {
     bodyLength: rawBody.length,
   }));
 
-  // --- Fast path: fire-and-forget to OpenClaw's native Slack HTTP handler ---
   // --- Fast path: forward to OpenClaw's native Slack handler ---
   // When the sandbox is running, delegate entirely to the native handler.
   // Await the response so the native handler can complete its full
   // processing cycle (including long AI tasks like image generation).
   // Fluid Compute bills only for CPU cycles, not idle wait time.
-  // On failure, log and return 200 — never fall through to the workflow
-  // path, which would cause duplicate message delivery.
+  //
+  // If the forward gets an HTTP response (even non-ok), the sandbox is
+  // reachable — return 200 to avoid duplicate delivery via the workflow path.
+  // If fetch() throws (connection refused, DNS failure), the sandbox is
+  // likely dead with stale "running" metadata.  Reconcile the status and
+  // fall through to the workflow wake path so the message is not lost.
   if (meta.status === "running" && meta.sandboxId) {
     const forwardHeaders: Record<string, string> = {
       "content-type": request.headers.get("content-type") ?? "application/json",
@@ -285,15 +288,19 @@ export async function POST(request: Request): Promise<Response> {
           ...eventInfo,
         }));
       }
+      return Response.json({ ok: true });
     } catch (error) {
+      // Network-level failure — sandbox is likely dead with stale metadata.
+      // Reconcile status and fall through to the workflow wake path.
       logWarn("channels.slack_fast_path_failed", withOperationContext(op, {
         error: error instanceof Error ? error.message : String(error),
         errorName: error instanceof Error ? error.name : undefined,
         sandboxId: meta.sandboxId,
+        action: "reconcile_and_wake",
         ...eventInfo,
       }));
+      await reconcileStaleRunningStatus();
     }
-    return Response.json({ ok: true });
   } else {
     logInfo("channels.slack_fast_path_skipped", withOperationContext(op, {
       reason: meta.status !== "running" ? `sandbox_status_${meta.status}` : "no_sandbox_id",

@@ -215,6 +215,23 @@ test("ChannelsPanel exposes machine-readable verification state on the consolida
   );
 });
 
+test("ChannelsPanel exposes machine-readable channel card state", () => {
+  const html = renderChannelsPanel();
+
+  assert.ok(html.includes('data-channel="slack"'), "slack data-channel attribute");
+  assert.ok(html.includes('data-channel="telegram"'), "telegram data-channel attribute");
+  assert.ok(html.includes('data-channel="discord"'), "discord data-channel attribute");
+  assert.ok(html.includes('data-channel="whatsapp"'), "whatsapp data-channel attribute");
+
+  const configuredAttrs = html.match(/data-configured="(?:true|false)"/g) ?? [];
+  const connectableAttrs = html.match(/data-can-connect="(?:true|false)"/g) ?? [];
+  const statusAttrs = html.match(/data-connectability-status="(?:pass|warn|fail)"/g) ?? [];
+
+  assert.equal(configuredAttrs.length, 4, "all four cards have data-configured");
+  assert.equal(connectableAttrs.length, 4, "all four cards have data-can-connect");
+  assert.equal(statusAttrs.length, 4, "all four cards have data-connectability-status");
+});
+
 test("ChannelsPanel keeps verification controls inside the consolidated channels surface", () => {
   const html = renderChannelsPanel();
 

@@ -8,7 +8,7 @@ import { sendMessage } from "@/server/channels/whatsapp/whatsapp-api";
 import { drainChannelWorkflow } from "@/server/workflows/channels/drain-channel-workflow";
 import { extractRequestId, logError, logInfo, logWarn } from "@/server/log";
 import { createOperationContext, withOperationContext } from "@/server/observability/operation-context";
-import { getSandboxDomain } from "@/server/sandbox/lifecycle";
+import { getSandboxDomain, reconcileStaleRunningStatus } from "@/server/sandbox/lifecycle";
 import { getInitializedMeta, getStore } from "@/server/store/store";
 const WHATSAPP_FORWARD_HEADERS = [
   "x-hub-signature-256",
@@ -158,8 +158,12 @@ export async function POST(request: Request): Promise<Response> {
     // Await the response so the native handler can complete its full
     // processing cycle (including long AI tasks like image generation).
     // Fluid Compute bills only for CPU cycles, not idle wait time.
-    // On failure, log and return 200 — never fall through to the workflow
-    // path, which would cause duplicate message delivery.
+    //
+    // If the forward gets an HTTP response (even non-ok), the sandbox is
+    // reachable — return 200 to avoid duplicate delivery via the workflow path.
+    // If fetch() throws (connection refused, DNS failure), the sandbox is
+    // likely dead with stale "running" metadata.  Reconcile the status and
+    // fall through to the workflow wake path so the message is not lost.
     if (meta.status === "running" && meta.sandboxId) {
       const forwardHeaders: Record<string, string> = {};
       for (const headerName of WHATSAPP_FORWARD_HEADERS) {
@@ -186,13 +190,17 @@ export async function POST(request: Request): Promise<Response> {
             status: forwardResponse.status,
           }));
         }
+        return Response.json({ ok: true });
       } catch (error) {
+        // Network-level failure — sandbox is likely dead with stale metadata.
+        // Reconcile status and fall through to the workflow wake path.
         logWarn("channels.whatsapp_fast_path_failed", withOperationContext(op, {
           sandboxId: meta.sandboxId,
           error: error instanceof Error ? error.message : String(error),
+          action: "reconcile_and_wake",
         }));
+        await reconcileStaleRunningStatus();
       }
-      return Response.json({ ok: true });
     }
 
     let bootMessageId: string | null = null;

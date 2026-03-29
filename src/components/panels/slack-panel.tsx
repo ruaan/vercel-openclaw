@@ -12,6 +12,7 @@ import {
   ChannelCopyValue,
   ChannelInfoRow,
   ChannelSecretField,
+  getChannelActionLabel,
 } from "@/components/panels/channel-panel-shared";
 
 type SlackPanelProps = {
@@ -81,8 +82,8 @@ export function SlackPanel({
     if (!signingSecret.trim() || !botToken.trim()) return;
     setPanelError(null);
     const result = await requestJson("/api/channels/slack", {
-      label: "Save Slack",
-      successMessage: "Slack connected",
+      label: getChannelActionLabel("slack", editing ? "update" : "connect"),
+      successMessage: editing ? "Slack credentials updated" : "Slack connected",
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -125,7 +126,7 @@ export function SlackPanel({
 
     setPanelError(null);
     const success = await runAction("/api/channels/slack", {
-      label: "Disconnect Slack",
+      label: getChannelActionLabel("slack", "disconnect"),
       successMessage: "Slack disconnected",
       method: "DELETE",
     });
@@ -143,6 +144,8 @@ export function SlackPanel({
 
   return (
     <ChannelCardFrame
+      channel="slack"
+      configured={sl.configured}
       channelClassName="channel-slack"
       title="Slack"
       summary={

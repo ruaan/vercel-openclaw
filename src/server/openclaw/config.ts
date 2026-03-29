@@ -30,6 +30,10 @@ export const OPENCLAW_TTS_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/tts/SKILL.m
 export const OPENCLAW_TTS_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/tts/scripts/speak.mjs`;
 export const OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/structured-extract/SKILL.md`;
 export const OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/structured-extract/scripts/extract.mjs`;
+export const OPENCLAW_EMBEDDINGS_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/embeddings/SKILL.md`;
+export const OPENCLAW_EMBEDDINGS_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/embeddings/scripts/embed.mjs`;
+export const OPENCLAW_SEMANTIC_SEARCH_SKILL_PATH = `${OPENCLAW_STATE_DIR}/skills/semantic-search/SKILL.md`;
+export const OPENCLAW_SEMANTIC_SEARCH_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/skills/semantic-search/scripts/search.mjs`;
 
 // The built-in skill shipped with the openclaw npm package uses a Python
 // gen.py script that requires a direct sk-* OPENAI_API_KEY.  We overwrite
@@ -1322,6 +1326,482 @@ try {
   const reason = error instanceof Error ? error.message : String(error);
   console.error("Structured extract response was not valid JSON: " + reason);
   process.exit(1);
+}
+`;
+}
+
+export function buildEmbeddingsSkill(): string {
+  return `---
+name: embeddings
+description: Generate text embeddings via Vercel AI Gateway /v1/embeddings
+user-invocable: true
+metadata:
+  openclaw:
+    emoji: "🧠"
+    requires:
+      bins: ["node"]
+      env: ["AI_GATEWAY_API_KEY"]
+    primaryEnv: AI_GATEWAY_API_KEY
+---
+
+# Embeddings (Vercel AI Gateway)
+
+Generate vector embeddings for text or files using AI Gateway's OpenAI-compatible embeddings endpoint.
+
+## Run
+
+\`\`\`bash
+node {baseDir}/scripts/embed.mjs --text "OpenClaw skills use markdown plus scripts"
+\`\`\`
+
+## More examples
+
+\`\`\`bash
+node {baseDir}/scripts/embed.mjs --text "first string" --text "second string"
+node {baseDir}/scripts/embed.mjs --file ./README.md
+node {baseDir}/scripts/embed.mjs --file ./docs/spec.md --model openai/text-embedding-3-large
+node {baseDir}/scripts/embed.mjs --text "hello world" --dimensions 768 --output ./embedding.json
+\`\`\`
+
+## Parameters
+
+- \`--text\`: Text to embed. Repeatable.
+- \`--file\`: UTF-8 text file to embed. Repeatable.
+- \`--model\`: \`openai/text-embedding-3-small\` (default) or \`openai/text-embedding-3-large\`
+- \`--dimensions\`: Optional output dimension size when supported
+- \`--output\`: Optional JSON output path
+
+## Output
+
+Prints JSON with \`model\`, \`usage\`, and \`items\`, where each item contains \`index\`, \`dimensions\`, and \`embedding\`.
+`;
+}
+
+export function buildEmbeddingsScript(): string {
+  return `import { readFile, writeFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
+import path from "node:path";
+
+const { values, positionals } = parseArgs({
+  options: {
+    text: { type: "string", multiple: true },
+    file: { type: "string", multiple: true },
+    model: { type: "string", default: "openai/text-embedding-3-small" },
+    dimensions: { type: "string" },
+    output: { type: "string" },
+  },
+  allowPositionals: true,
+});
+
+async function readApiKey() {
+  const fromEnv = process.env.AI_GATEWAY_API_KEY?.trim();
+  if (fromEnv) return fromEnv;
+  const fromDisk = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
+  if (fromDisk) return fromDisk;
+  throw new Error("No AI Gateway API key found");
+}
+
+const textInputs = [...(values.text ?? [])];
+if (positionals.length > 0) {
+  const positionalText = positionals.join(" ").trim();
+  if (positionalText) textInputs.push(positionalText);
+}
+
+const fileInputs = [];
+for (const filePath of values.file ?? []) {
+  const resolved = path.resolve(filePath);
+  const content = await readFile(resolved, "utf8");
+  fileInputs.push(content);
+}
+
+const inputs = [...textInputs, ...fileInputs].map((value) => value.trim()).filter(Boolean);
+if (inputs.length === 0) {
+  console.error(
+    "Usage: node embed.mjs --text \\"hello world\\" [--text TEXT] [--file PATH] [--model MODEL] [--dimensions N] [--output FILE]",
+  );
+  process.exit(1);
+}
+
+const apiKey = await readApiKey();
+
+const dimensions = values.dimensions ? Number.parseInt(values.dimensions, 10) : undefined;
+if (values.dimensions && (!Number.isFinite(dimensions) || dimensions <= 0)) {
+  console.error("--dimensions must be a positive integer");
+  process.exit(1);
+}
+
+const response = await fetch("https://ai-gateway.vercel.sh/v1/embeddings", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: "Bearer " + apiKey,
+  },
+  body: JSON.stringify({
+    model: values.model,
+    input: inputs,
+    ...(dimensions ? { dimensions } : {}),
+  }),
+});
+
+if (!response.ok) {
+  const errorText = await response.text();
+  console.error("Embeddings request failed (" + response.status + "): " + errorText);
+  process.exit(1);
+}
+
+const payload = await response.json();
+
+const output = {
+  model: payload.model,
+  usage: payload.usage,
+  items: (payload.data ?? []).map((item) => ({
+    index: item.index,
+    dimensions: Array.isArray(item.embedding) ? item.embedding.length : 0,
+    embedding: item.embedding,
+  })),
+};
+
+const json = JSON.stringify(output, null, 2);
+if (values.output) {
+  await writeFile(path.resolve(values.output), json + "\\n");
+}
+console.log(json);
+`;
+}
+
+export function buildSemanticSearchSkill(): string {
+  return `---
+name: semantic-search
+description: Build a local embedding index and run semantic search over files via Vercel AI Gateway embeddings
+user-invocable: true
+metadata:
+  openclaw:
+    emoji: "🔍"
+    requires:
+      bins: ["node"]
+      env: ["AI_GATEWAY_API_KEY"]
+    primaryEnv: AI_GATEWAY_API_KEY
+---
+
+# Semantic Search (Vercel AI Gateway)
+
+Create a local semantic index for project files, then query it with embeddings.
+
+## Index a directory
+
+\`\`\`bash
+node {baseDir}/scripts/search.mjs index --dir .
+\`\`\`
+
+## Query the index
+
+\`\`\`bash
+node {baseDir}/scripts/search.mjs query --query "Where is the restore asset manifest built?"
+\`\`\`
+
+## More examples
+
+\`\`\`bash
+node {baseDir}/scripts/search.mjs index --dir ./src --db ./.semantic-index.json
+node {baseDir}/scripts/search.mjs index --file README.md --file CLAUDE.md
+node {baseDir}/scripts/search.mjs query --db ./.semantic-index.json --query "telegram webhook secret" --top 5
+node {baseDir}/scripts/search.mjs query --query "OpenClaw package spec drift" --json
+\`\`\`
+
+## Commands
+
+- \`index\`: Walk files, chunk text, call embeddings, and write a local JSON index
+- \`query\`: Embed the query, compute cosine similarity, and return the best matches
+
+## Parameters
+
+- \`--dir\`: Directory to index recursively
+- \`--file\`: Specific file(s) to index. Repeatable.
+- \`--db\`: Index JSON path. Default: \`${OPENCLAW_STATE_DIR}/semantic-search/default-index.json\`
+- \`--model\`: Embedding model. Default: \`openai/text-embedding-3-small\`
+- \`--dimensions\`: Optional embedding dimensions
+- \`--top\`: Number of query results to return. Default: \`5\`
+- \`--json\`: Print query results as JSON
+- \`--chunk-size\`: Character length per chunk. Default: \`1200\`
+- \`--chunk-overlap\`: Character overlap between chunks. Default: \`200\`
+
+## Output
+
+- \`index\` prints a one-line summary with files and chunks indexed
+- \`query\` prints ranked matches with score, path, and excerpt
+`;
+}
+
+export function buildSemanticSearchScript(): string {
+  return `import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
+import { parseArgs } from "node:util";
+import path from "node:path";
+
+const DEFAULT_DB_PATH = "${OPENCLAW_STATE_DIR}/semantic-search/default-index.json";
+
+const TEXT_EXTENSIONS = new Set([
+  ".cjs", ".cpp", ".css", ".csv", ".go", ".html", ".java", ".js", ".json",
+  ".jsx", ".md", ".mjs", ".py", ".rb", ".rs", ".sh", ".sql", ".ts", ".tsx",
+  ".txt", ".xml", ".yaml", ".yml",
+]);
+
+const { values, positionals } = parseArgs({
+  options: {
+    dir: { type: "string" },
+    file: { type: "string", multiple: true },
+    db: { type: "string", default: DEFAULT_DB_PATH },
+    query: { type: "string" },
+    top: { type: "string", default: "5" },
+    model: { type: "string", default: "openai/text-embedding-3-small" },
+    dimensions: { type: "string" },
+    json: { type: "boolean", default: false },
+    "chunk-size": { type: "string", default: "1200" },
+    "chunk-overlap": { type: "string", default: "200" },
+  },
+  allowPositionals: true,
+});
+
+const command = positionals[0];
+if (command !== "index" && command !== "query") {
+  console.error("Usage: node search.mjs <index|query> [options]");
+  process.exit(1);
+}
+
+async function readApiKey() {
+  const fromEnv = process.env.AI_GATEWAY_API_KEY?.trim();
+  if (fromEnv) return fromEnv;
+  const fromDisk = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
+  if (fromDisk) return fromDisk;
+  throw new Error("No AI Gateway API key found");
+}
+
+async function embedInputs(apiKey, model, inputs, dimensions) {
+  const response = await fetch("https://ai-gateway.vercel.sh/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + apiKey,
+    },
+    body: JSON.stringify({
+      model,
+      input: inputs,
+      ...(dimensions ? { dimensions } : {}),
+    }),
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error("Embeddings request failed (" + response.status + "): " + errorText);
+  }
+  const payload = await response.json();
+  return payload.data.map((item) => item.embedding);
+}
+
+async function walkDir(rootDir) {
+  const files = [];
+  const entries = await readdir(rootDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      files.push(...(await walkDir(fullPath)));
+      continue;
+    }
+    if (entry.isFile() && TEXT_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+function chunkText(text, maxLength, overlap) {
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + maxLength, text.length);
+    if (end < text.length) {
+      const paragraphBreak = text.lastIndexOf("\\n\\n", end);
+      const lineBreak = text.lastIndexOf("\\n", end);
+      if (paragraphBreak > start + Math.floor(maxLength / 2)) {
+        end = paragraphBreak;
+      } else if (lineBreak > start + Math.floor(maxLength / 2)) {
+        end = lineBreak;
+      }
+    }
+    const content = text.slice(start, end).trim();
+    if (content) {
+      chunks.push({ start, end, text: content });
+    }
+    if (end >= text.length) break;
+    start = Math.max(end - overlap, start + 1);
+  }
+  return chunks;
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  const length = Math.min(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  if (magA === 0 || magB === 0) return 0;
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+function excerpt(text, maxLength = 220) {
+  return text.replace(/\\s+/g, " ").trim().slice(0, maxLength);
+}
+
+const dbPath = path.resolve(values.db);
+const model = values.model;
+const top = Math.max(1, Number.parseInt(values.top, 10) || 5);
+const chunkSize = Math.max(200, Number.parseInt(values["chunk-size"], 10) || 1200);
+const chunkOverlap = Math.max(0, Number.parseInt(values["chunk-overlap"], 10) || 200);
+const dimensions = values.dimensions ? Number.parseInt(values.dimensions, 10) : undefined;
+if (values.dimensions && (!Number.isFinite(dimensions) || dimensions <= 0)) {
+  console.error("--dimensions must be a positive integer");
+  process.exit(1);
+}
+
+if (command === "index") {
+  const apiKey = await readApiKey();
+  const files = [];
+  if (values.dir) {
+    files.push(...(await walkDir(path.resolve(values.dir))));
+  }
+  for (const filePath of values.file ?? []) {
+    const resolved = path.resolve(filePath);
+    const fileStat = await stat(resolved);
+    if (fileStat.isFile()) files.push(resolved);
+  }
+
+  const uniqueFiles = [...new Set(files)].sort();
+  if (uniqueFiles.length === 0) {
+    console.error("Index mode requires --dir PATH or at least one --file PATH");
+    process.exit(1);
+  }
+
+  const records = [];
+  for (const filePath of uniqueFiles) {
+    const text = await readFile(filePath, "utf8");
+    const chunks = chunkText(text, chunkSize, chunkOverlap);
+    for (const chunk of chunks) {
+      records.push({
+        id: filePath + ":" + chunk.start + ":" + chunk.end,
+        path: filePath,
+        start: chunk.start,
+        end: chunk.end,
+        text: chunk.text,
+      });
+    }
+  }
+
+  const embeddings = [];
+  for (let i = 0; i < records.length; i += 16) {
+    const batch = records.slice(i, i + 16);
+    const vectors = await embedInputs(
+      apiKey,
+      model,
+      batch.map((item) => item.text),
+      dimensions,
+    );
+    embeddings.push(...vectors);
+  }
+
+  const index = {
+    schemaVersion: 1,
+    createdAt: new Date().toISOString(),
+    model,
+    dimensions: embeddings[0]?.length ?? null,
+    rootDir: values.dir ? path.resolve(values.dir) : null,
+    chunks: records.map((record, indexPos) => ({
+      ...record,
+      embedding: embeddings[indexPos],
+    })),
+  };
+
+  await mkdir(path.dirname(dbPath), { recursive: true });
+  await writeFile(dbPath, JSON.stringify(index, null, 2) + "\\n");
+  console.log(
+    "Indexed " + index.chunks.length + " chunks from " + uniqueFiles.length + " files into " + dbPath,
+  );
+  process.exit(0);
+}
+
+if (command === "query") {
+  const query = (values.query ?? positionals.slice(1).join(" ")).trim();
+  if (!query) {
+    console.error("Query mode requires --query \\"...\\"");
+    process.exit(1);
+  }
+
+  const apiKey = await readApiKey();
+  const index = JSON.parse(await readFile(dbPath, "utf8"));
+  if (!Array.isArray(index.chunks) || index.chunks.length === 0) {
+    console.error("Index is empty: " + dbPath);
+    process.exit(1);
+  }
+
+  if (
+    dimensions &&
+    index.dimensions &&
+    Number.isFinite(index.dimensions) &&
+    dimensions !== index.dimensions
+  ) {
+    console.error(
+      "--dimensions must match the indexed dimensions (" + index.dimensions + ") when querying an existing index",
+    );
+    process.exit(1);
+  }
+
+  const queryDimensions = dimensions ?? index.dimensions ?? undefined;
+  const [queryEmbedding] = await embedInputs(
+    apiKey,
+    index.model || model,
+    [query],
+    queryDimensions,
+  );
+
+  const matches = index.chunks
+    .map((chunk) => ({
+      score: cosineSimilarity(queryEmbedding, chunk.embedding),
+      path: chunk.path,
+      start: chunk.start,
+      end: chunk.end,
+      text: chunk.text,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, top);
+
+  if (values.json) {
+    console.log(
+      JSON.stringify(
+        {
+          query,
+          dbPath,
+          model: index.model || model,
+          matches,
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(0);
+  }
+
+  console.log("Query: " + query);
+  console.log("Index: " + dbPath);
+  console.log("");
+  for (const [idx, match] of matches.entries()) {
+    console.log(
+      (idx + 1) + ". " + match.path + " [" + match.start + "-" + match.end + "] score=" + match.score.toFixed(4),
+    );
+    console.log("   " + excerpt(match.text));
+    console.log("");
+  }
 }
 `;
 }

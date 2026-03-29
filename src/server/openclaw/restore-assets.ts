@@ -11,6 +11,10 @@ import {
   buildStartupScript,
   buildStructuredExtractScript,
   buildStructuredExtractSkill,
+  buildEmbeddingsScript,
+  buildEmbeddingsSkill,
+  buildSemanticSearchScript,
+  buildSemanticSearchSkill,
   buildTtsScript,
   buildTtsSkill,
   buildVisionScript,
@@ -30,6 +34,10 @@ import {
   OPENCLAW_TELEGRAM_BOT_TOKEN_PATH,
   OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
   OPENCLAW_STRUCTURED_EXTRACT_SKILL_PATH,
+  OPENCLAW_EMBEDDINGS_SCRIPT_PATH,
+  OPENCLAW_EMBEDDINGS_SKILL_PATH,
+  OPENCLAW_SEMANTIC_SEARCH_SCRIPT_PATH,
+  OPENCLAW_SEMANTIC_SEARCH_SKILL_PATH,
   OPENCLAW_TTS_SCRIPT_PATH,
   OPENCLAW_TTS_SKILL_PATH,
   OPENCLAW_VISION_SCRIPT_PATH,
@@ -70,6 +78,16 @@ export function buildStaticRestoreFiles(): { path: string; content: Buffer }[] {
     {
       path: OPENCLAW_STRUCTURED_EXTRACT_SCRIPT_PATH,
       content: Buffer.from(buildStructuredExtractScript()),
+    },
+    { path: OPENCLAW_EMBEDDINGS_SKILL_PATH, content: Buffer.from(buildEmbeddingsSkill()) },
+    { path: OPENCLAW_EMBEDDINGS_SCRIPT_PATH, content: Buffer.from(buildEmbeddingsScript()) },
+    {
+      path: OPENCLAW_SEMANTIC_SEARCH_SKILL_PATH,
+      content: Buffer.from(buildSemanticSearchSkill()),
+    },
+    {
+      path: OPENCLAW_SEMANTIC_SEARCH_SCRIPT_PATH,
+      content: Buffer.from(buildSemanticSearchScript()),
     },
   ];
 }

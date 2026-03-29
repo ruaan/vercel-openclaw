@@ -11,6 +11,7 @@ import {
   ChannelCopyValue,
   ChannelInfoRow,
   ChannelSecretField,
+  getChannelActionLabel,
 } from "@/components/panels/channel-panel-shared";
 
 type DiscordPanelProps = {
@@ -28,12 +29,26 @@ function getDiscordPill(configured: boolean): ChannelPillModel {
   };
 }
 
+function hasDistinctDiscordEndpoint(
+  endpointUrl: string | null | undefined,
+  webhookUrl: string,
+): boolean {
+  return Boolean(
+    endpointUrl &&
+      endpointUrl.trim().length > 0 &&
+      endpointUrl !== webhookUrl,
+  );
+}
+
 function getDiscordHealth(args: {
   endpointConfigured?: boolean;
   commandRegistered?: boolean;
+  distinctEndpoint?: boolean;
 }): string {
   const endpoint = args.endpointConfigured
-    ? "Endpoint configured"
+    ? args.distinctEndpoint
+      ? "Custom endpoint configured"
+      : "Endpoint configured"
     : "Endpoint pending";
   const command = args.commandRegistered
     ? "/ask registered"
@@ -78,7 +93,7 @@ export function DiscordPanel({
     setSaving(true);
 
     const result = await requestJson("/api/channels/discord", {
-      label: editing ? "Update Discord credentials" : "Connect Discord",
+      label: getChannelActionLabel("discord", editing ? "update" : "connect"),
       successMessage: editing ? "Discord credentials updated" : "Discord connected",
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -120,7 +135,7 @@ export function DiscordPanel({
 
     setPanelError(null);
     const success = await runAction("/api/channels/discord", {
-      label: "Disconnect Discord",
+      label: getChannelActionLabel("discord", "disconnect"),
       successMessage: "Discord disconnected",
       method: "DELETE",
     });
@@ -142,6 +157,8 @@ export function DiscordPanel({
 
   return (
     <ChannelCardFrame
+      channel="discord"
+      configured={dc.configured}
       channelClassName="channel-discord"
       title="Discord"
       summary={
@@ -167,34 +184,38 @@ export function DiscordPanel({
             copied={copiedField === "webhook"}
             onCopy={() => handleCopyValue(dc.webhookUrl, "webhook")}
           />
-          {dc.endpointUrl != null &&
-            dc.endpointUrl.trim().length > 0 &&
-            dc.endpointUrl !== dc.webhookUrl ? (
-            <ChannelCopyValue
-              label="Endpoint"
-              value={dc.endpointUrl}
-              copied={copiedField === "endpoint"}
-              onCopy={() => handleCopyValue(dc.endpointUrl, "endpoint")}
-            />
-          ) : null}
           <ChannelInfoRow
             label="Health"
             action={
-              !dc.commandRegistered ? (
-                <button
-                  className="button ghost channel-inline-action"
-                  disabled={pending}
-                  onClick={() => void handleRegisterCommand()}
-                >
-                  Register
-                </button>
-              ) : null
+              <span style={{ display: "inline-flex", gap: 8 }}>
+                {hasDistinctDiscordEndpoint(dc.endpointUrl, dc.webhookUrl) ? (
+                  <button
+                    type="button"
+                    className="button ghost channel-inline-action"
+                    disabled={pending}
+                    onClick={() => handleCopyValue(dc.endpointUrl, "endpoint")}
+                  >
+                    {copiedField === "endpoint" ? "Copied endpoint" : "Copy endpoint"}
+                  </button>
+                ) : null}
+                {!dc.commandRegistered ? (
+                  <button
+                    type="button"
+                    className="button ghost channel-inline-action"
+                    disabled={pending}
+                    onClick={() => void handleRegisterCommand()}
+                  >
+                    Register
+                  </button>
+                ) : null}
+              </span>
             }
           >
             <code className="inline-code">
               {getDiscordHealth({
                 endpointConfigured: dc.endpointConfigured,
                 commandRegistered: dc.commandRegistered,
+                distinctEndpoint: hasDistinctDiscordEndpoint(dc.endpointUrl, dc.webhookUrl),
               })}
             </code>
           </ChannelInfoRow>
