@@ -518,44 +518,121 @@ test("batch execute rejects duplicate job ids", async () => {
 test("batch execute stops scheduling new jobs after the first failure once in-flight jobs finish", async () => {
   const h = createScenarioHarness();
   try {
-    h.controller.defaultResponders.unshift(() => ({
-      exitCode: 1,
-      output: async (stream?: "stdout" | "stderr" | "both") => {
-        if (stream === "stderr") return "fail\n";
-        if (stream === "both") return "fail\n";
-        return "";
-      },
-    }));
+    let commandCount = 0;
+    let releaseSecondJob: () => void = () => {};
+    const secondJobGate = new Promise<void>((resolve) => {
+      releaseSecondJob = resolve;
+    });
+
+    h.controller.defaultResponders.unshift(() => {
+      commandCount += 1;
+
+      // Job 1 fails immediately
+      if (commandCount === 1) {
+        return {
+          exitCode: 1,
+          output: async (stream?: "stdout" | "stderr" | "both") => {
+            if (stream === "stdout") return "";
+            if (stream === "stderr") return "first failed\n";
+            return "first failed\n";
+          },
+        };
+      }
+
+      // Job 2 was already in flight before job 1 failed; let it finish later.
+      if (commandCount === 2) {
+        return {
+          exitCode: 0,
+          output: async (stream?: "stdout" | "stderr" | "both") => {
+            await secondJobGate;
+            if (stream === "stderr") return "";
+            if (stream === "stdout") return "second ok\n";
+            return "second ok\n";
+          },
+        };
+      }
+
+      // Any third/fourth scheduled job is a bug for this contract.
+      return {
+        exitCode: 0,
+        output: async () => {
+          assert.fail(`unexpected extra scheduled job #${commandCount}`);
+        },
+      };
+    });
 
     const route = getRoute();
     const token = await buildWorkerSandboxBearerToken();
 
-    const jobs = Array.from({ length: 5 }, (_, i) => ({
-      id: `job-${i}`,
-      request: {
-        task: `sub-${i}`,
-        command: { cmd: "bash", args: ["-lc", "exit 1"] },
-      },
-    }));
-
-    const req = buildPostRequest(
-      "/api/internal/worker-sandboxes/execute-batch",
-      JSON.stringify({
-        task: "fail-fast-concurrency-two",
-        maxConcurrency: 2,
-        continueOnError: false,
-        jobs,
-      }),
-      { authorization: `Bearer ${token}` },
+    const requestPromise = callRoute(
+      route.POST,
+      buildPostRequest(
+        "/api/internal/worker-sandboxes/execute-batch",
+        JSON.stringify({
+          task: "parallel-fail-fast",
+          maxConcurrency: 2,
+          continueOnError: false,
+          jobs: [
+            {
+              id: "job-1",
+              request: {
+                task: "sub-1",
+                command: { cmd: "bash", args: ["-lc", "exit 1"] },
+              },
+            },
+            {
+              id: "job-2",
+              request: {
+                task: "sub-2",
+                command: { cmd: "bash", args: ["-lc", "echo second"] },
+              },
+            },
+            {
+              id: "job-3",
+              request: {
+                task: "sub-3",
+                command: { cmd: "bash", args: ["-lc", "echo third"] },
+              },
+            },
+            {
+              id: "job-4",
+              request: {
+                task: "sub-4",
+                command: { cmd: "bash", args: ["-lc", "echo fourth"] },
+              },
+            },
+          ],
+        }),
+        { authorization: `Bearer ${token}` },
+      ),
     );
 
-    const result = await callRoute(route.POST, req);
+    // Wait until exactly the first two jobs have started.
+    for (let i = 0; i < 20 && commandCount < 2; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(commandCount, 2, "expected only the first two jobs to start");
+
+    // Now allow the already-started second job to complete.
+    releaseSecondJob();
+
+    const result = await requestPromise;
     assert.equal(result.status, 200);
 
     const body = result.json as WorkerSandboxBatchExecuteResponse;
     assert.equal(body.ok, false);
+    assert.equal(body.totalJobs, 4);
+    assert.equal(body.succeeded, 1);
+    assert.equal(body.failed, 1);
     assert.equal(body.results.length, 2);
-    assert.equal(body.failed, 2);
+
+    assert.deepEqual(
+      body.results.map((entry) => entry.id).sort(),
+      ["job-1", "job-2"],
+    );
+
+    // No jobs beyond the in-flight pair should have been scheduled.
+    assert.equal(commandCount, 2);
     assert.equal(h.controller.eventsOfKind("create").length, 2);
   } finally {
     h.teardown();

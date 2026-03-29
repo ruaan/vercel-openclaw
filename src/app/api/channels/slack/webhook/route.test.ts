@@ -163,6 +163,42 @@ test("Slack webhook: duplicate event_id is deduplicated", async () => {
   });
 });
 
+test("Slack webhook: fast path non-ok response falls through to workflow wake path", async () => {
+  await withHarness(async (h) => {
+    await configureSlack(h);
+    await h.mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-slack-non-ok";
+      meta.snapshotId = "snap-slack-non-ok";
+      meta.portUrls = {
+        "3000": "https://sbx-slack-non-ok-3000.fake.vercel.run",
+      };
+    });
+
+    h.fakeFetch.onPost(/slack\/events$/, () =>
+      new Response("bad gateway", { status: 502 }),
+    );
+
+    const route = getSlackWebhookRoute();
+    const startMock = mock.method(slackWebhookWorkflowRuntime, "start", async () => {});
+
+    try {
+      const req = buildSlackWebhook({ signingSecret: SLACK_SIGNING_SECRET });
+      const result = await callRoute(route.POST, req);
+      assert.equal(result.status, 200);
+      assert.deepEqual(result.json, { ok: true });
+      assert.equal(
+        startMock.mock.callCount(),
+        1,
+        "workflow start should be called after a non-ok fast-path response",
+      );
+      resetAfterCallbacks();
+    } finally {
+      startMock.mock.restore();
+    }
+  });
+});
+
 test("Slack webhook: releases dedup lock and returns 500 when workflow start fails", async () => {
   await withHarness(async (h) => {
     await configureSlack(h);

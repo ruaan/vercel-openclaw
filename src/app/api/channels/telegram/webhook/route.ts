@@ -122,12 +122,13 @@ export async function POST(request: Request): Promise<Response> {
     // full processing cycle (including long AI tasks like image generation).
     // Fluid Compute bills only for CPU cycles, not idle wait time.
     //
-    // If the forward gets an HTTP response (even non-ok), the sandbox is
-    // reachable — return 200 to avoid duplicate delivery via the workflow path.
-    // If fetch() throws (connection refused, DNS failure), the sandbox is
-    // likely dead with stale "running" metadata.  Reconcile the status and
+    // Return early only on a successful 2xx native forward.  Non-2xx means the
+    // sandbox is reachable but unhealthy — reconcile stale running state and
     // fall through to the workflow wake path so the message is not lost.
-    if (meta.status === "running" && meta.sandboxId) {
+    // If fetch() throws (connection refused, DNS failure), the sandbox is
+    // likely dead with stale "running" metadata — same reconcile-and-wake path.
+    let effectiveMeta = meta;
+    if (effectiveMeta.status === "running" && effectiveMeta.sandboxId) {
       try {
         const sandboxWebhookUrl = await getSandboxDomain(OPENCLAW_TELEGRAM_WEBHOOK_PORT);
         const forwardUrl = `${sandboxWebhookUrl}/telegram-webhook`;
@@ -140,23 +141,26 @@ export async function POST(request: Request): Promise<Response> {
           body: JSON.stringify(payload),
         });
         if (forwardResponse.ok) {
-          logInfo("channels.telegram_fast_path_ok", withOperationContext(op, { sandboxId: meta.sandboxId }));
-        } else {
-          logWarn("channels.telegram_fast_path_non_ok", withOperationContext(op, {
-            status: forwardResponse.status,
-            sandboxId: meta.sandboxId,
+          logInfo("channels.telegram_fast_path_ok", withOperationContext(op, {
+            sandboxId: effectiveMeta.sandboxId,
           }));
+          return Response.json({ ok: true });
         }
-        return Response.json({ ok: true });
+        logWarn("channels.telegram_fast_path_non_ok", withOperationContext(op, {
+          status: forwardResponse.status,
+          sandboxId: effectiveMeta.sandboxId,
+          action: "reconcile_and_wake",
+        }));
+        effectiveMeta = await reconcileStaleRunningStatus();
       } catch (error) {
         // Network-level failure — sandbox is likely dead with stale metadata.
         // Reconcile status and fall through to the workflow wake path.
         logWarn("channels.telegram_fast_path_failed", withOperationContext(op, {
           error: error instanceof Error ? error.message : String(error),
-          sandboxId: meta.sandboxId,
+          sandboxId: effectiveMeta.sandboxId,
           action: "reconcile_and_wake",
         }));
-        await reconcileStaleRunningStatus();
+        effectiveMeta = await reconcileStaleRunningStatus();
       }
     }
 
@@ -165,7 +169,7 @@ export async function POST(request: Request): Promise<Response> {
     // workflow so the step can edit/delete it during processing.
     let bootMessageId: number | null = null;
     const chatId = extractTelegramChatId(payload);
-    if (meta.status !== "running" && chatId) {
+    if (effectiveMeta.status !== "running" && chatId) {
       try {
         const result = await sendMessage(config.botToken, Number(chatId), "Starting up\u2026 I'll respond in a moment.");
         bootMessageId = result.message_id;

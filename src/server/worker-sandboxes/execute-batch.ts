@@ -47,9 +47,11 @@ export async function executeWorkerSandboxBatch(
   request: WorkerSandboxBatchExecuteRequest,
 ): Promise<WorkerSandboxBatchExecuteResponse> {
   const maxConcurrency = clampBatchConcurrency(request.maxConcurrency);
-  const queue = [...request.jobs];
   const results: WorkerSandboxBatchJobResult[] = [];
   let failed = 0;
+  let nextJobIndex = 0;
+  let stopScheduling = false;
+  let queueLock = Promise.resolve();
 
   const aiGatewayApiKey = request.passAiGatewayKey
     ? await getAiGatewayBearerTokenOptional()
@@ -62,24 +64,58 @@ export async function executeWorkerSandboxBatch(
     );
   }
 
-  const workers = Array.from(
-    { length: Math.min(maxConcurrency, queue.length) },
-    async () => {
-      while (queue.length > 0) {
-        if (!request.continueOnError && failed > 0) {
-          return;
+  async function withQueueLock<T>(fn: () => T | Promise<T>): Promise<T> {
+    const previous = queueLock;
+    let release: () => void = () => {};
+    queueLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  async function takeNextJob() {
+    return withQueueLock(() => {
+      if (!request.continueOnError && stopScheduling) {
+        return null;
+      }
+      const job = request.jobs[nextJobIndex];
+      if (!job) {
+        return null;
+      }
+      nextJobIndex += 1;
+      return job;
+    });
+  }
+
+  async function recordResult(result: WorkerSandboxBatchJobResult) {
+    await withQueueLock(() => {
+      results.push(result);
+      if (!result.result.ok) {
+        failed += 1;
+        if (!request.continueOnError) {
+          stopScheduling = true;
         }
-        const job = queue.shift();
+      }
+    });
+  }
+
+  const workers = Array.from(
+    { length: Math.min(maxConcurrency, request.jobs.length) },
+    async () => {
+      while (true) {
+        const job = await takeNextJob();
         if (!job) {
           return;
         }
         const result = await executeWorkerSandbox(job.request, {
           aiGatewayApiKey,
         });
-        results.push({ id: job.id, result });
-        if (!result.ok) {
-          failed += 1;
-        }
+        await recordResult({ id: job.id, result });
       }
     },
   );

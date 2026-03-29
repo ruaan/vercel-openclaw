@@ -5,6 +5,7 @@ import test from "node:test";
 import { whatsappWebhookWorkflowRuntime } from "@/app/api/channels/whatsapp/webhook/route";
 import { channelDedupKey } from "@/server/channels/keys";
 import { getStore } from "@/server/store/store";
+import { FakeSandboxHandle } from "@/test-utils/fake-sandbox-controller";
 import { withHarness, type ScenarioHarness } from "@/test-utils/harness";
 import { callRoute, buildPostRequest, resetAfterCallbacks } from "@/test-utils/route-caller";
 import {
@@ -154,6 +155,92 @@ test("WhatsApp webhook: duplicate message id is deduplicated", async () => {
       assert.equal(result2.status, 200);
       assert.deepEqual(result2.json, { ok: true });
       assert.equal(startMock.mock.callCount(), 1);
+    } finally {
+      startMock.mock.restore();
+    }
+  });
+});
+
+test("WhatsApp webhook: fast path non-ok response falls through to workflow wake path", async () => {
+  await withHarness(async (h) => {
+    await configureWhatsApp(h);
+    await h.mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-whatsapp-non-ok";
+      meta.snapshotId = "snap-whatsapp-non-ok";
+      meta.portUrls = {
+        "3000": "https://sbx-whatsapp-non-ok-3000.fake.vercel.run",
+      };
+    });
+
+    h.fakeFetch.onPost(/whatsapp-webhook$/, () =>
+      new Response("bad gateway", { status: 502 }),
+    );
+    h.fakeFetch.onPost(/graph\.facebook\.com/, () =>
+      Response.json({
+        messaging_product: "whatsapp",
+        messages: [{ id: "wamid.sent-non-ok" }],
+      }),
+    );
+
+    const route = getWhatsAppWebhookRoute();
+    const startMock = mock.method(whatsappWebhookWorkflowRuntime, "start", async () => {});
+
+    try {
+      const req = buildWhatsAppWebhook({ appSecret: APP_SECRET });
+      const result = await callRoute(route.POST, req);
+      assert.equal(result.status, 200);
+      assert.deepEqual(result.json, { ok: true });
+      assert.equal(
+        startMock.mock.callCount(),
+        1,
+        "workflow start should be called after a non-ok fast-path response",
+      );
+      resetAfterCallbacks();
+    } finally {
+      startMock.mock.restore();
+    }
+  });
+});
+
+test("WhatsApp webhook: fast path connection failure sends boot message after reconciliation", async () => {
+  await withHarness(async (h) => {
+    await configureWhatsApp(h);
+    await h.mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-whatsapp-stale-dead";
+      meta.snapshotId = "snap-whatsapp-stale-dead";
+    });
+    // Pre-create the sandbox handle with "stopped" status so reconciliation
+    // correctly transitions meta.status to "stopped"
+    const handle = await h.controller.get({ sandboxId: "sbx-whatsapp-stale-dead" });
+    (handle as FakeSandboxHandle).setStatus("stopped");
+
+    h.fakeFetch.onPost(/graph\.facebook\.com/, () =>
+      Response.json({
+        messaging_product: "whatsapp",
+        messages: [{ id: "wamid.boot1" }],
+      }),
+    );
+
+    const route = getWhatsAppWebhookRoute();
+    const startMock = mock.method(whatsappWebhookWorkflowRuntime, "start", async () => {});
+
+    try {
+      const req = buildWhatsAppWebhook({ appSecret: APP_SECRET });
+      const result = await callRoute(route.POST, req);
+      assert.equal(result.status, 200);
+      assert.deepEqual(result.json, { ok: true });
+      assert.equal(startMock.mock.callCount(), 1);
+
+      const graphCalls = h.fakeFetch
+        .requests()
+        .filter((entry) => entry.url.includes("graph.facebook.com"));
+      assert.ok(
+        graphCalls.length >= 1,
+        "boot message should be sent after stale-running reconciliation",
+      );
+      resetAfterCallbacks();
     } finally {
       startMock.mock.restore();
     }

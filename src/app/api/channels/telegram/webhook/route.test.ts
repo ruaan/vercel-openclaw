@@ -13,6 +13,7 @@ import test from "node:test";
 
 import { channelDedupKey } from "@/server/channels/keys";
 import { getStore } from "@/server/store/store";
+import { FakeSandboxHandle } from "@/test-utils/fake-sandbox-controller";
 import { withHarness, type ScenarioHarness } from "@/test-utils/harness";
 import { buildTelegramWebhook } from "@/test-utils/webhook-builders";
 import {
@@ -118,6 +119,10 @@ test("Telegram webhook: fast path connection failure reconciles status and start
       meta.sandboxId = "sbx-stale-dead";
       meta.snapshotId = "snap-123";
     });
+    // Pre-create the sandbox handle with "stopped" status so reconciliation
+    // correctly transitions meta.status to "stopped"
+    const handle = await h.controller.get({ sandboxId: "sbx-stale-dead" });
+    (handle as FakeSandboxHandle).setStatus("stopped");
     // Fast path fetch will throw (no handler registered for the sandbox domain)
     // Boot message succeeds
     h.fakeFetch.onPost(/api\.telegram\.org/, () =>
@@ -131,6 +136,55 @@ test("Telegram webhook: fast path connection failure reconciles status and start
       assert.equal(result.status, 200);
       // Workflow should have been started (wake path), not silently dropped
       assert.equal(startMock.mock.callCount(), 1, "workflow start should be called to wake the sandbox");
+      // Boot message should be sent after stale-running reconciliation
+      const telegramApiCalls = h.fakeFetch
+        .requests()
+        .filter((entry) => entry.url.includes("api.telegram.org"));
+      assert.equal(
+        telegramApiCalls.length,
+        1,
+        "boot message should be sent after stale-running reconciliation",
+      );
+      resetAfterCallbacks();
+    } finally {
+      startMock.mock.restore();
+    }
+  });
+});
+
+test("Telegram webhook: fast path non-ok response falls through to workflow wake path", async () => {
+  await withHarness(async (h) => {
+    await configureTelegram(h);
+    await h.mutateMeta((meta) => {
+      meta.status = "running";
+      meta.sandboxId = "sbx-telegram-non-ok";
+      meta.snapshotId = "snap-telegram-non-ok";
+      meta.portUrls = {
+        "3000": "https://sbx-telegram-non-ok-3000.fake.vercel.run",
+        "8787": "https://sbx-telegram-non-ok-8787.fake.vercel.run",
+      };
+    });
+
+    h.fakeFetch.onPost(/telegram-webhook$/, () =>
+      new Response("bad gateway", { status: 502 }),
+    );
+    h.fakeFetch.onPost(/api\.telegram\.org/, () =>
+      Response.json({ ok: true, result: { message_id: 1 } }),
+    );
+
+    const route = getTelegramWebhookRoute();
+    const startMock = mock.method(telegramWebhookWorkflowRuntime, "start", async () => {});
+
+    try {
+      const req = buildTelegramWebhook({ webhookSecret: TELEGRAM_WEBHOOK_SECRET });
+      const result = await callRoute(route.POST, req);
+      assert.equal(result.status, 200);
+      assert.deepEqual(result.json, { ok: true });
+      assert.equal(
+        startMock.mock.callCount(),
+        1,
+        "workflow start should be called after a non-ok fast-path response",
+      );
       resetAfterCallbacks();
     } finally {
       startMock.mock.restore();

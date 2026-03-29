@@ -241,12 +241,13 @@ export async function POST(request: Request): Promise<Response> {
   // processing cycle (including long AI tasks like image generation).
   // Fluid Compute bills only for CPU cycles, not idle wait time.
   //
-  // If the forward gets an HTTP response (even non-ok), the sandbox is
-  // reachable — return 200 to avoid duplicate delivery via the workflow path.
-  // If fetch() throws (connection refused, DNS failure), the sandbox is
-  // likely dead with stale "running" metadata.  Reconcile the status and
+  // Return early only on a successful 2xx native forward.  Non-2xx means the
+  // sandbox is reachable but unhealthy — reconcile stale running state and
   // fall through to the workflow wake path so the message is not lost.
-  if (meta.status === "running" && meta.sandboxId) {
+  // If fetch() throws (connection refused, DNS failure), the sandbox is
+  // likely dead with stale "running" metadata — same reconcile-and-wake path.
+  let effectiveMeta = meta;
+  if (effectiveMeta.status === "running" && effectiveMeta.sandboxId) {
     const forwardHeaders: Record<string, string> = {
       "content-type": request.headers.get("content-type") ?? "application/json",
     };
@@ -260,7 +261,7 @@ export async function POST(request: Request): Promise<Response> {
       const forwardUrl = `${sandboxUrl}/slack/events`;
 
       logInfo("channels.slack_fast_path_forwarding", withOperationContext(op, {
-        sandboxId: meta.sandboxId,
+        sandboxId: effectiveMeta.sandboxId,
         forwardUrl,
         forwardHeaderKeys: Object.keys(forwardHeaders),
         hasSlackSignature: Boolean(forwardHeaders["x-slack-signature"]),
@@ -275,37 +276,38 @@ export async function POST(request: Request): Promise<Response> {
       });
       if (resp.ok) {
         logInfo("channels.slack_fast_path_ok", withOperationContext(op, {
-          sandboxId: meta.sandboxId,
+          sandboxId: effectiveMeta.sandboxId,
           responseStatus: resp.status,
           ...eventInfo,
         }));
-      } else {
-        const errorBody = await resp.text().catch(() => "");
-        logWarn("channels.slack_fast_path_non_ok", withOperationContext(op, {
-          status: resp.status,
-          sandboxId: meta.sandboxId,
-          responseBody: errorBody.slice(0, 500),
-          ...eventInfo,
-        }));
+        return Response.json({ ok: true });
       }
-      return Response.json({ ok: true });
+      const errorBody = await resp.text().catch(() => "");
+      logWarn("channels.slack_fast_path_non_ok", withOperationContext(op, {
+        status: resp.status,
+        sandboxId: effectiveMeta.sandboxId,
+        responseBody: errorBody.slice(0, 500),
+        action: "reconcile_and_wake",
+        ...eventInfo,
+      }));
+      effectiveMeta = await reconcileStaleRunningStatus();
     } catch (error) {
       // Network-level failure — sandbox is likely dead with stale metadata.
       // Reconcile status and fall through to the workflow wake path.
       logWarn("channels.slack_fast_path_failed", withOperationContext(op, {
         error: error instanceof Error ? error.message : String(error),
         errorName: error instanceof Error ? error.name : undefined,
-        sandboxId: meta.sandboxId,
+        sandboxId: effectiveMeta.sandboxId,
         action: "reconcile_and_wake",
         ...eventInfo,
       }));
-      await reconcileStaleRunningStatus();
+      effectiveMeta = await reconcileStaleRunningStatus();
     }
   } else {
     logInfo("channels.slack_fast_path_skipped", withOperationContext(op, {
-      reason: meta.status !== "running" ? `sandbox_status_${meta.status}` : "no_sandbox_id",
-      status: meta.status,
-      sandboxId: meta.sandboxId,
+      reason: effectiveMeta.status !== "running" ? `sandbox_status_${effectiveMeta.status}` : "no_sandbox_id",
+      status: effectiveMeta.status,
+      sandboxId: effectiveMeta.sandboxId,
       ...eventInfo,
     }));
   }

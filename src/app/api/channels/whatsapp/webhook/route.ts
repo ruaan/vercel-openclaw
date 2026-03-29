@@ -159,12 +159,13 @@ export async function POST(request: Request): Promise<Response> {
     // processing cycle (including long AI tasks like image generation).
     // Fluid Compute bills only for CPU cycles, not idle wait time.
     //
-    // If the forward gets an HTTP response (even non-ok), the sandbox is
-    // reachable — return 200 to avoid duplicate delivery via the workflow path.
-    // If fetch() throws (connection refused, DNS failure), the sandbox is
-    // likely dead with stale "running" metadata.  Reconcile the status and
+    // Return early only on a successful 2xx native forward.  Non-2xx means the
+    // sandbox is reachable but unhealthy — reconcile stale running state and
     // fall through to the workflow wake path so the message is not lost.
-    if (meta.status === "running" && meta.sandboxId) {
+    // If fetch() throws (connection refused, DNS failure), the sandbox is
+    // likely dead with stale "running" metadata — same reconcile-and-wake path.
+    let effectiveMeta = meta;
+    if (effectiveMeta.status === "running" && effectiveMeta.sandboxId) {
       const forwardHeaders: Record<string, string> = {};
       for (const headerName of WHATSAPP_FORWARD_HEADERS) {
         const headerValue = request.headers.get(headerName);
@@ -182,29 +183,30 @@ export async function POST(request: Request): Promise<Response> {
         });
         if (forwardResponse.ok) {
           logInfo("channels.whatsapp_fast_path_ok", withOperationContext(op, {
-            sandboxId: meta.sandboxId,
+            sandboxId: effectiveMeta.sandboxId,
           }));
-        } else {
-          logWarn("channels.whatsapp_fast_path_non_ok", withOperationContext(op, {
-            sandboxId: meta.sandboxId,
-            status: forwardResponse.status,
-          }));
+          return Response.json({ ok: true });
         }
-        return Response.json({ ok: true });
+        logWarn("channels.whatsapp_fast_path_non_ok", withOperationContext(op, {
+          sandboxId: effectiveMeta.sandboxId,
+          status: forwardResponse.status,
+          action: "reconcile_and_wake",
+        }));
+        effectiveMeta = await reconcileStaleRunningStatus();
       } catch (error) {
         // Network-level failure — sandbox is likely dead with stale metadata.
         // Reconcile status and fall through to the workflow wake path.
         logWarn("channels.whatsapp_fast_path_failed", withOperationContext(op, {
-          sandboxId: meta.sandboxId,
+          sandboxId: effectiveMeta.sandboxId,
           error: error instanceof Error ? error.message : String(error),
           action: "reconcile_and_wake",
         }));
-        await reconcileStaleRunningStatus();
+        effectiveMeta = await reconcileStaleRunningStatus();
       }
     }
 
     let bootMessageId: string | null = null;
-    if (meta.status !== "running") {
+    if (effectiveMeta.status !== "running") {
       try {
         const adapter = createWhatsAppAdapter(config);
         const extracted = await adapter.extractMessage(payload);
