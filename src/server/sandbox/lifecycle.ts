@@ -2564,10 +2564,12 @@ async function restoreSandboxFromSnapshot(
     // Secrets (API key, bot tokens) are also passed as separate env vars for
     // the startup script; they appear in the config for OpenClaw's own use.
     // External manifest hash comparison — avoids in-sandbox readFileToBuffer
-    // (~2-3s) for the static asset skip check.  Use snapshot-truth first,
-    // fall back to lastRestoreMetrics for backward compatibility.
+    // (~2-3s) for the static asset skip check.  Use snapshot-truth only.
+    // A legacy snapshot may have lastRestoreMetrics.assetSha256 from a prior
+    // background sync even though the snapshot image itself never contained
+    // those files (e.g. worker-sandbox assets added after the snapshot).
     const currentManifest = buildRestoreAssetManifest();
-    const snapshotAssetHash = latest.snapshotAssetSha256 ?? latest.lastRestoreMetrics?.assetSha256;
+    const snapshotAssetHash = latest.snapshotAssetSha256;
     const skippedStaticAssetSync =
       snapshotAssetHash === currentManifest.sha256;
 

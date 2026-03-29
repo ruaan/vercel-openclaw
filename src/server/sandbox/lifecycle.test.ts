@@ -930,31 +930,15 @@ test("restoreSandboxFromSnapshot skips static files on second restore when manif
 
       _setSandboxControllerForTesting(seededFake);
 
-      // Set the manifest hash in lastRestoreMetrics so the external hash
-      // comparison in restoreSandboxFromSnapshot sees a match.
+      // Set snapshotAssetSha256 so the external hash comparison in
+      // restoreSandboxFromSnapshot sees a match (snapshot-truth only).
       const currentManifestHash = buildRestoreAssetManifest().sha256;
       await mutateMeta((meta) => {
         meta.status = "stopped";
         meta.snapshotId = "snap-seeded";
         meta.sandboxId = null;
         meta.portUrls = null;
-        meta.lastRestoreMetrics = {
-          ...(meta.lastRestoreMetrics ?? {
-            sandboxCreateMs: 0,
-            tokenWriteMs: 0,
-            assetSyncMs: 0,
-            startupScriptMs: 0,
-            forcePairMs: 0,
-            firewallSyncMs: 0,
-            localReadyMs: 0,
-            publicReadyMs: 0,
-            totalMs: 0,
-            skippedStaticAssetSync: false,
-            vcpus: 1,
-            recordedAt: Date.now(),
-          }),
-          assetSha256: currentManifestHash,
-        };
+        meta.snapshotAssetSha256 = currentManifestHash;
       });
 
       const { handle: seededResult } = await triggerRestore(seededFake, {
