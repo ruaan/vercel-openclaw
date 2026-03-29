@@ -68,21 +68,42 @@ export async function processChannelStep(
   const existingBootHandle = await buildExistingBootHandle(channel, payload, bootMessageId);
 
   try {
-    // --- Phase 1: Wake the sandbox ---
-    const { ensureSandboxReady } = await import("@/server/sandbox/lifecycle");
-    const readyMeta = await ensureSandboxReady({
+    // --- Phase 1: Wake the sandbox with boot message updates ---
+    // Use runWithBootMessages to poll sandbox status and progressively
+    // update the boot message ("Restoring…" → "Starting gateway…" → etc.)
+    const { runWithBootMessages } = await import("@/server/channels/core/boot-messages");
+    const { ensureSandboxReady, getSandboxDomain } = await import("@/server/sandbox/lifecycle");
+
+    // runWithBootMessages needs an adapter for the boot message handle.
+    // We only need the existing boot handle (already built above).
+    // Use a minimal adapter shim — the real message extraction is not needed
+    // since we forward the raw payload to the native handler.
+    const bootResult = await runWithBootMessages({
+      channel: channel as ChannelName,
+      adapter: buildMinimalBootAdapter(),
+      message: { text: "", chatId: "", from: "" } as never,
       origin,
       reason: `channel:${channel}`,
       timeoutMs: WORKFLOW_SANDBOX_READY_TIMEOUT_MS,
+      existingBootHandle,
     });
 
-    // --- Phase 2: Forward raw payload to native handler ---
-    // Delegate entirely to OpenClaw's native channel handler instead of
-    // calling /v1/chat/completions.  The native handler processes the
-    // message natively (including images, slash commands, etc.) and sends
-    // the reply directly to the platform.
-    const { getSandboxDomain } = await import("@/server/sandbox/lifecycle");
+    let readyMeta = bootResult.meta;
+    if (readyMeta.status !== "running" || !readyMeta.sandboxId) {
+      readyMeta = await ensureSandboxReady({
+        origin,
+        reason: `channel:${channel}`,
+        timeoutMs: WORKFLOW_SANDBOX_READY_TIMEOUT_MS,
+      });
+    }
+
+    // --- Phase 2: Wait for native handler + forward raw payload ---
+    // The gateway (port 3000) is ready, but the native channel handler
+    // (e.g. port 8787 for Telegram) may need a few more seconds to start.
+    // Poll until the native handler is reachable before forwarding.
     const meta = await getInitializedMeta();
+    await waitForNativeHandler(channel as ChannelName, meta, getSandboxDomain);
+
     const forwardResult = await forwardToNativeHandler(
       channel as ChannelName,
       payload,
@@ -111,6 +132,61 @@ export async function processChannelStep(
   } catch (error) {
     throw toWorkflowProcessingError(channel, error, resolvedDependencies);
   }
+}
+
+const NATIVE_HANDLER_POLL_INTERVAL_MS = 1_000;
+const NATIVE_HANDLER_POLL_TIMEOUT_MS = 30_000;
+
+/**
+ * Poll the native channel handler until it's reachable.  The gateway (port
+ * 3000) may be ready before the Telegram handler (port 8787) starts listening.
+ */
+async function waitForNativeHandler(
+  channel: ChannelName,
+  meta: import("@/shared/types").SingleMeta,
+  getSandboxDomain: (port?: number) => Promise<string>,
+): Promise<void> {
+  // Only Telegram uses a separate port; other channels use the main gateway port
+  if (channel !== "telegram") return;
+
+  const { OPENCLAW_TELEGRAM_WEBHOOK_PORT } = await import("@/server/openclaw/config");
+  const deadline = Date.now() + NATIVE_HANDLER_POLL_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      const sandboxUrl = await getSandboxDomain(OPENCLAW_TELEGRAM_WEBHOOK_PORT);
+      const probe = await fetch(`${sandboxUrl}/telegram-webhook`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(meta.channels.telegram?.webhookSecret
+            ? { "x-telegram-bot-api-secret-token": meta.channels.telegram.webhookSecret }
+            : {}),
+        },
+        body: JSON.stringify({ update_id: 0 }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      // Any HTTP response (even 400/401) means the handler is listening
+      logInfo("channels.native_handler_ready", { channel, status: probe.status });
+      return;
+    } catch {
+      // Connection refused — handler not yet listening
+      await new Promise((r) => setTimeout(r, NATIVE_HANDLER_POLL_INTERVAL_MS));
+    }
+  }
+  logWarn("channels.native_handler_poll_timeout", { channel, timeoutMs: NATIVE_HANDLER_POLL_TIMEOUT_MS });
+}
+
+/**
+ * Minimal adapter that satisfies runWithBootMessages type requirements.
+ * Only the boot message handle matters — message extraction is unused
+ * because we forward the raw payload to the native handler.
+ */
+function buildMinimalBootAdapter() {
+  return {
+    extractMessage: async () => ({ kind: "skip" as const, reason: "native-forward" }),
+    sendReply: async () => {},
+  };
 }
 
 /**
