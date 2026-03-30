@@ -55,8 +55,8 @@ export const SLACK_BOT_EVENTS = [
 export function buildSlackManifest(webhookUrl: string): Record<string, unknown> {
   return {
     display_information: {
-      name: "OpenClaw Gateway",
-      description: "OpenClaw Slack integration",
+      name: "VClaw",
+      description: "VClaw — AI assistant powered by OpenClaw",
       background_color: "#0f172a",
     },
     features: {
@@ -66,7 +66,7 @@ export function buildSlackManifest(webhookUrl: string): Record<string, unknown> 
       },
       assistant_view: {
         assistant_description:
-          "OpenClaw AI assistant — ask questions, run tasks, and manage your workspace.",
+          "VClaw AI assistant — ask questions, run tasks, and manage your workspace.",
         suggested_prompts: [
           {
             title: "What can you do?",
@@ -79,7 +79,7 @@ export function buildSlackManifest(webhookUrl: string): Record<string, unknown> 
         ],
       },
       bot_user: {
-        display_name: "OpenClaw",
+        display_name: "VClaw",
         always_online: true,
       },
       slash_commands: [
