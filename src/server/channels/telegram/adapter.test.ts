@@ -359,6 +359,99 @@ test("createTelegramAdapter sendReplyRich image regression — sends photo via s
   }
 });
 
+test("createTelegramAdapter sendReplyRich places caption on first attachment only", async () => {
+  const captions: Array<string | undefined> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    // Extract caption from FormData body
+    if (init?.body instanceof FormData) {
+      captions.push(init.body.get("caption") as string | undefined ?? undefined);
+    }
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 42 } } }), {
+      status: 200,
+    });
+  };
+
+  try {
+    const adapter = createTelegramAdapter(makeTelegramConfig());
+    const reply: ChannelReply = {
+      text: "Two attachments.",
+      media: [
+        { type: "image", source: { kind: "data", mimeType: "image/png", base64: "iVBORw0KGgo=", filename: "a.png" } },
+        { type: "audio", source: { kind: "data", mimeType: "audio/mpeg", base64: "SUQzBAAAAAAA", filename: "b.mp3" } },
+      ],
+    };
+
+    await adapter.sendReplyRich!(
+      { text: "show both", chatId: "42" },
+      reply,
+    );
+
+    assert.equal(captions.length, 2, "should send two media items");
+    assert.equal(captions[0], "Two attachments.", "first attachment gets the caption");
+    assert.equal(captions[1], undefined, "second attachment has no caption");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createTelegramAdapter sendReplyRich sends overflow text as separate message when caption is truncated", async () => {
+  const calls: Array<{ url: string; isFormData: boolean; caption?: string; text?: string }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (init?.body instanceof FormData) {
+      calls.push({
+        url,
+        isFormData: true,
+        caption: (init.body.get("caption") as string | undefined) ?? undefined,
+      });
+    } else {
+      // JSON body (sendMessage for overflow text)
+      let text: string | undefined;
+      try {
+        const parsed = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+        text = parsed.text;
+      } catch {
+        // ignore
+      }
+      calls.push({ url, isFormData: false, text });
+    }
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 42 } } }), {
+      status: 200,
+    });
+  };
+
+  try {
+    const adapter = createTelegramAdapter(makeTelegramConfig());
+    // 1024 is TELEGRAM_MAX_CAPTION_LEN — build text that exceeds it
+    const longText = "A".repeat(1024) + "OVERFLOW";
+    const reply: ChannelReply = {
+      text: longText,
+      media: [
+        { type: "video", source: { kind: "data", mimeType: "video/mp4", base64: "AAAAIGZ0eXA=", filename: "clip.mp4" } },
+      ],
+    };
+
+    await adapter.sendReplyRich!(
+      { text: "make video", chatId: "42" },
+      reply,
+    );
+
+    // First call: sendVideo with truncated caption
+    assert.equal(calls.length, 2, "should send media + overflow text");
+    assert.equal(calls[0]!.isFormData, true, "first call is media upload");
+    assert.equal(calls[0]!.caption, "A".repeat(1024), "caption is truncated to max length");
+
+    // Second call: sendMessage with overflow text
+    assert.equal(calls[1]!.isFormData, false, "second call is text message");
+    assert.ok(calls[1]!.url.includes("sendMessage"), "overflow sent via sendMessage");
+    assert.equal(calls[1]!.text, "OVERFLOW", "overflow text is the remainder");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("createTelegramAdapter sendReplyRich dispatches mixed media types", async () => {
   const calls: string[] = [];
   const originalFetch = globalThis.fetch;

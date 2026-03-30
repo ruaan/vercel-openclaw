@@ -702,6 +702,78 @@ test("createSlackAdapter sendReplyRich image regression — existing data image 
   assert.ok(fetchCalls.some((c) => String(c.input).includes("completeUploadExternal")), "should complete image upload");
 });
 
+test("createSlackAdapter sendReplyRich uploads video media via the full upload flow", async () => {
+  const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+
+  const adapter = createSlackAdapter(
+    {
+      signingSecret: "secret",
+      botToken: "xoxb-token",
+    },
+    {
+      fetchFn: async (input, init) => {
+        fetchCalls.push({ input, init });
+
+        if (String(input).includes("chat.postMessage")) {
+          return new Response(JSON.stringify({ ok: true, ts: "1000.01" }), { status: 200 });
+        }
+        if (String(input).includes("getUploadURLExternal")) {
+          return new Response(
+            JSON.stringify({ ok: true, upload_url: "https://files.slack.com/upload/v1/vid", file_id: "FVID" }),
+            { status: 200 },
+          );
+        }
+        if (String(input).includes("files.slack.com")) {
+          return new Response("OK", { status: 200 });
+        }
+        if (String(input).includes("completeUploadExternal")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+    },
+  );
+
+  const message: SlackExtractedMessage = {
+    text: "hello",
+    channel: "C123",
+    threadTs: "123.45",
+    ts: "123.45",
+  };
+
+  const reply: ChannelReply = {
+    text: "Video attached.",
+    media: [
+      {
+        type: "video",
+        source: {
+          kind: "data",
+          mimeType: "video/mp4",
+          base64: "AAAAIGZ0eXA=",
+          filename: "run.mp4",
+        },
+      },
+    ],
+  };
+
+  await adapter.sendReplyRich!(message, reply);
+
+  // Full flow: postMessage + getUploadURLExternal + upload + completeUploadExternal
+  assert.ok(fetchCalls.some((c) => String(c.input).includes("chat.postMessage")), "should post text");
+  assert.ok(fetchCalls.some((c) => String(c.input).includes("getUploadURLExternal")), "should get upload URL");
+  assert.ok(
+    fetchCalls.some((c) => String(c.input).includes("files.slack.com")),
+    "should upload file bytes",
+  );
+  assert.ok(fetchCalls.some((c) => String(c.input).includes("completeUploadExternal")), "should complete upload");
+
+  // Verify the getUploadURLExternal call includes correct filename
+  const uploadUrlCall = fetchCalls.find((c) => String(c.input).includes("getUploadURLExternal"));
+  const uploadBody = JSON.parse(uploadUrlCall?.init?.body as string);
+  assert.equal(uploadBody.filename, "run.mp4", "should use the provided filename");
+});
+
 test("createSlackAdapter sendReplyRich does not double-upload image present in media and images", async () => {
   const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
 

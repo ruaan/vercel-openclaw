@@ -284,6 +284,26 @@ test("reply: inferMediaType prefers MIME type over extension", () => {
 });
 
 // ---------------------------------------------------------------------------
+// inferMediaType — path-shape invariance
+//
+// inferMediaType must classify correctly regardless of whether the reference
+// is a bare filename (e.g. "out.mp3") or a slash-containing path (e.g.
+// "/workspace/out.mp3"). Path safety filtering happens downstream in the
+// driver's isSafeFilename, not here.
+// ---------------------------------------------------------------------------
+
+test("reply: inferMediaType classifies bare filenames and absolute paths identically", () => {
+  assert.equal(inferMediaType("out.mp3"), "audio");
+  assert.equal(inferMediaType("/workspace/out.mp3"), "audio");
+  assert.equal(inferMediaType("chart.png"), "image");
+  assert.equal(inferMediaType("/workspace/chart.png"), "image");
+  assert.equal(inferMediaType("demo.mp4"), "video");
+  assert.equal(inferMediaType("/workspace/demo.mp4"), "video");
+  assert.equal(inferMediaType("report.pdf"), "file");
+  assert.equal(inferMediaType("/workspace/report.pdf"), "file");
+});
+
+// ---------------------------------------------------------------------------
 // extractReply — generic media (MEDIA: lines)
 // ---------------------------------------------------------------------------
 
@@ -388,6 +408,41 @@ test("reply: extractReply preserves filename from data URI in media", () => {
   if (result.media[0]!.source.kind === "data") {
     assert.equal(result.media[0]!.source.filename, "clip.mp4");
   }
+});
+
+// ---------------------------------------------------------------------------
+// extractReply — path-shape pass-through
+//
+// extractReply does NOT filter paths; it preserves whatever reference the
+// gateway emits. The driver's resolveSandboxMedia is responsible for deciding
+// which references are safe to fetch. This test documents that both bare
+// filenames and slash-containing paths survive extraction unchanged so the
+// downstream safety check can run on the original value.
+// ---------------------------------------------------------------------------
+
+test("reply: extractReply preserves slash-containing MEDIA references for downstream safety filtering", () => {
+  const result = extractReply({
+    choices: [{
+      message: {
+        content: "MEDIA: /workspace/out.mp3\nMEDIA: out.mp3",
+      },
+    }],
+  });
+  assert.ok(result);
+  assert.ok(result.media);
+  assert.equal(result.media.length, 2);
+  // Both are passed through as URL sources
+  assert.equal(result.media[0]!.source.kind, "url");
+  assert.equal(result.media[1]!.source.kind, "url");
+  if (result.media[0]!.source.kind === "url") {
+    assert.equal(result.media[0]!.source.url, "/workspace/out.mp3");
+  }
+  if (result.media[1]!.source.kind === "url") {
+    assert.equal(result.media[1]!.source.url, "out.mp3");
+  }
+  // Both are classified as audio regardless of path shape
+  assert.equal(result.media[0]!.type, "audio");
+  assert.equal(result.media[1]!.type, "audio");
 });
 
 // ---------------------------------------------------------------------------

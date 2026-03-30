@@ -382,3 +382,79 @@ test("driver: resolveSandboxMedia preserves reply with no images or media", asyn
   const resolved = await resolveSandboxMedia(reply, "sbx-123");
   assert.deepStrictEqual(resolved, reply);
 });
+
+// ---------------------------------------------------------------------------
+// Regression: worker-sandbox media hop — bare filename → kind: "data"
+// ---------------------------------------------------------------------------
+
+test("driver: resolveSandboxMedia resolves worker-sandbox audio artifact (job-1-answer.mp3)", async () => {
+  const audioBytes = mp3Stub();
+  const fakeSandbox = makeFakeSandbox({
+    "/home/vercel-sandbox/.openclaw/generated/worker/job-1-answer.mp3": audioBytes,
+  });
+  _setSandboxControllerForTesting({
+    get: () => Promise.resolve(fakeSandbox),
+  } as never);
+
+  const reply: ChannelReply = {
+    text: "Done",
+    media: [
+      { type: "audio", source: { kind: "url", url: "job-1-answer.mp3" } },
+    ],
+  };
+
+  const resolved = await resolveSandboxMedia(reply, "sbx-worker-1");
+
+  assert.ok(resolved.media, "media array must be present after resolution");
+  assert.equal(resolved.media.length, 1);
+
+  const item = resolved.media[0]!;
+  assert.equal(item.type, "audio");
+  assert.equal(item.source.kind, "data", "sandbox-relative URL must resolve to data source");
+  if (item.source.kind === "data") {
+    assert.equal(item.source.mimeType, "audio/mpeg");
+    assert.equal(item.source.filename, "job-1-answer.mp3");
+    assert.ok(item.source.base64.length > 0, "base64 payload must be non-empty");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Path-shape behavior: bare filenames vs slash-containing sandbox paths
+// ---------------------------------------------------------------------------
+
+test("driver: /workspace/ absolute paths are classified as sandbox-relative but rejected as unsafe", async () => {
+  // Bare filenames work — they pass both isSandboxRelativePath and isSafeFilename
+  assert.ok(isSandboxRelativePath("out.mp3"), "bare filename is sandbox-relative");
+  assert.ok(isSafeFilename("out.mp3"), "bare filename is safe");
+
+  // /workspace/out.mp3 is considered sandbox-relative (no protocol) but
+  // contains a path separator, so isSafeFilename rejects it — this is
+  // intentional to prevent path traversal.
+  assert.ok(
+    isSandboxRelativePath("/workspace/out.mp3"),
+    "/workspace path has no protocol, so it is sandbox-relative",
+  );
+  assert.ok(
+    !isSafeFilename("/workspace/out.mp3"),
+    "/workspace path contains slash, so it is rejected as unsafe",
+  );
+
+  // Verify the full resolution path leaves the slash-path unresolved
+  const fakeSandbox = makeFakeSandbox({});
+  _setSandboxControllerForTesting({
+    get: () => Promise.resolve(fakeSandbox),
+  } as never);
+
+  const reply: ChannelReply = {
+    text: "",
+    media: [
+      { type: "audio", source: { kind: "url", url: "/workspace/out.mp3" } },
+    ],
+  };
+  const resolved = await resolveSandboxMedia(reply, "sbx-123");
+  assert.equal(
+    resolved.media![0]!.source.kind,
+    "url",
+    "/workspace/ path must stay unresolved (kept as original URL source)",
+  );
+});

@@ -1,17 +1,20 @@
 import * as crypto from "node:crypto";
 
 import type { WhatsAppChannelConfig } from "@/shared/channels";
-import { toPlainText } from "@/server/channels/core/reply";
 import { startKeepAlive } from "@/server/channels/core/processing-indicator";
 import { RetryableSendError } from "@/server/channels/core/types";
 import type {
   GatewayMessage,
   PlatformAdapter,
+  ReplyMedia,
 } from "@/server/channels/core/types";
+import type { WhatsAppMediaType } from "@/server/channels/whatsapp/whatsapp-api";
 import {
   isRetryableWhatsAppSendError,
   markAsRead,
+  sendMediaMessage,
   sendMessage,
+  uploadMedia,
 } from "@/server/channels/whatsapp/whatsapp-api";
 
 export interface WhatsAppExtractedMessage {
@@ -44,6 +47,84 @@ type WhatsAppWebhookValue = {
   }>;
   messages?: WhatsAppWebhookMessage[];
 };
+
+// ---------------------------------------------------------------------------
+// Media helpers
+// ---------------------------------------------------------------------------
+
+function replyMediaTypeToWhatsApp(type: ReplyMedia["type"]): WhatsAppMediaType {
+  switch (type) {
+    case "image":
+      return "image";
+    case "audio":
+      return "audio";
+    case "video":
+      return "video";
+    case "file":
+      return "document";
+  }
+}
+
+/**
+ * Send a single media item to a WhatsApp recipient.
+ *
+ * - URL sources are sent directly via the WhatsApp `link` field.
+ * - Data (base64) sources are uploaded to WhatsApp's media endpoint first,
+ *   then sent via the returned media id.
+ */
+async function sendMediaItem(
+  accessToken: string,
+  phoneNumberId: string,
+  to: string,
+  media: ReplyMedia,
+  caption?: string,
+): Promise<void> {
+  const waType = replyMediaTypeToWhatsApp(media.type);
+
+  if (media.source.kind === "url") {
+    await sendMediaMessage(accessToken, phoneNumberId, to, waType, { link: media.source.url }, {
+      caption,
+      filename: media.type === "file" ? filenameFromUrl(media.source.url) : undefined,
+    });
+    return;
+  }
+
+  // Data source: upload first, then send by id.
+  const buffer = Buffer.from(media.source.base64, "base64");
+  const filename = media.source.filename ?? `attachment.${extensionFromMime(media.source.mimeType)}`;
+  const mediaId = await uploadMedia(accessToken, phoneNumberId, media.source.mimeType, buffer, filename);
+  await sendMediaMessage(accessToken, phoneNumberId, to, waType, { id: mediaId }, {
+    caption,
+    filename: media.type === "file" ? filename : undefined,
+  });
+}
+
+function filenameFromUrl(url: string): string | undefined {
+  try {
+    const last = url.split("/").pop();
+    return last && last.includes(".") ? last : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extensionFromMime(mimeType: string): string {
+  const map: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "application/pdf": "pdf",
+  };
+  return map[mimeType] ?? "bin";
+}
+
+// ---------------------------------------------------------------------------
 
 function toRetryableSendError(
   message: string,
@@ -176,7 +257,72 @@ export function createWhatsAppAdapter(
     },
 
     async sendReplyRich(message, reply) {
-      await this.sendReply(message, toPlainText(reply));
+      const media = reply.media ?? [];
+      const legacyImages = (!reply.media || reply.media.length === 0) ? (reply.images ?? []) : [];
+      const hasMedia = media.length > 0 || legacyImages.length > 0;
+
+      if (!hasMedia) {
+        // Text-only reply — fast path.
+        await this.sendReply(message, reply.text);
+        return;
+      }
+
+      const accessToken = config.accessToken ?? "";
+      const { phoneNumberId, from } = message;
+      const sendMediaFallback = async (name: string) => {
+        await sendMessage(
+          accessToken,
+          phoneNumberId,
+          from,
+          `(${name} attachment could not be delivered on WhatsApp)`,
+        );
+      };
+
+      // Send the text portion first (if non-empty).
+      if (reply.text.trim().length > 0) {
+        await this.sendReply(message, reply.text);
+      }
+
+      // Deliver each generic media item natively.
+      for (const item of media) {
+        try {
+          await sendMediaItem(accessToken, phoneNumberId, from, item);
+        } catch (error) {
+          if (isRetryableWhatsAppSendError(error)) {
+            throw toRetryableSendError(
+              `whatsapp_send_retryable: ${error instanceof Error ? error.message : String(error)}`,
+              error,
+            );
+          }
+
+          // Graceful degradation — never emit "[inline ...]" placeholders.
+          const name =
+            item.source.kind === "data" && item.source.filename
+              ? item.source.filename
+              : item.type;
+          await sendMediaFallback(name);
+        }
+      }
+
+      // Legacy images (deprecated path).
+      for (const image of legacyImages) {
+        try {
+          const legacyMedia: ReplyMedia = {
+            type: "image",
+            source: image,
+          };
+          await sendMediaItem(accessToken, phoneNumberId, from, legacyMedia);
+        } catch (error) {
+          if (isRetryableWhatsAppSendError(error)) {
+            throw toRetryableSendError(
+              `whatsapp_send_retryable: ${error instanceof Error ? error.message : String(error)}`,
+              error,
+            );
+          }
+
+          await sendMediaFallback("image");
+        }
+      }
     },
 
     buildGatewayMessages(message): GatewayMessage[] {
@@ -219,4 +365,3 @@ export function createWhatsAppAdapter(
     },
   };
 }
-

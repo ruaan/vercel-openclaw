@@ -187,6 +187,110 @@ export async function markAsRead(
   await new WhatsAppApiClient({ accessToken, phoneNumberId }).markAsRead(messageId);
 }
 
+// ---------------------------------------------------------------------------
+// Media sending
+// ---------------------------------------------------------------------------
+
+/**
+ * WhatsApp media type used in the Cloud API message body.
+ * Maps to the `type` field in the send-message payload.
+ */
+export type WhatsAppMediaType = "image" | "audio" | "video" | "document";
+
+/**
+ * Upload a binary blob to the WhatsApp media endpoint and return the media id.
+ * The Cloud API expects `multipart/form-data` with fields:
+ *   messaging_product, type (MIME), file (Blob).
+ */
+export async function uploadMedia(
+  accessToken: string,
+  phoneNumberId: string,
+  mimeType: string,
+  buffer: Buffer,
+  filename: string,
+): Promise<string> {
+  const form = new FormData();
+  form.set("messaging_product", "whatsapp");
+  form.set("type", mimeType);
+  form.set("file", new Blob([new Uint8Array(buffer)], { type: mimeType }), filename);
+
+  const url = `${WHATSAPP_API_BASE}/${encodeURIComponent(phoneNumberId)}/media`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { authorization: `Bearer ${accessToken}` },
+    body: form,
+    signal: AbortSignal.timeout(WHATSAPP_REQUEST_TIMEOUT_MS),
+  });
+
+  const payload = (await response.json()) as { id?: string; error?: { message?: string; code?: number } };
+  if (!response.ok || payload.error) {
+    throw new WhatsAppApiError({
+      method: "POST",
+      statusCode: response.status,
+      message: payload.error?.message ?? `Media upload HTTP ${response.status}`,
+      code: payload.error?.code ?? null,
+    });
+  }
+
+  if (!payload.id) {
+    throw new WhatsAppApiError({
+      method: "POST",
+      statusCode: 502,
+      message: "Missing media id in WhatsApp upload response",
+    });
+  }
+
+  return payload.id;
+}
+
+/**
+ * Send a media message (image / audio / video / document).
+ *
+ * Accepts either a public URL (`link`) or a pre-uploaded media id (`id`).
+ * Caption support varies by type — WhatsApp allows captions on image,
+ * video, and document but not audio.
+ */
+export async function sendMediaMessage(
+  accessToken: string,
+  phoneNumberId: string,
+  to: string,
+  mediaType: WhatsAppMediaType,
+  media: { link: string } | { id: string },
+  options?: { caption?: string; filename?: string },
+): Promise<WhatsAppSendMessageResult> {
+  const mediaBody: Record<string, unknown> = { ...media };
+
+  // Audio messages do not support captions in WhatsApp Cloud API.
+  if (options?.caption && mediaType !== "audio") {
+    mediaBody.caption = clampWhatsAppText(options.caption);
+  }
+  if (options?.filename && mediaType === "document") {
+    mediaBody.filename = options.filename;
+  }
+
+  const payload = await callWhatsAppApi<WhatsAppSendMessageResult>(
+    accessToken,
+    phoneNumberId,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: mediaType,
+      [mediaType]: mediaBody,
+    },
+  );
+
+  const message = payload.messages?.[0];
+  if (!message?.id) {
+    throw new WhatsAppApiError({
+      method: "POST",
+      statusCode: 502,
+      message: "Missing message id in WhatsApp media response",
+    });
+  }
+
+  return message;
+}
+
 export async function deleteMessage(
   _accessToken: string,
   _messageId: string,
