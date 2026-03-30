@@ -2361,14 +2361,15 @@ Rules:
 
 ### Channel delivery (required on Telegram, Slack, WhatsApp, Discord)
 
-When the user is in a channel, do not stop after printing JSON or MEDIA: lines.
-Read \`channelMedia[].path\` from the launcher output and send each one with:
+When you are replying in Telegram, Slack, WhatsApp, or Discord, prefer the one-command form that sends every returned \`channelMedia[].path\` natively and still prints structured JSON:
 
 \`\`\`bash
-message send --media /workspace/openclaw-generated/worker/short-description-1-output.txt
+node ${OPENCLAW_WORKER_SANDBOX_SCRIPT_PATH} /workspace/request.json --json-only --send-channel-media --text "Done."
 \`\`\`
 
-You can add text to the first send:
+This calls \`message send --media\` for each canonical \`channelMedia[].path\` automatically. You do not need to parse JSON and send each file manually.
+
+If you need manual control, you can still iterate over \`channelMedia[].path\` from the JSON output:
 
 \`\`\`bash
 message send --media /workspace/openclaw-generated/worker/short-description-1-output.txt --text "Done."
@@ -2377,8 +2378,10 @@ message send --media /workspace/openclaw-generated/worker/short-description-1-ou
 }
 
 export function buildWorkerSandboxScript(): string {
-  return `import { createHash } from "node:crypto";
+  return `import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { parseArgs } from "node:util";
 import path from "node:path";
 
 const WORKER_MEDIA_DIR = "/workspace/openclaw-generated/worker";
@@ -2428,10 +2431,40 @@ async function materializeCapturedFiles(task, capturedFiles) {
   return channelMedia;
 }
 
-const requestPath = process.argv[2];
-const jsonOnly = process.argv.includes("--json-only");
+function isCanonicalWorkerMediaPath(value) {
+  return typeof value === "string" && value.startsWith("/workspace/openclaw-generated/worker/");
+}
+
+function sendChannelMedia(items, caption) {
+  let first = true;
+  for (const item of items) {
+    if (!item || !isCanonicalWorkerMediaPath(item.path)) continue;
+    const args = ["send", "--media", item.path];
+    if (first && caption && caption.trim()) {
+      args.push("--text", caption.trim());
+    }
+    const result = spawnSync("message", args, {
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    if (result.status !== 0) {
+      throw new Error("message send failed for " + item.path);
+    }
+    first = false;
+  }
+}
+
+const { values, positionals } = parseArgs({
+  options: {
+    "json-only": { type: "boolean", default: false },
+    "send-channel-media": { type: "boolean", default: false },
+    text: { type: "string" },
+  },
+  allowPositionals: true,
+});
+const requestPath = positionals[0];
+const jsonOnly = values["json-only"];
 if (!requestPath) {
-  console.error("Usage: execute.mjs <request-json-path> [--json-only]");
+  console.error("Usage: execute.mjs <request-json-path> [--json-only] [--send-channel-media] [--text \\"caption\\"]");
   process.exit(1);
 }
 
@@ -2479,6 +2512,9 @@ const output = {
   channelMedia,
   capturedFiles: (parsed.capturedFiles ?? []).map((f) => ({ path: f.path })),
 };
+if (values["send-channel-media"]) {
+  sendChannelMedia(channelMedia, values.text);
+}
 if (!jsonOnly) {
   if (parsed.stdout?.trim()) {
     console.log(parsed.stdout.trim());
@@ -2502,7 +2538,7 @@ Use this when you need to run multiple isolated tasks in parallel — each in it
 1. Write a JSON request file that matches WorkerSandboxBatchExecuteRequest.
 2. Run: \`node ${OPENCLAW_WORKER_SANDBOX_BATCH_SCRIPT_PATH} /path/to/request.json --json-only\`
 3. Parse the JSON response from stdout.
-4. For channel replies, iterate over every \`results[].result.channelMedia[].path\` and send each artifact with \`message send --media\`.
+4. For channel replies, prefer the one-command form: \`node ${OPENCLAW_WORKER_SANDBOX_BATCH_SCRIPT_PATH} /path/to/request.json --json-only --send-channel-media --text "Batch complete."\`
 
 ### WorkerSandboxBatchExecuteRequest shape
 
@@ -2567,6 +2603,16 @@ Use this when you need to run multiple isolated tasks in parallel — each in it
 }
 \`\`\`
 
+### Channel delivery (required on Telegram, Slack, WhatsApp, Discord)
+
+For channel replies, prefer the one-command form that sends every \`results[].result.channelMedia[].path\` natively and still prints structured JSON:
+
+\`\`\`bash
+node ${OPENCLAW_WORKER_SANDBOX_BATCH_SCRIPT_PATH} /workspace/batch.json --json-only --send-channel-media --text "Batch complete."
+\`\`\`
+
+This calls \`message send --media\` for each canonical artifact across all successful jobs. You do not need to parse JSON and send each file manually.
+
 ### Scheduling with cron
 
 \`\`\`bash
@@ -2580,8 +2626,10 @@ openclaw cron add \\
 }
 
 export function buildWorkerSandboxBatchScript(): string {
-  return `import { createHash } from "node:crypto";
+  return `import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { parseArgs } from "node:util";
 import path from "node:path";
 
 const WORKER_MEDIA_DIR = "/workspace/openclaw-generated/worker";
@@ -2631,10 +2679,51 @@ async function materializeCapturedFiles(task, capturedFiles) {
   return channelMedia;
 }
 
-const requestPath = process.argv[2];
-const jsonOnly = process.argv.includes("--json-only");
+function isCanonicalWorkerMediaPath(value) {
+  return typeof value === "string" && value.startsWith("/workspace/openclaw-generated/worker/");
+}
+
+function flattenBatchChannelMedia(payload) {
+  const out = [];
+  for (const entry of payload.results ?? []) {
+    const media = entry?.result?.channelMedia;
+    if (!Array.isArray(media)) continue;
+    for (const item of media) {
+      if (item && isCanonicalWorkerMediaPath(item.path)) out.push(item);
+    }
+  }
+  return out;
+}
+
+function sendChannelMedia(items, caption) {
+  let first = true;
+  for (const item of items) {
+    const args = ["send", "--media", item.path];
+    if (first && caption && caption.trim()) {
+      args.push("--text", caption.trim());
+    }
+    const result = spawnSync("message", args, {
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    if (result.status !== 0) {
+      throw new Error("message send failed for " + item.path);
+    }
+    first = false;
+  }
+}
+
+const { values, positionals } = parseArgs({
+  options: {
+    "json-only": { type: "boolean", default: false },
+    "send-channel-media": { type: "boolean", default: false },
+    text: { type: "string" },
+  },
+  allowPositionals: true,
+});
+const requestPath = positionals[0];
+const jsonOnly = values["json-only"];
 if (!requestPath) {
-  console.error("Usage: execute-batch.mjs <request-json-path> [--json-only]");
+  console.error("Usage: execute-batch.mjs <request-json-path> [--json-only] [--send-channel-media] [--text \\"caption\\"]");
   process.exit(1);
 }
 
@@ -2696,14 +2785,18 @@ for (const entry of parsed.results ?? []) {
     },
   });
 }
-console.log(JSON.stringify({
+const batchOutput = {
   ok: parsed.ok,
   task: parsed.task,
   totalJobs: parsed.totalJobs,
   succeeded: parsed.succeeded,
   failed: parsed.failed,
   results,
-}, null, 2));
+};
+if (values["send-channel-media"]) {
+  sendChannelMedia(flattenBatchChannelMedia(batchOutput), values.text);
+}
+console.log(JSON.stringify(batchOutput, null, 2));
 `;
 }
 

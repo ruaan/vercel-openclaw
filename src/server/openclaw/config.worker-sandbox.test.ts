@@ -74,6 +74,34 @@ test("worker-sandbox script supports --json-only flag", () => {
   assert.match(script, /jsonOnly/);
 });
 
+test("worker-sandbox skill documents one-command channel media delivery", () => {
+  const skill = buildWorkerSandboxSkill();
+
+  assert.match(skill, /--send-channel-media/);
+  assert.match(skill, /message send --media/);
+  assert.match(skill, /channelMedia\[\]\.path/);
+});
+
+test("worker-sandbox script supports automatic channel media sends", () => {
+  const script = buildWorkerSandboxScript();
+
+  assert.match(script, /--send-channel-media/);
+  assert.match(script, /spawnSync\("message"/);
+  assert.match(script, /stdio: \["ignore", "ignore", "inherit"\]/);
+  assert.match(script, /\/workspace\/openclaw-generated\/worker\//);
+  assert.match(script, /channelMedia/);
+  assert.match(script, /isCanonicalWorkerMediaPath/);
+  assert.match(script, /sendChannelMedia/);
+});
+
+test("worker-sandbox script supports --text flag for caption on first send", () => {
+  const script = buildWorkerSandboxScript();
+
+  assert.match(script, /text.*type: "string"/);
+  assert.match(script, /--text/);
+  assert.match(script, /caption/);
+});
+
 test("worker-sandbox script does not print raw contentBase64 to model-visible stdout", () => {
   const script = buildWorkerSandboxScript();
 

@@ -558,6 +558,68 @@ test("driver: resolveSandboxUrlSource preserves bare-filename compatibility for 
 });
 
 // ---------------------------------------------------------------------------
+// resolveSandboxMedia — canonical worker media paths via controller mock
+// ---------------------------------------------------------------------------
+
+test("driver: resolveSandboxMedia resolves canonical worker audio media entry", async () => {
+  const workerPath = "/workspace/openclaw-generated/worker/task-1-audio.mp3";
+  const { sandbox } = createReadFileSandbox({
+    [workerPath]: Buffer.from("ok"),
+  });
+  _setSandboxControllerForTesting({
+    async get() {
+      return sandbox as never;
+    },
+  } as never);
+
+  const resolved = await resolveSandboxMedia(
+    {
+      text: "Done.",
+      media: [
+        { type: "audio", source: { kind: "url", url: workerPath } },
+      ],
+    },
+    "sbx_test",
+  );
+
+  assert.ok(resolved.media);
+  assert.equal(resolved.media?.[0]?.source.kind, "data");
+  if (resolved.media?.[0]?.source.kind === "data") {
+    assert.equal(resolved.media[0].source.filename, "task-1-audio.mp3");
+    assert.equal(resolved.media[0].source.mimeType, "audio/mpeg");
+  }
+});
+
+test("driver: resolveSandboxMedia resolves canonical worker file media entry", async () => {
+  const workerPath = "/workspace/openclaw-generated/worker/task-1-report.pdf";
+  const { sandbox } = createReadFileSandbox({
+    [workerPath]: Buffer.from("%PDF-1.7"),
+  });
+  _setSandboxControllerForTesting({
+    async get() {
+      return sandbox as never;
+    },
+  } as never);
+
+  const resolved = await resolveSandboxMedia(
+    {
+      text: "Attached.",
+      media: [
+        { type: "file", source: { kind: "url", url: workerPath } },
+      ],
+    },
+    "sbx_test",
+  );
+
+  assert.ok(resolved.media);
+  assert.equal(resolved.media?.[0]?.source.kind, "data");
+  if (resolved.media?.[0]?.source.kind === "data") {
+    assert.equal(resolved.media[0].source.filename, "task-1-report.pdf");
+    assert.equal(resolved.media[0].source.mimeType, "application/pdf");
+  }
+});
+
+// ---------------------------------------------------------------------------
 // resolveSandboxMedia — /workspace/ paths now resolve to data
 // ---------------------------------------------------------------------------
 

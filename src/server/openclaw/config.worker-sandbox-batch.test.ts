@@ -51,7 +51,7 @@ test("worker-sandbox-batch script posts to the internal batch route with bearer 
 test("worker-sandbox-batch script reads request from file argument and outputs JSON to stdout", () => {
   const script = buildWorkerSandboxBatchScript();
 
-  assert.match(script, /process\.argv\[2\]/);
+  assert.match(script, /positionals\[0\]/);
   assert.match(script, /readFile\(requestPath/);
   assert.match(script, /console\.error\(text\)/);
   assert.match(script, /process\.exit\(1\)/);
@@ -110,6 +110,33 @@ test("worker-sandbox-batch script sanitizes filenames to safe characters", () =>
 
   assert.match(script, /sanitizeMediaName/);
   assert.ok(script.includes("[^a-zA-Z0-9._-]"), "script should contain the sanitization regex");
+});
+
+test("worker-sandbox-batch skill documents one-command channel media delivery", () => {
+  const skill = buildWorkerSandboxBatchSkill();
+
+  assert.match(skill, /--send-channel-media/);
+  assert.match(skill, /results\[\]\.result\.channelMedia\[\]\.path/);
+  assert.match(skill, /message send --media/);
+});
+
+test("worker-sandbox-batch script supports automatic channel media sends", () => {
+  const script = buildWorkerSandboxBatchScript();
+
+  assert.match(script, /--send-channel-media/);
+  assert.match(script, /flattenBatchChannelMedia/);
+  assert.match(script, /spawnSync\("message"/);
+  assert.match(script, /stdio: \["ignore", "ignore", "inherit"\]/);
+  assert.match(script, /isCanonicalWorkerMediaPath/);
+  assert.match(script, /sendChannelMedia/);
+});
+
+test("worker-sandbox-batch script supports --text flag for caption on first send", () => {
+  const script = buildWorkerSandboxBatchScript();
+
+  assert.match(script, /text.*type: "string"/);
+  assert.match(script, /--text/);
+  assert.match(script, /caption/);
 });
 
 test("worker-sandbox-batch script does not print raw contentBase64 to model-visible stdout", () => {
