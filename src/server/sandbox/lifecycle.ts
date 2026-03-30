@@ -2241,9 +2241,12 @@ async function scheduleLifecycleWork(options: {
           }
 
           const errMsg = error instanceof Error ? error.message : String(error);
+          // Capture full API error details when available (e.g. @vercel/sandbox APIError)
+          const apiErrorJson = (error as { json?: unknown }).json;
+          const apiErrorText = (error as { text?: unknown }).text;
           const errCtx = options.op
-            ? withOperationContext(options.op, { error: errMsg })
-            : { reason: options.reason, error: errMsg };
+            ? withOperationContext(options.op, { error: errMsg, ...(apiErrorJson ? { apiErrorJson } : {}), ...(apiErrorText ? { apiErrorText } : {}) })
+            : { reason: options.reason, error: errMsg, ...(apiErrorJson ? { apiErrorJson } : {}), ...(apiErrorText ? { apiErrorText } : {}) };
           logError("sandbox.lifecycle_failed", errCtx);
           await mutateMeta((meta) => {
             meta.status = "error";
@@ -2587,17 +2590,34 @@ async function restoreSandboxFromSnapshot(
     });
 
     const sandboxCreateStart = Date.now();
-    const sandbox = await getSandboxController().create({
+    const createParams = {
       ports: SANDBOX_PORTS,
       timeout: sleepAfterMs,
       resources: { vcpus },
       source: {
-        type: "snapshot",
+        type: "snapshot" as const,
         snapshotId: current.snapshotId,
       },
       env: restoreEnv,
       // networkPolicy on snapshot restore returns 400 — apply post-create
-    });
+    };
+    let sandbox;
+    try {
+      sandbox = await getSandboxController().create(createParams);
+    } catch (createError) {
+      // Log full API error details for diagnosing 400s from the sandbox API
+      const apiJson = (createError as { json?: unknown }).json;
+      const apiText = (createError as { text?: unknown }).text;
+      logError("sandbox.restore.create_failed", {
+        snapshotId: current.snapshotId,
+        error: createError instanceof Error ? createError.message : String(createError),
+        ...(apiJson ? { apiErrorJson: apiJson } : {}),
+        ...(apiText ? { apiErrorText: apiText } : {}),
+        envKeys: Object.keys(restoreEnv),
+        envSizes: Object.fromEntries(Object.entries(restoreEnv).map(([k, v]) => [k, v.length])),
+      });
+      throw createError;
+    }
     const sandboxCreateMs = Date.now() - sandboxCreateStart;
     logPhase("sandboxCreate", { ms: sandboxCreateMs, sandboxId: sandbox.sandboxId, snapshotId: current.snapshotId });
 
