@@ -67,7 +67,16 @@ export function buildSlackManifest(webhookUrl: string): Record<string, unknown> 
       assistant_view: {
         assistant_description:
           "OpenClaw AI assistant — ask questions, run tasks, and manage your workspace.",
-        suggested_prompts: [],
+        suggested_prompts: [
+          {
+            title: "What can you do?",
+            message: "What tools and capabilities do you have?",
+          },
+          {
+            title: "Generate an image",
+            message: "Generate an image of a sunset over mountains",
+          },
+        ],
       },
       bot_user: {
         display_name: "OpenClaw",
