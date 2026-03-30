@@ -642,22 +642,9 @@ Up to 10 reference images supported for Gemini models.
 ## Output
 
 The script saves PNG images to disk and prints \`MEDIA:\` lines with absolute paths (one per line).
-OpenClaw renders these inline automatically.
+OpenClaw renders these inline automatically — including delivery to channels (Telegram, Slack, WhatsApp, Discord).
 
-**CRITICAL — Channel delivery (Telegram, Slack, WhatsApp, Discord):**
-When you are responding to a message from a channel, you MUST use the \`message\` tool to send the image. Do NOT just print the path or use \`MEDIA:\` — the channel will not receive it. After running gen.mjs, call:
-
-\`\`\`bash
-message send --media /absolute/path/to/generated-image.png
-\`\`\`
-
-You can add a text caption alongside the media:
-
-\`\`\`bash
-message send --media /absolute/path/to/generated-image.png --text "Here's your image!"
-\`\`\`
-
-For multiple images, send each one separately with \`message send --media\`.
+Do NOT call \`message send --media\` after running gen.mjs. The \`MEDIA:\` lines already handle delivery to all channels natively. Calling \`message send\` separately would send the image twice.
 `;
 }
 
