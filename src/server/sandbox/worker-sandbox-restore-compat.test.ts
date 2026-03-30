@@ -27,6 +27,18 @@ import type { WorkerSandboxExecuteResponse } from "@/shared/worker-sandbox";
 import { createScenarioHarness } from "@/test-utils/harness";
 import { buildPostRequest, callRoute } from "@/test-utils/route-caller";
 
+/**
+ * Extract the JSON summary from script stdout lines.
+ * The script emits optional task stdout, optional MEDIA: lines, then a
+ * pretty-printed JSON object as the final output.
+ */
+function extractJsonSummary(stdoutLines: string[]): Record<string, unknown> {
+  const joined = stdoutLines.join("\n");
+  const firstBrace = joined.indexOf("{");
+  if (firstBrace === -1) throw new Error("No JSON found in stdout");
+  return JSON.parse(joined.slice(firstBrace));
+}
+
 function getWorkerSandboxRoute() {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   return require("@/app/api/internal/worker-sandboxes/execute/route") as {
@@ -511,20 +523,17 @@ test("legacy snapshot restore leaves a runnable worker-sandbox launcher in the r
       "launcher should post the unchanged request JSON",
     );
 
-    const body = JSON.parse(
-      scriptRun.stdout.join("\n"),
-    ) as WorkerSandboxExecuteResponse;
+    const body = extractJsonSummary(scriptRun.stdout) as {
+      ok: boolean;
+      task: string;
+      exitCode: number;
+      capturedFiles: Array<{ path: string }>;
+    };
     assert.equal(body.ok, true);
     assert.equal(body.task, "process-image");
     assert.equal(body.exitCode, 0);
     assert.equal(body.capturedFiles.length, 1);
     assert.equal(body.capturedFiles[0]!.path, "/workspace/input.txt");
-    assert.equal(
-      Buffer.from(body.capturedFiles[0]!.contentBase64, "base64").toString(
-        "utf8",
-      ),
-      "hello from restored sandbox\n",
-    );
 
     const after = await getInitializedMeta();
     assert.equal(after.status, before.status, "status must not change");
@@ -673,24 +682,24 @@ test("restored launcher round-trips binary image payload unchanged through the w
       "launcher should post the unchanged binary request JSON",
     );
 
-    const body = JSON.parse(
-      scriptRun.stdout.join("\n"),
-    ) as WorkerSandboxExecuteResponse;
+    const body = extractJsonSummary(scriptRun.stdout) as {
+      ok: boolean;
+      task: string;
+      exitCode: number;
+      capturedFiles: Array<{ path: string }>;
+    };
     assert.equal(body.ok, true);
     assert.equal(body.task, "process-image");
     assert.equal(body.exitCode, 0);
     assert.equal(body.capturedFiles.length, 1);
     assert.equal(body.capturedFiles[0]!.path, "/workspace/output.png");
 
-    // The captured output bytes must exactly match the original input bytes
-    const capturedBytes = Buffer.from(
-      body.capturedFiles[0]!.contentBase64,
-      "base64",
-    );
-    assert.deepEqual(
-      capturedBytes,
-      imageBytes,
-      "captured /workspace/output.png bytes must exactly match input image bytes",
+    // The script strips contentBase64 from the model-visible JSON summary —
+    // only the path is retained so raw binary data is never printed to stdout.
+    assert.equal(
+      (body.capturedFiles[0] as Record<string, unknown>).contentBase64,
+      undefined,
+      "contentBase64 must not appear in model-visible stdout summary",
     );
 
     // Singleton metadata must not change

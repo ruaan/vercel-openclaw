@@ -21,8 +21,25 @@ export type GatewayMessage = {
   content: string | OpenClawContentPart[];
 };
 
+export type ReplyBinarySource =
+  | { kind: "url"; url: string; alt?: string }
+  | {
+      kind: "data";
+      mimeType: string;
+      base64: string;
+      filename?: string;
+      alt?: string;
+    };
+
+export type ReplyMedia =
+  | { type: "image"; source: ReplyBinarySource }
+  | { type: "audio"; source: ReplyBinarySource; voice?: boolean }
+  | { type: "video"; source: ReplyBinarySource }
+  | { type: "file"; source: ReplyBinarySource };
+
 export type ChannelReply = {
   text: string;
+  /** @deprecated Use `media` instead. Kept for backward compatibility. */
   images?: Array<
     | {
         kind: "url";
@@ -37,6 +54,7 @@ export type ChannelReply = {
         alt?: string;
       }
   >;
+  media?: ReplyMedia[];
 };
 
 export interface ExtractedChannelMessage {

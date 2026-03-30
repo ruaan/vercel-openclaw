@@ -241,6 +241,10 @@ export type TelegramPhotoInput =
   | { kind: "url"; url: string }
   | { kind: "buffer"; buffer: Buffer; filename: string; mimeType: string };
 
+export type TelegramUpload =
+  | { kind: "url"; url: string }
+  | { kind: "buffer"; buffer: Buffer; filename: string; mimeType: string };
+
 export async function editMessageText(
   botToken: string,
   chatId: number | string,
@@ -323,4 +327,93 @@ export async function sendPhoto(
   }
 
   return payload.result;
+}
+
+async function sendMediaFormData(
+  botToken: string,
+  method: string,
+  fieldName: string,
+  chatId: number | string,
+  media: TelegramUpload,
+  caption?: string,
+): Promise<TelegramSendMessageResult> {
+  if (media.kind === "url") {
+    return callTelegramApi<TelegramSendMessageResult>(botToken, method, {
+      chat_id: chatId,
+      [fieldName]: media.url,
+      ...(caption ? { caption: clampTelegramText(caption, TELEGRAM_MAX_CAPTION_LEN) } : {}),
+    });
+  }
+
+  const formData = new FormData();
+  formData.set("chat_id", String(chatId));
+  formData.set(
+    fieldName,
+    new Blob([Uint8Array.from(media.buffer)], { type: media.mimeType }),
+    media.filename,
+  );
+  if (caption) {
+    formData.set("caption", clampTelegramText(caption, TELEGRAM_MAX_CAPTION_LEN));
+  }
+
+  const apiUrl = `${TELEGRAM_API_BASE}/bot${botToken}/${method}`;
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    body: formData,
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  let payload: TelegramApiResponse<TelegramSendMessageResult> | null = null;
+  try {
+    payload = (await response.json()) as TelegramApiResponse<TelegramSendMessageResult>;
+  } catch {
+    payload = null;
+  }
+
+  if (!payload || !payload.ok || payload.result === undefined) {
+    const statusCode = typeof payload?.error_code === "number" ? payload.error_code : response.status;
+    const description =
+      typeof payload?.description === "string"
+        ? payload.description
+        : `HTTP ${response.status}`;
+    const retryAfter =
+      typeof payload?.parameters?.retry_after === "number"
+        ? payload.parameters.retry_after
+        : undefined;
+    throw new TelegramApiError({
+      method,
+      status_code: statusCode,
+      description,
+      retry_after: retryAfter,
+    });
+  }
+
+  return payload.result;
+}
+
+export async function sendAudio(
+  botToken: string,
+  chatId: number | string,
+  audio: TelegramUpload,
+  caption?: string,
+): Promise<TelegramSendMessageResult> {
+  return sendMediaFormData(botToken, "sendAudio", "audio", chatId, audio, caption);
+}
+
+export async function sendVideo(
+  botToken: string,
+  chatId: number | string,
+  video: TelegramUpload,
+  caption?: string,
+): Promise<TelegramSendMessageResult> {
+  return sendMediaFormData(botToken, "sendVideo", "video", chatId, video, caption);
+}
+
+export async function sendDocument(
+  botToken: string,
+  chatId: number | string,
+  document: TelegramUpload,
+  caption?: string,
+): Promise<TelegramSendMessageResult> {
+  return sendMediaFormData(botToken, "sendDocument", "document", chatId, document, caption);
 }

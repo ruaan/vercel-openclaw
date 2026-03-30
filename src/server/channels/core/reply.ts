@@ -1,4 +1,60 @@
-import type { ChannelReply, OpenClawContentPart } from "@/server/channels/core/types";
+import type {
+  ChannelReply,
+  OpenClawContentPart,
+  ReplyBinarySource,
+  ReplyMedia,
+} from "@/server/channels/core/types";
+
+export function inferMediaType(
+  reference: string,
+  mimeType?: string,
+): ReplyMedia["type"] {
+  const value = `${mimeType ?? ""} ${reference}`.toLowerCase();
+  if (
+    value.includes("image/") ||
+    /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(value)
+  ) {
+    return "image";
+  }
+  if (
+    value.includes("audio/") ||
+    /\.(mp3|wav|m4a|ogg|aac|flac)$/i.test(value)
+  ) {
+    return "audio";
+  }
+  if (
+    value.includes("video/") ||
+    /\.(mp4|mov|webm|mkv)$/i.test(value)
+  ) {
+    return "video";
+  }
+  return "file";
+}
+
+function toReplyBinarySource(
+  image: NonNullable<ChannelReply["images"]>[number],
+): ReplyBinarySource {
+  return image;
+}
+
+function toReplyMedia(
+  image: NonNullable<ChannelReply["images"]>[number],
+  reference: string,
+): ReplyMedia {
+  const source = toReplyBinarySource(image);
+  const mimeType = image.kind === "data" ? image.mimeType : undefined;
+  const type = inferMediaType(reference, mimeType);
+  switch (type) {
+    case "image":
+      return { type: "image", source };
+    case "audio":
+      return { type: "audio", source };
+    case "video":
+      return { type: "video", source };
+    default:
+      return { type: "file", source };
+  }
+}
 
 function cleanOptionalText(value: string | undefined): string | undefined {
   if (typeof value !== "string") {
@@ -147,15 +203,21 @@ function parseMarkdownImageDestination(destination: string): string {
 function extractImagesFromTextContent(content: string): {
   text: string;
   images: NonNullable<ChannelReply["images"]>;
+  media: ReplyMedia[];
 } {
   const images: NonNullable<ChannelReply["images"]> = [];
+  const media: ReplyMedia[] = [];
 
   let textWithoutMedia = content.replace(
     /^\s*MEDIA:\s*(.+?)\s*$/gim,
     (_match, mediaPath: string) => {
       const parsedImage = toReplyImage(mediaPath);
       if (parsedImage) {
-        images.push(parsedImage);
+        const entry = toReplyMedia(parsedImage, mediaPath);
+        media.push(entry);
+        if (entry.type === "image") {
+          images.push(parsedImage);
+        }
       }
       return "";
     },
@@ -167,7 +229,11 @@ function extractImagesFromTextContent(content: string): {
       const imageDestination = parseMarkdownImageDestination(destination);
       const parsedImage = toReplyImage(imageDestination, altText);
       if (parsedImage) {
-        images.push(parsedImage);
+        const entry = toReplyMedia(parsedImage, imageDestination);
+        media.push(entry);
+        if (entry.type === "image") {
+          images.push(parsedImage);
+        }
       }
       return "";
     },
@@ -176,15 +242,18 @@ function extractImagesFromTextContent(content: string): {
   return {
     text: normalizeReplyText(textWithoutMedia),
     images,
+    media,
   };
 }
 
 function extractContentFromParts(parts: unknown[]): {
   text: string;
   images: NonNullable<ChannelReply["images"]>;
+  media: ReplyMedia[];
 } {
   const textParts: string[] = [];
   const images: NonNullable<ChannelReply["images"]> = [];
+  const media: ReplyMedia[] = [];
 
   for (const part of parts) {
     if (!part || typeof part !== "object") {
@@ -208,7 +277,11 @@ function extractContentFromParts(parts: unknown[]): {
       if (typeof imageReference === "string") {
         const parsedImage = toReplyImage(imageReference);
         if (parsedImage) {
-          images.push(parsedImage);
+          const entry = toReplyMedia(parsedImage, imageReference);
+          media.push(entry);
+          if (entry.type === "image") {
+            images.push(parsedImage);
+          }
         }
       }
       continue;
@@ -222,6 +295,7 @@ function extractContentFromParts(parts: unknown[]): {
   return {
     text: textParts.join(""),
     images,
+    media,
   };
 }
 
@@ -234,6 +308,7 @@ export function extractReply(responseJson: unknown): ChannelReply | null {
 
   let extractedText = "";
   let extractedImages: NonNullable<ChannelReply["images"]> = [];
+  let extractedMedia: ReplyMedia[] = [];
 
   if (typeof content === "string") {
     extractedText = content;
@@ -241,6 +316,7 @@ export function extractReply(responseJson: unknown): ChannelReply | null {
     const fromParts = extractContentFromParts(content);
     extractedText = fromParts.text;
     extractedImages = fromParts.images;
+    extractedMedia = fromParts.media;
   } else {
     return null;
   }
@@ -249,15 +325,36 @@ export function extractReply(responseJson: unknown): ChannelReply | null {
   if (parsedTextContent.images.length > 0) {
     extractedImages = extractedImages.concat(parsedTextContent.images);
   }
+  if (parsedTextContent.media.length > 0) {
+    extractedMedia = extractedMedia.concat(parsedTextContent.media);
+  }
 
-  if (parsedTextContent.text.length === 0 && extractedImages.length === 0) {
+  if (
+    parsedTextContent.text.length === 0 &&
+    extractedImages.length === 0 &&
+    extractedMedia.length === 0
+  ) {
     return null;
   }
 
   return {
     text: parsedTextContent.text,
     images: extractedImages.length > 0 ? extractedImages : undefined,
+    media: extractedMedia.length > 0 ? extractedMedia : undefined,
   };
+}
+
+function mediaTypeLabel(type: ReplyMedia["type"]): string {
+  switch (type) {
+    case "image":
+      return "Image";
+    case "audio":
+      return "Audio";
+    case "video":
+      return "Video";
+    default:
+      return "File";
+  }
 }
 
 export function toPlainText(reply: ChannelReply): string {
@@ -266,11 +363,22 @@ export function toPlainText(reply: ChannelReply): string {
     lines.push(reply.text);
   }
 
-  for (const image of reply.images ?? []) {
-    if (image.kind === "url") {
-      lines.push(`Image: ${image.url}`);
-    } else {
-      lines.push(`Image: [inline ${image.mimeType}]`);
+  if (reply.media && reply.media.length > 0) {
+    for (const entry of reply.media) {
+      const label = mediaTypeLabel(entry.type);
+      if (entry.source.kind === "url") {
+        lines.push(`${label}: ${entry.source.url}`);
+      } else {
+        lines.push(`${label}: [inline ${entry.source.mimeType}]`);
+      }
+    }
+  } else {
+    for (const image of reply.images ?? []) {
+      if (image.kind === "url") {
+        lines.push(`Image: ${image.url}`);
+      } else {
+        lines.push(`Image: [inline ${image.mimeType}]`);
+      }
     }
   }
 

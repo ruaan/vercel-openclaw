@@ -9,18 +9,23 @@ import type {
   PlatformAdapter,
 } from "@/server/channels/core/types";
 import { logWarn } from "@/server/log";
+import type { ReplyBinarySource, ReplyMedia } from "@/server/channels/core/types";
 import {
   deleteMessage,
   downloadFile,
   editMessageText,
   getFile,
   isRetryableTelegramSendError,
+  sendAudio,
   sendChatAction,
+  sendDocument,
   sendMessage,
   sendPhoto,
+  sendVideo,
   TelegramApiError,
   TELEGRAM_MAX_CAPTION_LEN,
 } from "@/server/channels/telegram/bot-api";
+import type { TelegramUpload } from "@/server/channels/telegram/bot-api";
 
 export interface TelegramExtractedMessage {
   text: string;
@@ -188,6 +193,57 @@ function toRetryableSendError(
   return new RetryableSendError(message, { retryAfterSeconds, cause });
 }
 
+function inferExtension(mimeType: string): string {
+  const normalized = mimeType.toLowerCase();
+  if (normalized === "image/jpeg" || normalized === "image/jpg") return "jpg";
+  if (normalized === "image/gif") return "gif";
+  if (normalized === "image/webp") return "webp";
+  if (normalized === "image/svg+xml") return "svg";
+  if (normalized === "image/png") return "png";
+  if (normalized === "audio/mpeg") return "mp3";
+  if (normalized === "audio/wav") return "wav";
+  if (normalized === "audio/mp4") return "m4a";
+  if (normalized === "audio/ogg") return "ogg";
+  if (normalized === "video/mp4") return "mp4";
+  if (normalized === "video/quicktime") return "mov";
+  if (normalized === "video/webm") return "webm";
+  if (normalized === "application/pdf") return "pdf";
+  return "bin";
+}
+
+function toTelegramUpload(source: ReplyBinarySource): TelegramUpload {
+  if (source.kind === "url") {
+    return { kind: "url", url: source.url };
+  }
+  const buffer = Buffer.from(source.base64, "base64");
+  const ext = inferExtension(source.mimeType);
+  const filename = source.filename ?? `openclaw-file.${ext}`;
+  return { kind: "buffer", buffer, filename, mimeType: source.mimeType };
+}
+
+async function sendMediaByType(
+  botToken: string,
+  chatId: number | string,
+  entry: ReplyMedia,
+  caption?: string,
+): Promise<void> {
+  const upload = toTelegramUpload(entry.source);
+  switch (entry.type) {
+    case "image":
+      await sendPhoto(botToken, chatId, upload, caption);
+      break;
+    case "audio":
+      await sendAudio(botToken, chatId, upload, caption);
+      break;
+    case "video":
+      await sendVideo(botToken, chatId, upload, caption);
+      break;
+    case "file":
+      await sendDocument(botToken, chatId, upload, caption);
+      break;
+  }
+}
+
 export function createTelegramAdapter(
   config: TelegramChannelConfig,
 ): PlatformAdapter<unknown, TelegramExtractedMessage> {
@@ -322,39 +378,77 @@ export function createTelegramAdapter(
     },
 
     async sendReplyRich(message, reply) {
-      const images = reply.images ?? [];
-      if (images.length === 0) {
-        await this.sendReply(message, toPlainText(reply));
+      const mediaEntries = reply.media ?? [];
+
+      // Fall back to legacy images array if no media entries
+      if (mediaEntries.length === 0) {
+        const images = reply.images ?? [];
+        if (images.length === 0) {
+          await this.sendReply(message, toPlainText(reply));
+          return;
+        }
+
+        // Legacy image-only path
+        const chatId = Number(message.chatId);
+        const replyText = reply.text;
+
+        try {
+          for (let i = 0; i < images.length; i++) {
+            const image = images[i]!;
+            const caption =
+              i === 0 && replyText
+                ? replyText.slice(0, TELEGRAM_MAX_CAPTION_LEN)
+                : undefined;
+
+            if (image.kind === "url") {
+              await sendPhoto(config.botToken, chatId, { kind: "url", url: image.url }, caption);
+            } else {
+              const buffer = Buffer.from(image.base64, "base64");
+              const extension = inferImageExtension(image.mimeType);
+              const filename = image.filename ?? `openclaw-image.${extension}`;
+              await sendPhoto(
+                config.botToken,
+                chatId,
+                { kind: "buffer", buffer, filename, mimeType: image.mimeType },
+                caption,
+              );
+            }
+          }
+
+          if (replyText && replyText.length > TELEGRAM_MAX_CAPTION_LEN) {
+            const overflow = replyText.slice(TELEGRAM_MAX_CAPTION_LEN);
+            if (overflow.length > 0) {
+              await sendMessage(config.botToken, chatId, overflow);
+            }
+          }
+        } catch (error) {
+          if (isRetryableTelegramSendError(error)) {
+            const retryAfterSeconds =
+              error instanceof TelegramApiError ? error.retry_after ?? undefined : undefined;
+            throw toRetryableSendError(
+              `telegram_send_retryable: ${error instanceof Error ? error.message : String(error)}`,
+              retryAfterSeconds,
+              error,
+            );
+          }
+          throw error;
+        }
         return;
       }
 
+      // Generic media path — dispatch each entry by type
       const chatId = Number(message.chatId);
       const replyText = reply.text;
 
       try {
-        for (let i = 0; i < images.length; i++) {
-          const image = images[i]!;
-          // Only the first image gets a caption
-          // sendPhoto captions are limited to 1024 chars; truncate here,
-          // and the overflow sendMessage below handles the full text.
+        for (let i = 0; i < mediaEntries.length; i++) {
+          const entry = mediaEntries[i]!;
           const caption =
             i === 0 && replyText
               ? replyText.slice(0, TELEGRAM_MAX_CAPTION_LEN)
               : undefined;
 
-          if (image.kind === "url") {
-            await sendPhoto(config.botToken, chatId, { kind: "url", url: image.url }, caption);
-          } else {
-            const buffer = Buffer.from(image.base64, "base64");
-            const extension = inferImageExtension(image.mimeType);
-            const filename = image.filename ?? `openclaw-image.${extension}`;
-            await sendPhoto(
-              config.botToken,
-              chatId,
-              { kind: "buffer", buffer, filename, mimeType: image.mimeType },
-              caption,
-            );
-          }
+          await sendMediaByType(config.botToken, chatId, entry, caption);
         }
 
         // If caption was truncated, send the remainder as a separate text message

@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { extractReply, toPlainText } from "@/server/channels/core/reply";
+import { extractReply, inferMediaType, toPlainText } from "@/server/channels/core/reply";
 
 // ---------------------------------------------------------------------------
 // extractReply — string content
@@ -246,4 +246,169 @@ test("reply: toPlainText with multiple images", () => {
   assert.equal(lines[0], "Two pics");
   assert.equal(lines[1], "Image: https://a.com/1.png");
   assert.equal(lines[2], "Image: [inline image/jpeg]");
+});
+
+// ---------------------------------------------------------------------------
+// inferMediaType
+// ---------------------------------------------------------------------------
+
+test("reply: inferMediaType classifies image extensions", () => {
+  assert.equal(inferMediaType("chart.png"), "image");
+  assert.equal(inferMediaType("photo.jpg"), "image");
+  assert.equal(inferMediaType("icon.webp"), "image");
+});
+
+test("reply: inferMediaType classifies audio extensions", () => {
+  assert.equal(inferMediaType("answer.mp3"), "audio");
+  assert.equal(inferMediaType("clip.wav"), "audio");
+  assert.equal(inferMediaType("voice.m4a"), "audio");
+  assert.equal(inferMediaType("song.ogg"), "audio");
+});
+
+test("reply: inferMediaType classifies video extensions", () => {
+  assert.equal(inferMediaType("demo.mp4"), "video");
+  assert.equal(inferMediaType("screen.webm"), "video");
+  assert.equal(inferMediaType("clip.mov"), "video");
+});
+
+test("reply: inferMediaType classifies unknown extensions as file", () => {
+  assert.equal(inferMediaType("report.pdf"), "file");
+  assert.equal(inferMediaType("data.csv"), "file");
+  assert.equal(inferMediaType("archive.zip"), "file");
+});
+
+test("reply: inferMediaType prefers MIME type over extension", () => {
+  assert.equal(inferMediaType("noext", "audio/mpeg"), "audio");
+  assert.equal(inferMediaType("noext", "video/mp4"), "video");
+  assert.equal(inferMediaType("noext", "image/png"), "image");
+});
+
+// ---------------------------------------------------------------------------
+// extractReply — generic media (MEDIA: lines)
+// ---------------------------------------------------------------------------
+
+test("reply: extractReply classifies MEDIA: .png as image with backward-compat images", () => {
+  const result = extractReply({
+    choices: [{ message: { content: "Done.\nMEDIA: chart.png" } }],
+  });
+  assert.ok(result);
+  assert.equal(result.text, "Done.");
+  assert.ok(result.media);
+  assert.equal(result.media.length, 1);
+  assert.equal(result.media[0]!.type, "image");
+  assert.equal(result.media[0]!.source.kind, "url");
+  if (result.media[0]!.source.kind === "url") {
+    assert.equal(result.media[0]!.source.url, "chart.png");
+  }
+  // backward compat: images should also be populated for image types
+  assert.ok(result.images);
+  assert.equal(result.images.length, 1);
+});
+
+test("reply: extractReply classifies MEDIA: .mp3 as audio", () => {
+  const result = extractReply({
+    choices: [{ message: { content: "MEDIA: summary.mp3" } }],
+  });
+  assert.ok(result);
+  assert.ok(result.media);
+  assert.equal(result.media.length, 1);
+  assert.equal(result.media[0]!.type, "audio");
+  // audio should NOT be in legacy images
+  assert.equal(result.images, undefined);
+});
+
+test("reply: extractReply classifies MEDIA: .mp4 as video", () => {
+  const result = extractReply({
+    choices: [{ message: { content: "MEDIA: run.mp4" } }],
+  });
+  assert.ok(result);
+  assert.ok(result.media);
+  assert.equal(result.media.length, 1);
+  assert.equal(result.media[0]!.type, "video");
+  assert.equal(result.images, undefined);
+});
+
+test("reply: extractReply classifies MEDIA: .pdf as file", () => {
+  const result = extractReply({
+    choices: [{ message: { content: "MEDIA: report.pdf" } }],
+  });
+  assert.ok(result);
+  assert.ok(result.media);
+  assert.equal(result.media.length, 1);
+  assert.equal(result.media[0]!.type, "file");
+  assert.equal(result.images, undefined);
+});
+
+test("reply: extractReply handles mixed media types", () => {
+  const result = extractReply({
+    choices: [{
+      message: {
+        content: "Done.\nMEDIA: chart.png\nMEDIA: summary.mp3\nMEDIA: run.mp4\nMEDIA: report.pdf",
+      },
+    }],
+  });
+  assert.ok(result);
+  assert.equal(result.text, "Done.");
+  assert.ok(result.media);
+  assert.equal(result.media.length, 4);
+  assert.equal(result.media[0]!.type, "image");
+  assert.equal(result.media[1]!.type, "audio");
+  assert.equal(result.media[2]!.type, "video");
+  assert.equal(result.media[3]!.type, "file");
+  // only images go to legacy field
+  assert.ok(result.images);
+  assert.equal(result.images.length, 1);
+});
+
+test("reply: extractReply infers media type from data URI MIME", () => {
+  const audioUri = "data:audio/mpeg;base64,SUQzBAAAAAAA";
+  const result = extractReply({
+    choices: [{ message: { content: `MEDIA: ${audioUri}` } }],
+  });
+  assert.ok(result);
+  assert.ok(result.media);
+  assert.equal(result.media.length, 1);
+  assert.equal(result.media[0]!.type, "audio");
+  assert.equal(result.media[0]!.source.kind, "data");
+  if (result.media[0]!.source.kind === "data") {
+    assert.equal(result.media[0]!.source.mimeType, "audio/mpeg");
+    assert.equal(result.media[0]!.source.base64, "SUQzBAAAAAAA");
+  }
+});
+
+test("reply: extractReply preserves filename from data URI in media", () => {
+  const dataUri = 'data:video/mp4;filename="clip.mp4";base64,AAAAIGZ0eXA=';
+  const result = extractReply({
+    choices: [{ message: { content: `MEDIA: ${dataUri}` } }],
+  });
+  assert.ok(result);
+  assert.ok(result.media);
+  assert.equal(result.media[0]!.type, "video");
+  assert.equal(result.media[0]!.source.kind, "data");
+  if (result.media[0]!.source.kind === "data") {
+    assert.equal(result.media[0]!.source.filename, "clip.mp4");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// toPlainText — generic media
+// ---------------------------------------------------------------------------
+
+test("reply: toPlainText uses media labels when media is present", () => {
+  const result = toPlainText({
+    text: "Results",
+    media: [
+      { type: "image", source: { kind: "url", url: "chart.png" } },
+      { type: "audio", source: { kind: "url", url: "answer.mp3" } },
+      { type: "video", source: { kind: "data", mimeType: "video/mp4", base64: "abc" } },
+      { type: "file", source: { kind: "url", url: "report.pdf" } },
+    ],
+  });
+  const lines = result.split("\n");
+  assert.equal(lines.length, 5);
+  assert.equal(lines[0], "Results");
+  assert.equal(lines[1], "Image: chart.png");
+  assert.equal(lines[2], "Audio: answer.mp3");
+  assert.equal(lines[3], "Video: [inline video/mp4]");
+  assert.equal(lines[4], "File: report.pdf");
 });

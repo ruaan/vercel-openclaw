@@ -12,6 +12,8 @@ import type {
   ExtractedChannelMessage,
   GatewayMessage,
   PlatformAdapter,
+  ReplyBinarySource,
+  ReplyMedia,
 } from "@/server/channels/core/types";
 import { appendSessionHistory, readSessionHistory } from "@/server/channels/history";
 import {
@@ -306,16 +308,19 @@ export async function processChannelJob<
       }
 
       const reply = recoveryResult.result;
-      const resolvedReply = await resolveSandboxImages(reply, readyMeta.sandboxId);
+      const resolvedReply = await resolveSandboxMedia(reply, readyMeta.sandboxId);
 
       const replyText = toPlainText(resolvedReply);
       const imageCount = resolvedReply.images?.length ?? 0;
+      const mediaCount = resolvedReply.media?.length ?? 0;
 
       logInfo("channels.gateway_response_received", withOperationContext(op, {
         channel: options.channel,
         replyTextLength: replyText.length,
         imageCount,
+        mediaCount,
         imageKinds: resolvedReply.images?.map((img) => img.kind) ?? [],
+        mediaTypes: resolvedReply.media?.map((m) => m.type) ?? [],
         usingSendReplyRich: Boolean(adapter.sendReplyRich),
       }));
 
@@ -327,6 +332,7 @@ export async function processChannelJob<
       logInfo("channels.platform_reply_sent", withOperationContext(op, {
         channel: options.channel,
         imageCount,
+        mediaCount,
       }));
       logInfo("channels.delivery_success", withOperationContext(op, {
         channel: options.channel,
@@ -492,143 +498,190 @@ function toRetryableErrorIfNeeded(error: unknown): Error {
 }
 
 const SANDBOX_HOME_DIR = "/home/vercel-sandbox";
-// 5 MB limit: Telegram sendPhoto accepts max 10 MB uploads, base64 encoding
-// adds ~33% overhead, and we want headroom for concurrent requests in serverless.
-const MAX_SANDBOX_IMAGE_BYTES = 5 * 1024 * 1024;
+// 20 MB limit for general media (video, audio, documents).
+// Telegram accepts up to 50 MB for most file types; Slack up to 1 GB.
+// We use a conservative limit to keep serverless memory reasonable.
+const MAX_SANDBOX_MEDIA_BYTES = 20 * 1024 * 1024;
 
-function isSandboxRelativePath(url: string): boolean {
+export function isSandboxRelativePath(url: string): boolean {
   // Not an absolute URL (no protocol) and not a data URI
   return !url.includes("://") && !url.startsWith("data:");
 }
 
 /** Allow only safe characters in filenames to prevent shell injection. */
-function isSafeFilename(name: string): boolean {
+export function isSafeFilename(name: string): boolean {
   return /^[a-zA-Z0-9._-]+$/.test(name) && !name.startsWith(".");
 }
 
-function inferMimeTypeFromFilename(filename: string): string {
+export function inferMimeTypeFromFilename(filename: string): string {
   const lower = filename.toLowerCase();
+  // Images
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".gif")) return "image/gif";
   if (lower.endsWith(".webp")) return "image/webp";
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".svg")) return "image/svg+xml";
-  return "image/png";
+  if (lower.endsWith(".bmp")) return "image/bmp";
+  // Audio
+  if (lower.endsWith(".mp3")) return "audio/mpeg";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  if (lower.endsWith(".m4a")) return "audio/mp4";
+  if (lower.endsWith(".ogg")) return "audio/ogg";
+  if (lower.endsWith(".aac")) return "audio/aac";
+  if (lower.endsWith(".flac")) return "audio/flac";
+  // Video
+  if (lower.endsWith(".mp4")) return "video/mp4";
+  if (lower.endsWith(".mov")) return "video/quicktime";
+  if (lower.endsWith(".webm")) return "video/webm";
+  if (lower.endsWith(".mkv")) return "video/x-matroska";
+  // Documents
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  return "application/octet-stream";
+}
+
+/** Candidate sandbox directories to search for bare filenames. */
+export const SANDBOX_CANDIDATE_DIRS = [
+  SANDBOX_HOME_DIR,
+  `${SANDBOX_HOME_DIR}/Desktop`,
+  `${SANDBOX_HOME_DIR}/Downloads`,
+  `${SANDBOX_HOME_DIR}/.openclaw`,
+  `${SANDBOX_HOME_DIR}/.openclaw/generated/worker`,
+  "/tmp",
+];
+
+/**
+ * Try to resolve a bare filename from the sandbox filesystem into a
+ * `kind: "data"` binary source.  Returns `null` when the file cannot
+ * be found or is too large.
+ */
+export async function resolveFilenameFromSandbox(
+  sandbox: { readFileToBuffer(opts: { path: string }): Promise<Buffer | null> },
+  filename: string,
+): Promise<Extract<ReplyBinarySource, { kind: "data" }> | null> {
+  const candidatePaths = SANDBOX_CANDIDATE_DIRS.map(
+    (dir) => `${dir}/${filename}`,
+  );
+
+  for (const path of candidatePaths) {
+    try {
+      const buffer = await sandbox.readFileToBuffer({ path });
+      if (!buffer || buffer.length === 0) {
+        continue;
+      }
+      if (buffer.length > MAX_SANDBOX_MEDIA_BYTES) {
+        logWarn("channels.sandbox_media_too_large", {
+          path,
+          sizeBytes: buffer.length,
+          maxBytes: MAX_SANDBOX_MEDIA_BYTES,
+        });
+        continue;
+      }
+      const mimeType = inferMimeTypeFromFilename(filename);
+      const base64 = buffer.toString("base64");
+
+      logInfo("channels.sandbox_media_resolved", {
+        filename,
+        path,
+        sizeBytes: buffer.length,
+        mimeType,
+      });
+      return { kind: "data", mimeType, base64, filename };
+    } catch {
+      continue;
+    }
+  }
+
+  logWarn("channels.sandbox_media_not_found", { filename, candidatePaths });
+  return null;
 }
 
 /**
- * Resolve sandbox-relative image paths by downloading them from the sandbox.
- * OpenClaw's MEDIA: lines emit bare filenames (e.g. "smiley-1.png") that exist
- * in the sandbox filesystem but are not publicly accessible URLs.
+ * Resolve sandbox-relative media references by downloading them from the
+ * sandbox.  Handles both the legacy `images` array and the generic `media`
+ * array.  HTTPS URLs and data URIs are left untouched.
  */
-async function resolveSandboxImages(
+export async function resolveSandboxMedia(
   reply: ChannelReply,
   sandboxId: string | null,
 ): Promise<ChannelReply> {
-  if (!reply.images || reply.images.length === 0 || !sandboxId) {
-    return reply;
-  }
+  if (!sandboxId) return reply;
 
-  const relativeImages = reply.images.filter(
+  // Collect all sandbox-relative references from both images and media.
+  const hasRelativeImages = reply.images?.some(
     (img) => img.kind === "url" && isSandboxRelativePath(img.url),
   );
-  if (relativeImages.length === 0) {
-    return reply;
-  }
+  const hasRelativeMedia = reply.media?.some(
+    (m) => m.source.kind === "url" && isSandboxRelativePath(m.source.url),
+  );
 
-  logInfo("channels.resolving_sandbox_images", {
-    count: relativeImages.length,
-    paths: relativeImages.map((img) => (img as { url: string }).url),
-  });
+  if (!hasRelativeImages && !hasRelativeMedia) return reply;
 
   let sandbox;
   try {
     sandbox = await getSandboxController().get({ sandboxId });
   } catch (error) {
-    logWarn("channels.sandbox_image_resolve_failed", {
+    logWarn("channels.sandbox_media_resolve_failed", {
       error: formatError(error),
       reason: "sandbox_unreachable",
     });
     return reply;
   }
 
-  const resolvedImages: NonNullable<ChannelReply["images"]> = [];
-  for (const image of reply.images) {
-    if (image.kind !== "url" || !isSandboxRelativePath(image.url)) {
-      resolvedImages.push(image);
-      continue;
-    }
-
-    const filename = image.url;
-
-    if (!isSafeFilename(filename)) {
-      logWarn("channels.sandbox_image_unsafe_filename", { filename });
-      resolvedImages.push(image);
-      continue;
-    }
-
-    // Try common locations where OpenClaw saves generated files
-    const candidatePaths = [
-      `${SANDBOX_HOME_DIR}/${filename}`,
-      `${SANDBOX_HOME_DIR}/Desktop/${filename}`,
-      `${SANDBOX_HOME_DIR}/Downloads/${filename}`,
-      `${SANDBOX_HOME_DIR}/.openclaw/${filename}`,
-      `/tmp/${filename}`,
-    ];
-
-    let resolved = false;
-    for (const path of candidatePaths) {
-      try {
-        const buffer = await sandbox.readFileToBuffer({ path });
-        if (!buffer || buffer.length === 0) {
-          continue;
-        }
-        if (buffer.length > MAX_SANDBOX_IMAGE_BYTES) {
-          logWarn("channels.sandbox_image_too_large", {
-            path,
-            sizeBytes: buffer.length,
-            maxBytes: MAX_SANDBOX_IMAGE_BYTES,
-          });
-          continue;
-        }
-        const mimeType = inferMimeTypeFromFilename(filename);
-        const base64 = buffer.toString("base64");
-
-        resolvedImages.push({
-          kind: "data",
-          mimeType,
-          base64,
-          filename,
-          alt: image.alt,
-        });
-
-        logInfo("channels.sandbox_image_resolved", {
-          filename,
-          path,
-          sizeBytes: buffer.length,
-          mimeType,
-        });
-        resolved = true;
-        break;
-      } catch (error) {
-        logWarn("channels.sandbox_image_read_error", {
-          path,
-          error: formatError(error),
-        });
+  // --- Resolve legacy images ---
+  let resolvedImages: NonNullable<ChannelReply["images"]> | undefined;
+  if (reply.images && reply.images.length > 0) {
+    const out: NonNullable<ChannelReply["images"]> = [];
+    for (const image of reply.images) {
+      if (image.kind !== "url" || !isSandboxRelativePath(image.url)) {
+        out.push(image);
         continue;
       }
+      const filename = image.url;
+      if (!isSafeFilename(filename)) {
+        logWarn("channels.sandbox_media_unsafe_filename", { filename });
+        out.push(image);
+        continue;
+      }
+      const resolved = await resolveFilenameFromSandbox(sandbox, filename);
+      if (resolved) {
+        out.push({ ...resolved, alt: image.alt });
+      } else {
+        out.push(image);
+      }
     }
+    resolvedImages = out.length > 0 ? out : undefined;
+  }
 
-    if (!resolved) {
-      logWarn("channels.sandbox_image_not_found", { filename, candidatePaths });
-      // Keep the original unresolved image (will fail on send but at least shows intent)
-      resolvedImages.push(image);
+  // --- Resolve generic media ---
+  let resolvedMedia: ReplyMedia[] | undefined;
+  if (reply.media && reply.media.length > 0) {
+    const out: ReplyMedia[] = [];
+    for (const entry of reply.media) {
+      if (entry.source.kind !== "url" || !isSandboxRelativePath(entry.source.url)) {
+        out.push(entry);
+        continue;
+      }
+      const filename = entry.source.url;
+      if (!isSafeFilename(filename)) {
+        logWarn("channels.sandbox_media_unsafe_filename", { filename });
+        out.push(entry);
+        continue;
+      }
+      const resolved = await resolveFilenameFromSandbox(sandbox, filename);
+      if (resolved) {
+        const source: ReplyBinarySource = { ...resolved, alt: entry.source.alt };
+        out.push({ ...entry, source } as ReplyMedia);
+      } else {
+        out.push(entry);
+      }
     }
+    resolvedMedia = out.length > 0 ? out : undefined;
   }
 
   return {
     text: reply.text,
-    images: resolvedImages.length > 0 ? resolvedImages : undefined,
+    images: resolvedImages ?? reply.images,
+    media: resolvedMedia ?? reply.media,
   };
 }
 

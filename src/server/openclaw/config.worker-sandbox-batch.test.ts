@@ -53,7 +53,6 @@ test("worker-sandbox-batch script reads request from file argument and outputs J
 
   assert.match(script, /process\.argv\[2\]/);
   assert.match(script, /readFile\(requestPath/);
-  assert.match(script, /console\.log\(text\)/);
   assert.match(script, /console\.error\(text\)/);
   assert.match(script, /process\.exit\(1\)/);
 });
@@ -63,4 +62,49 @@ test("worker-sandbox-batch script exits non-zero on missing argument", () => {
 
   assert.match(script, /Usage: execute-batch\.mjs <request-json-path>/);
   assert.match(script, /process\.exit\(1\)/);
+});
+
+test("worker-sandbox-batch script materializes captured files into the worker media directory", () => {
+  const script = buildWorkerSandboxBatchScript();
+
+  assert.match(script, /\/home\/vercel-sandbox\/\.openclaw\/generated\/worker/);
+  assert.match(script, /writeFile\(/);
+  assert.match(script, /mkdir\(/);
+  assert.match(script, /materializeCapturedFiles/);
+});
+
+test("worker-sandbox-batch script emits MEDIA: lines per captured artifact across batch results", () => {
+  const script = buildWorkerSandboxBatchScript();
+
+  assert.match(script, /MEDIA: /);
+  assert.match(script, /for \(const entry of parsed\.results/);
+  assert.match(script, /entry\.result\.capturedFiles/);
+});
+
+test("worker-sandbox-batch script preserves job ids in JSON summary", () => {
+  const script = buildWorkerSandboxBatchScript();
+
+  assert.match(script, /entry\.id/);
+  assert.match(script, /entry\.result\.task/);
+  assert.match(script, /totalJobs/);
+  assert.match(script, /succeeded/);
+  assert.match(script, /failed/);
+});
+
+test("worker-sandbox-batch script sanitizes filenames to safe characters", () => {
+  const script = buildWorkerSandboxBatchScript();
+
+  assert.match(script, /sanitizeMediaName/);
+  assert.ok(script.includes("[^a-zA-Z0-9._-]"), "script should contain the sanitization regex");
+});
+
+test("worker-sandbox-batch script does not print raw contentBase64 to model-visible stdout", () => {
+  const script = buildWorkerSandboxBatchScript();
+
+  // Path-only capturedFiles in summary
+  assert.match(script, /\.map\(\(f\) => \(\{ path: f\.path \}\)\)/);
+  // Uses JSON.stringify for the cleaned summary
+  assert.match(script, /JSON\.stringify\(\{/);
+  // Raw `console.log(text)` should NOT appear
+  assert.doesNotMatch(script, /console\.log\(text\)/);
 });

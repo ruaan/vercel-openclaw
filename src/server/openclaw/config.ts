@@ -2356,7 +2356,30 @@ Rules:
 
 export function buildWorkerSandboxScript(): string {
   return `import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+
+const WORKER_MEDIA_DIR = "/home/vercel-sandbox/.openclaw/generated/worker";
+
+function sanitizeMediaName(value) {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "artifact";
+}
+
+async function materializeCapturedFiles(task, capturedFiles) {
+  if (!capturedFiles || capturedFiles.length === 0) return [];
+  try { await mkdir(WORKER_MEDIA_DIR, { recursive: true }); } catch { return []; }
+  const mediaLines = [];
+  for (const [index, file] of capturedFiles.entries()) {
+    const base = sanitizeMediaName(path.basename(file.path));
+    const filename = sanitizeMediaName(task) + "-" + (index + 1) + "-" + base;
+    const outputPath = path.join(WORKER_MEDIA_DIR, filename);
+    try {
+      await writeFile(outputPath, Buffer.from(file.contentBase64, "base64"));
+      mediaLines.push("MEDIA: " + filename);
+    } catch { /* skip unwritable artifact */ }
+  }
+  return mediaLines;
+}
 
 const requestPath = process.argv[2];
 if (!requestPath) {
@@ -2396,7 +2419,22 @@ if (!response.ok) {
   console.error(text);
   process.exit(1);
 }
-console.log(text);
+
+const parsed = JSON.parse(text);
+const mediaLines = await materializeCapturedFiles(parsed.task, parsed.capturedFiles);
+if (parsed.stdout?.trim()) {
+  console.log(parsed.stdout.trim());
+}
+for (const line of mediaLines) {
+  console.log(line);
+}
+console.log(JSON.stringify({
+  ok: parsed.ok,
+  task: parsed.task,
+  exitCode: parsed.exitCode,
+  stderr: parsed.stderr,
+  capturedFiles: (parsed.capturedFiles ?? []).map((f) => ({ path: f.path })),
+}, null, 2));
 `;
 }
 
@@ -2482,7 +2520,30 @@ openclaw cron add \\
 
 export function buildWorkerSandboxBatchScript(): string {
   return `import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+
+const WORKER_MEDIA_DIR = "/home/vercel-sandbox/.openclaw/generated/worker";
+
+function sanitizeMediaName(value) {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "artifact";
+}
+
+async function materializeCapturedFiles(task, capturedFiles) {
+  if (!capturedFiles || capturedFiles.length === 0) return [];
+  try { await mkdir(WORKER_MEDIA_DIR, { recursive: true }); } catch { return []; }
+  const mediaLines = [];
+  for (const [index, file] of capturedFiles.entries()) {
+    const base = sanitizeMediaName(path.basename(file.path));
+    const filename = sanitizeMediaName(task) + "-" + (index + 1) + "-" + base;
+    const outputPath = path.join(WORKER_MEDIA_DIR, filename);
+    try {
+      await writeFile(outputPath, Buffer.from(file.contentBase64, "base64"));
+      mediaLines.push("MEDIA: " + filename);
+    } catch { /* skip unwritable artifact */ }
+  }
+  return mediaLines;
+}
 
 const requestPath = process.argv[2];
 if (!requestPath) {
@@ -2522,7 +2583,35 @@ if (!response.ok) {
   console.error(text);
   process.exit(1);
 }
-console.log(text);
+
+const parsed = JSON.parse(text);
+for (const entry of parsed.results ?? []) {
+  const mediaLines = await materializeCapturedFiles(
+    entry.id + "-" + entry.result.task,
+    entry.result.capturedFiles,
+  );
+  for (const line of mediaLines) {
+    console.log(line);
+  }
+}
+console.log(JSON.stringify({
+  ok: parsed.ok,
+  task: parsed.task,
+  totalJobs: parsed.totalJobs,
+  succeeded: parsed.succeeded,
+  failed: parsed.failed,
+  results: (parsed.results ?? []).map((entry) => ({
+    id: entry.id,
+    result: {
+      ok: entry.result.ok,
+      task: entry.result.task,
+      exitCode: entry.result.exitCode,
+      stdout: entry.result.stdout,
+      stderr: entry.result.stderr,
+      capturedFiles: (entry.result.capturedFiles ?? []).map((f) => ({ path: f.path })),
+    },
+  })),
+}, null, 2));
 `;
 }
 

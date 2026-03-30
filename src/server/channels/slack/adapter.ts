@@ -6,6 +6,8 @@ import type {
   ExtractedChannelMessage,
   OpenClawMessage,
   PlatformAdapter,
+  ReplyBinarySource,
+  ReplyMedia,
 } from "@/server/channels/core/types";
 import type { ProcessingIndicator } from "@/server/channels/core/processing-indicator";
 import { logInfo, logWarn } from "@/server/log";
@@ -94,6 +96,13 @@ type SlackDecodedImageData = {
   filename: string;
   mimeType: string;
   altText: string;
+};
+
+type SlackDecodedBinaryData = {
+  bytes: Buffer;
+  filename: string;
+  mimeType: string;
+  altText?: string;
 };
 
 export interface SlackExtractedMessage extends ExtractedChannelMessage {
@@ -585,11 +594,19 @@ function toReplyImages(reply: ChannelReply): NonNullable<ChannelReply["images"]>
   return reply.images ?? [];
 }
 
+function toReplyMedia(reply: ChannelReply): ReplyMedia[] {
+  return reply.media ?? [];
+}
+
 function isReplyImageKind(
   image: NonNullable<ChannelReply["images"]>[number],
   kind: "url" | "data",
 ): boolean {
   return image.kind === kind;
+}
+
+function isReplyMediaImage(entry: ReplyMedia): entry is Extract<ReplyMedia, { type: "image" }> {
+  return entry.type === "image";
 }
 
 function toReplyImageUrl(
@@ -610,6 +627,44 @@ function toReplyImageAltText(
 function toSlackFallbackText(reply: ChannelReply): string {
   const text = toNonEmptyString(reply.text);
   return text ?? SLACK_FALLBACK_IMAGE_TEXT;
+}
+
+function toUrlImageEntries(
+  reply: ChannelReply,
+): Array<{ url: string; altText: string }> {
+  const entries: Array<{ url: string; altText: string }> = [];
+  const seen = new Set<string>();
+
+  for (const image of toReplyImages(reply)) {
+    if (!isReplyImageKind(image, "url")) {
+      continue;
+    }
+    const imageUrl = toReplyImageUrl(image);
+    if (!imageUrl || seen.has(imageUrl)) {
+      continue;
+    }
+    seen.add(imageUrl);
+    entries.push({
+      url: imageUrl,
+      altText: toReplyImageAltText(image),
+    });
+  }
+
+  for (const entry of toReplyMedia(reply)) {
+    if (!isReplyMediaImage(entry) || entry.source.kind !== "url") {
+      continue;
+    }
+    if (seen.has(entry.source.url)) {
+      continue;
+    }
+    seen.add(entry.source.url);
+    entries.push({
+      url: entry.source.url,
+      altText: entry.source.alt ?? SLACK_DEFAULT_IMAGE_ALT_TEXT,
+    });
+  }
+
+  return entries;
 }
 
 function toDataReplyImages(
@@ -635,24 +690,15 @@ export function toSlackBlocks(reply: ChannelReply): SlackBlock[] | undefined {
   }
 
   let urlImageCount = 0;
-  for (const image of toReplyImages(reply)) {
+  for (const image of toUrlImageEntries(reply)) {
     if (urlImageCount >= SLACK_MAX_BLOCK_IMAGES) {
       break;
     }
 
-    if (!isReplyImageKind(image, "url")) {
-      continue;
-    }
-
-    const imageUrl = toReplyImageUrl(image);
-    if (!imageUrl) {
-      continue;
-    }
-
     blocks.push({
       type: "image",
-      image_url: imageUrl,
-      alt_text: toReplyImageAltText(image),
+      image_url: image.url,
+      alt_text: image.altText,
     });
     urlImageCount += 1;
   }
@@ -888,6 +934,270 @@ async function uploadSlackImageData(
   });
 }
 
+function inferFileExtension(mimeType: string): string {
+  const normalized = mimeType.toLowerCase();
+  if (normalized === "audio/mpeg") return "mp3";
+  if (normalized === "audio/wav") return "wav";
+  if (normalized === "audio/mp4") return "m4a";
+  if (normalized === "audio/ogg") return "ogg";
+  if (normalized === "video/mp4") return "mp4";
+  if (normalized === "video/quicktime") return "mov";
+  if (normalized === "video/webm") return "webm";
+  if (normalized === "application/pdf") return "pdf";
+  return toImageExtension(mimeType);
+}
+
+function sanitizeBinaryFilename(filename: string): string {
+  const sanitized = filename.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return sanitized.length > 0 ? sanitized : "openclaw-file";
+}
+
+function decodeReplyMediaData(entry: ReplyMedia): SlackDecodedBinaryData | null {
+  if (entry.source.kind !== "data") return null;
+
+  let base64Payload = entry.source.base64.trim();
+  let inferredMimeType: string | undefined;
+  const dataUrlMatch = /^data:([^;,]+);base64,(.+)$/i.exec(base64Payload);
+  if (dataUrlMatch) {
+    inferredMimeType = toNonEmptyString(dataUrlMatch[1]);
+    base64Payload = dataUrlMatch[2] ?? "";
+  }
+
+  const normalizedBase64 = base64Payload
+    .replace(/\s+/g, "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+
+  if (normalizedBase64.length === 0 || normalizedBase64.length % 4 === 1) {
+    return null;
+  }
+
+  if (/[^A-Za-z0-9+/=]/.test(normalizedBase64)) {
+    return null;
+  }
+
+  const bytes = Buffer.from(normalizedBase64, "base64");
+  if (bytes.length === 0) {
+    return null;
+  }
+
+  const mimeType = entry.source.mimeType ?? inferredMimeType ?? "application/octet-stream";
+  const extension = inferFileExtension(mimeType);
+  const explicitFilename = toNonEmptyString(entry.source.filename);
+  const filename = explicitFilename
+    ? sanitizeBinaryFilename(explicitFilename)
+    : `openclaw-${entry.type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${extension}`;
+
+  return {
+    bytes,
+    filename: filename.includes(".") ? filename : `${filename}.${extension}`,
+    mimeType,
+    altText: entry.source.alt,
+  };
+}
+
+function toImageUploadEntries(reply: ChannelReply): Array<{
+  source: Extract<ReplyBinarySource, { kind: "data" }>;
+  altText: string;
+}> {
+  const entries: Array<{
+    source: Extract<ReplyBinarySource, { kind: "data" }>;
+    altText: string;
+  }> = [];
+  const seen = new Set<string>();
+
+  for (const image of toDataReplyImages(reply)) {
+    const key = `${image.mimeType}:${image.filename ?? ""}:${image.base64}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    entries.push({
+      source: image,
+      altText: toReplyImageAltText(image),
+    });
+  }
+
+  for (const entry of toReplyMedia(reply)) {
+    if (!isReplyMediaImage(entry) || entry.source.kind !== "data") {
+      continue;
+    }
+    const key = `${entry.source.mimeType}:${entry.source.filename ?? ""}:${entry.source.base64}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    entries.push({
+      source: entry.source,
+      altText: entry.source.alt ?? SLACK_DEFAULT_IMAGE_ALT_TEXT,
+    });
+  }
+
+  return entries;
+}
+
+async function uploadSlackBinaryData(
+  botToken: string,
+  message: SlackExtractedMessage,
+  decoded: SlackDecodedBinaryData,
+  fetchFn?: typeof fetch,
+): Promise<void> {
+  const runFetch = fetchFn ?? globalThis.fetch;
+
+  // Step 1: Get upload URL
+  let getUploadResponse: Response;
+  try {
+    getUploadResponse = await runFetch(SLACK_FILES_GET_UPLOAD_URL_EXTERNAL_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${botToken}`,
+      },
+      body: JSON.stringify({
+        filename: decoded.filename,
+        length: decoded.bytes.length,
+        ...(decoded.altText ? { alt_txt: decoded.altText } : {}),
+      }),
+      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isLikelyNetworkError(error)) {
+      throw toRetryableSendError(
+        `slack_upload_prepare_network: ${error instanceof Error ? error.message : String(error)}`,
+        undefined,
+        error,
+      );
+    }
+    throw error;
+  }
+
+  let getUploadJson: SlackFilesGetUploadURLExternalResponse | null = null;
+  try {
+    getUploadJson = (await getUploadResponse.json()) as SlackFilesGetUploadURLExternalResponse;
+  } catch {
+    getUploadJson = null;
+  }
+
+  const getUploadErrorCode = typeof getUploadJson?.error === "string" ? getUploadJson.error : null;
+  const getUploadFailureMessage = `slack_upload_prepare_failed: status=${getUploadResponse.status}${
+    getUploadErrorCode ? ` error=${getUploadErrorCode}` : ""
+  }`;
+  const getUploadRetryAfterSeconds = parseRetryAfterSeconds(
+    getUploadResponse.headers.get("retry-after"),
+  );
+
+  if (getUploadResponse.status === 429 || getUploadResponse.status >= 500) {
+    throw toRetryableSendError(getUploadFailureMessage, getUploadRetryAfterSeconds);
+  }
+
+  if (!getUploadResponse.ok || getUploadJson?.ok !== true) {
+    throw new Error(getUploadFailureMessage);
+  }
+
+  const uploadUrl = toNonEmptyString(getUploadJson?.upload_url);
+  const fileId = toNonEmptyString(getUploadJson?.file_id);
+  if (!uploadUrl || !fileId) {
+    throw new Error("slack_upload_prepare_failed: missing upload_url or file_id");
+  }
+
+  // Step 2: Upload file bytes
+  const formData = new FormData();
+  formData.set("filename", decoded.filename);
+  formData.set("length", String(decoded.bytes.length));
+  formData.set(
+    "file",
+    new Blob([Uint8Array.from(decoded.bytes)], { type: decoded.mimeType }),
+    decoded.filename,
+  );
+
+  let uploadResponse: Response;
+  try {
+    uploadResponse = await runFetch(uploadUrl, {
+      method: "POST",
+      body: formData,
+      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isLikelyNetworkError(error)) {
+      throw toRetryableSendError(
+        `slack_upload_transfer_network: ${error instanceof Error ? error.message : String(error)}`,
+        undefined,
+        error,
+      );
+    }
+    throw error;
+  }
+
+  const uploadFailureMessage = `slack_upload_transfer_failed: status=${uploadResponse.status}`;
+  const uploadRetryAfterSeconds = parseRetryAfterSeconds(uploadResponse.headers.get("retry-after"));
+  if (uploadResponse.status === 429 || uploadResponse.status >= 500) {
+    throw toRetryableSendError(uploadFailureMessage, uploadRetryAfterSeconds);
+  }
+
+  if (!uploadResponse.ok) {
+    throw new Error(uploadFailureMessage);
+  }
+
+  // Step 3: Complete upload and attach to thread
+  let completeUploadResponse: Response;
+  try {
+    completeUploadResponse = await runFetch(SLACK_FILES_COMPLETE_UPLOAD_EXTERNAL_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${botToken}`,
+      },
+      body: JSON.stringify({
+        files: [{ id: fileId, title: decoded.filename }],
+        channel_id: message.channel,
+        thread_ts: message.threadTs,
+      }),
+      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isLikelyNetworkError(error)) {
+      throw toRetryableSendError(
+        `slack_upload_complete_network: ${error instanceof Error ? error.message : String(error)}`,
+        undefined,
+        error,
+      );
+    }
+    throw error;
+  }
+
+  let completeUploadJson: SlackSendResponse | null = null;
+  try {
+    completeUploadJson = (await completeUploadResponse.json()) as SlackSendResponse;
+  } catch {
+    completeUploadJson = null;
+  }
+
+  const completeUploadErrorCode =
+    typeof completeUploadJson?.error === "string" ? completeUploadJson.error : null;
+  const completeUploadFailureMessage = `slack_upload_complete_failed: status=${completeUploadResponse.status}${
+    completeUploadErrorCode ? ` error=${completeUploadErrorCode}` : ""
+  }`;
+  const completeUploadRetryAfterSeconds = parseRetryAfterSeconds(
+    completeUploadResponse.headers.get("retry-after"),
+  );
+
+  if (completeUploadResponse.status === 429 || completeUploadResponse.status >= 500) {
+    throw toRetryableSendError(completeUploadFailureMessage, completeUploadRetryAfterSeconds);
+  }
+
+  if (!completeUploadResponse.ok || completeUploadJson?.ok !== true) {
+    throw new Error(completeUploadFailureMessage);
+  }
+
+  logInfo("channels.slack_file_uploaded", {
+    channel: message.channel,
+    threadTs: message.threadTs,
+    filename: decoded.filename,
+    fileId,
+    mediaType: "binary",
+  });
+}
+
 export function createSlackAdapter(
   config: SlackConfig,
   options: { fetchFn?: typeof fetch } = {},
@@ -1014,7 +1324,19 @@ export function createSlackAdapter(
         text: toSlackFallbackText(reply),
         blocks: toSlackBlocks(reply),
       };
-      const dataImages = toDataReplyImages(reply);
+
+      // Collect all uploadable binaries: legacy data images + generic media
+      const imageUploads = toImageUploadEntries(reply);
+      const mediaFiles: SlackDecodedBinaryData[] = [];
+      for (const entry of toReplyMedia(reply)) {
+        if (isReplyMediaImage(entry)) {
+          continue;
+        }
+        const decoded = decodeReplyMediaData(entry);
+        if (decoded) {
+          mediaFiles.push(decoded);
+        }
+      }
 
       const placeholderTs = message.processingPlaceholderTs;
 
@@ -1029,8 +1351,24 @@ export function createSlackAdapter(
           );
           message.processingPlaceholderTs = undefined;
 
-          for (const image of dataImages) {
-            await uploadSlackImageData(config.botToken, message, image, fetchFn);
+          // Upload legacy data images (backward compat)
+          for (const image of imageUploads) {
+            await uploadSlackImageData(
+              config.botToken,
+              message,
+              {
+                kind: "data",
+                mimeType: image.source.mimeType,
+                base64: image.source.base64,
+                ...(image.source.filename ? { filename: image.source.filename } : {}),
+                ...(image.altText ? { alt: image.altText } : {}),
+              },
+              fetchFn,
+            );
+          }
+          // Upload generic media files
+          for (const file of mediaFiles) {
+            await uploadSlackBinaryData(config.botToken, message, file, fetchFn);
           }
           return;
         } catch (error) {
@@ -1049,8 +1387,24 @@ export function createSlackAdapter(
 
       await postSlackReply(config.botToken, message, slackPayload, fetchFn);
 
-      for (const image of dataImages) {
-        await uploadSlackImageData(config.botToken, message, image, fetchFn);
+      // Upload legacy data images (backward compat)
+      for (const image of imageUploads) {
+        await uploadSlackImageData(
+          config.botToken,
+          message,
+          {
+            kind: "data",
+            mimeType: image.source.mimeType,
+            base64: image.source.base64,
+            ...(image.source.filename ? { filename: image.source.filename } : {}),
+            ...(image.altText ? { alt: image.altText } : {}),
+          },
+          fetchFn,
+        );
+      }
+      // Upload generic media files
+      for (const file of mediaFiles) {
+        await uploadSlackBinaryData(config.botToken, message, file, fetchFn);
       }
 
       if (placeholderTs) {

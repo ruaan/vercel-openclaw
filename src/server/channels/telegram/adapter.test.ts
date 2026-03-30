@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { RetryableSendError } from "@/server/channels/core/types";
+import type { ChannelReply } from "@/server/channels/core/types";
 import {
   createTelegramAdapter,
   isTelegramWebhookSecretValid,
@@ -186,6 +187,209 @@ test("createTelegramAdapter sendReply throws RetryableSendError when Telegram ra
         return true;
       },
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// sendReplyRich — generic media dispatch
+// ---------------------------------------------------------------------------
+
+function makeTelegramConfig() {
+  return {
+    botToken: "bot-token",
+    webhookSecret: "secret",
+    webhookUrl: "https://example.com/api/channels/telegram/webhook",
+    botUsername: "openclaw_bot",
+    configuredAt: Date.now(),
+  };
+}
+
+test("createTelegramAdapter sendReplyRich sends audio via sendAudio", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 42 } } }), {
+      status: 200,
+    });
+  };
+
+  try {
+    const adapter = createTelegramAdapter(makeTelegramConfig());
+    const reply: ChannelReply = {
+      text: "Here is your audio.",
+      media: [
+        {
+          type: "audio",
+          source: {
+            kind: "data",
+            mimeType: "audio/mpeg",
+            base64: "SUQzBAAAAAAA",
+            filename: "answer.mp3",
+          },
+        },
+      ],
+    };
+
+    await adapter.sendReplyRich!(
+      { text: "generate audio", chatId: "42" },
+      reply,
+    );
+
+    assert.ok(calls.some((c) => c.includes("sendAudio")), "should call sendAudio");
+    assert.ok(!calls.some((c) => c.includes("sendPhoto")), "should not call sendPhoto");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createTelegramAdapter sendReplyRich sends document for generic files", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 42 } } }), {
+      status: 200,
+    });
+  };
+
+  try {
+    const adapter = createTelegramAdapter(makeTelegramConfig());
+    const reply: ChannelReply = {
+      text: "Report attached.",
+      media: [
+        {
+          type: "file",
+          source: {
+            kind: "data",
+            mimeType: "application/pdf",
+            base64: "JVBERi0xLjQK",
+            filename: "report.pdf",
+          },
+        },
+      ],
+    };
+
+    await adapter.sendReplyRich!(
+      { text: "get report", chatId: "42" },
+      reply,
+    );
+
+    assert.ok(calls.some((c) => c.includes("sendDocument")), "should call sendDocument");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createTelegramAdapter sendReplyRich sends video via sendVideo", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 42 } } }), {
+      status: 200,
+    });
+  };
+
+  try {
+    const adapter = createTelegramAdapter(makeTelegramConfig());
+    const reply: ChannelReply = {
+      text: "Video ready.",
+      media: [
+        {
+          type: "video",
+          source: {
+            kind: "data",
+            mimeType: "video/mp4",
+            base64: "AAAAIGZ0eXA=",
+            filename: "clip.mp4",
+          },
+        },
+      ],
+    };
+
+    await adapter.sendReplyRich!(
+      { text: "make video", chatId: "42" },
+      reply,
+    );
+
+    assert.ok(calls.some((c) => c.includes("sendVideo")), "should call sendVideo");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createTelegramAdapter sendReplyRich image regression — sends photo via sendPhoto", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 42 } } }), {
+      status: 200,
+    });
+  };
+
+  try {
+    const adapter = createTelegramAdapter(makeTelegramConfig());
+    const reply: ChannelReply = {
+      text: "Chart ready.",
+      media: [
+        {
+          type: "image",
+          source: {
+            kind: "data",
+            mimeType: "image/png",
+            base64: "iVBORw0KGgo=",
+            filename: "chart.png",
+          },
+        },
+      ],
+    };
+
+    await adapter.sendReplyRich!(
+      { text: "generate chart", chatId: "42" },
+      reply,
+    );
+
+    assert.ok(calls.some((c) => c.includes("sendPhoto")), "should call sendPhoto for images");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createTelegramAdapter sendReplyRich dispatches mixed media types", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 42 } } }), {
+      status: 200,
+    });
+  };
+
+  try {
+    const adapter = createTelegramAdapter(makeTelegramConfig());
+    const reply: ChannelReply = {
+      text: "Results.",
+      media: [
+        { type: "image", source: { kind: "data", mimeType: "image/png", base64: "iVBORw0KGgo=", filename: "chart.png" } },
+        { type: "audio", source: { kind: "data", mimeType: "audio/mpeg", base64: "SUQzBAAAAAAA", filename: "audio.mp3" } },
+        { type: "video", source: { kind: "data", mimeType: "video/mp4", base64: "AAAAIGZ0eXA=", filename: "video.mp4" } },
+        { type: "file", source: { kind: "data", mimeType: "application/pdf", base64: "JVBERi0xLjQK", filename: "doc.pdf" } },
+      ],
+    };
+
+    await adapter.sendReplyRich!(
+      { text: "all media", chatId: "42" },
+      reply,
+    );
+
+    assert.ok(calls.some((c) => c.includes("sendPhoto")), "should call sendPhoto");
+    assert.ok(calls.some((c) => c.includes("sendAudio")), "should call sendAudio");
+    assert.ok(calls.some((c) => c.includes("sendVideo")), "should call sendVideo");
+    assert.ok(calls.some((c) => c.includes("sendDocument")), "should call sendDocument");
   } finally {
     globalThis.fetch = originalFetch;
   }
