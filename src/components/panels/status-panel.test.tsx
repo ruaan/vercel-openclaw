@@ -42,6 +42,9 @@ const CHANNELS: StatusPayload["channels"] = {
     hasBotToken: false,
     lastError: null,
     connectability: makeConnectability("slack", ""),
+    installMethod: "manual",
+    installUrl: null,
+    appCredentialsConfigured: false,
   },
   telegram: {
     configured: false,
@@ -212,21 +215,32 @@ test("StatusPanel renders Open Gateway as the main green running action", () => 
   assert.match(html, /<a[^>]*class="button success"[^>]*>Open Gateway<\/a>/);
 });
 
-test("StatusPanel renders minute-only auto-sleep and gateway check metadata", () => {
-  const now = Date.now();
+test("StatusPanel hides gateway card when status is unknown", () => {
   const html = renderPanel(
     makeStatus({
       timeoutRemainingMs: 125_000,
       timeoutSource: "estimated",
       gatewayStatus: "unknown",
-      gatewayCheckedAt: now - 120_000,
     }),
   );
 
   assert.ok(html.includes("Auto-sleep"));
   assert.ok(html.includes("3m (estimated)"));
+  // "Open Gateway" button is fine — we're checking the metrics card isn't shown
+  assert.ok(!html.includes(">Unknown<"), "gateway Unknown value should not render as a metric");
+});
+
+test("StatusPanel shows gateway card when status is ready", () => {
+  const now = Date.now();
+  const html = renderPanel(
+    makeStatus({
+      gatewayStatus: "ready",
+      gatewayCheckedAt: now - 120_000,
+    }),
+  );
+
   assert.ok(html.includes("Gateway"));
-  assert.ok(html.includes("Unknown"));
+  assert.ok(html.includes("Ready"));
   assert.ok(html.includes("Checked 2m ago"));
 });
 

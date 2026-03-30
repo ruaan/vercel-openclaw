@@ -268,15 +268,17 @@ function getRunningFacts(status: StatusPayload): StatusFact[] {
   const facts: StatusFact[] = [];
   const lifecycle = status.lifecycle;
 
-  // Gateway
-  facts.push({
-    label: "Gateway",
-    value: formatGatewayStatus(status.gatewayStatus),
-    detail:
-      status.gatewayCheckedAt != null
-        ? `Checked ${formatRelativeTime(status.gatewayCheckedAt)}`
-        : undefined,
-  });
+  // Gateway — only show when we have a real probe result
+  if (status.gatewayStatus !== "unknown") {
+    facts.push({
+      label: "Gateway",
+      value: formatGatewayStatus(status.gatewayStatus),
+      detail:
+        status.gatewayCheckedAt != null
+          ? `Checked ${formatRelativeTime(status.gatewayCheckedAt)}`
+          : undefined,
+    });
+  }
 
   // Auto-sleep
   facts.push({
@@ -318,21 +320,6 @@ function getRunningFacts(status: StatusPayload): StatusFact[] {
   return facts;
 }
 
-function getSecondaryFacts(status: StatusPayload): StatusFact[] {
-  const facts: StatusFact[] = [
-    { label: "Auth", value: status.authMode },
-    {
-      label: "Store",
-      value: status.persistentStore
-        ? status.storeBackend
-        : `${status.storeBackend} (memory only)`,
-    },
-  ];
-  if (status.sandboxId && status.status !== "running") {
-    facts.push({ label: "Sandbox ID", value: status.sandboxId });
-  }
-  return facts;
-}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -415,8 +402,6 @@ export function StatusPanel({
   const primaryFacts = isRunning
     ? getRunningFacts(status)
     : getStoppedFacts(status);
-  const secondaryFacts = getSecondaryFacts(status);
-
   return (
     <article className="panel-card">
       <div className="panel-head">
@@ -438,20 +423,6 @@ export function StatusPanel({
           </div>
         ))}
       </dl>
-
-      {secondaryFacts.length > 0 ? (
-        <details className="status-secondary-details">
-          <summary>Environment details</summary>
-          <dl className="status-secondary-grid">
-            {secondaryFacts.map((fact) => (
-              <div key={fact.label}>
-                <dt>{fact.label}</dt>
-                <dd>{fact.value}</dd>
-              </div>
-            ))}
-          </dl>
-        </details>
-      ) : null}
 
       {firstRunCallout ? (
         <div className="status-callout">
