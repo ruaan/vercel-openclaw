@@ -304,7 +304,6 @@ export function FirewallPanel({
         <article className="panel-card">
           <div className="panel-head">
             <div>
-              <p className="eyebrow">Firewall</p>
               <h2>Firewall policy</h2>
             </div>
             <div className="mode-pills">
@@ -752,7 +751,6 @@ export function FirewallPanel({
         <article className="panel-card">
           <div className="panel-head">
             <div>
-              <p className="eyebrow">Recent events</p>
               <h2>Observed activity</h2>
             </div>
             <button

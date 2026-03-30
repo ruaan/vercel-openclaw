@@ -157,7 +157,6 @@ export function SnapshotsPanel({
     <article className="panel-card">
       <div className="panel-head">
         <div>
-          <p className="eyebrow">Snapshots</p>
           <h2>Snapshot history</h2>
           <p className="muted-copy snapshots-intro">
             Current is the active restore point. The tag shows how it was created.

@@ -406,7 +406,6 @@ export function StatusPanel({
     <article className="panel-card">
       <div className="panel-head">
         <div>
-          <p className="eyebrow">Sandbox</p>
           <h2>Sandbox status</h2>
         </div>
         <StatusBadge status={displayStatus} />

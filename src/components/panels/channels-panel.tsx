@@ -421,7 +421,6 @@ export function ChannelsPanel({
     >
       <div className="panel-head">
         <div>
-          <p className="eyebrow">Channels</p>
           <h2>External entry points</h2>
         </div>
         <button

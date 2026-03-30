@@ -206,7 +206,6 @@ export function SshPanel({ status, busy, requestJson }: SshPanelProps) {
     <article className="panel-card">
       <div className="panel-head">
         <div>
-          <p className="eyebrow">Terminal</p>
           <h2>Sandbox command execution</h2>
         </div>
       </div>

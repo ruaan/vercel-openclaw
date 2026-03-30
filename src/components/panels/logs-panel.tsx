@@ -141,7 +141,6 @@ export function LogsPanel({ active, status }: LogsPanelProps) {
     <article className="panel-card">
       <div className="panel-head">
         <div>
-          <p className="eyebrow">Logs</p>
           <h2>Sandbox log viewer</h2>
         </div>
         <button

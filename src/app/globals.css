@@ -2256,7 +2256,7 @@ a[href]:focus-visible {
 /* ────── Snapshots ────── */
 
 .snapshot-list-container {
-  min-height: 96px;
+  min-height: 0;
 }
 
 .snapshot-row-header {
@@ -2668,7 +2668,7 @@ html body[data-scroll-locked] {
 }
 
 .snapshots-summary {
-  margin-bottom: 16px;
+  margin-bottom: 0;
 }
 
 /* ────── Danger zone ────── */
