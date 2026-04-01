@@ -179,11 +179,11 @@ test("cron-persistence: jobs survive a full stop → restore cycle", async (t) =
       assert.equal(restoredJobs.jobs[0].id, "avatar-quote");
       assert.equal(restoredJobs.jobs[1].id, "daily-standup");
 
-      // Verify the gateway restart script was run (so cron module reloads)
-      const restartCmd = newHandle.commands.find(
-        (c) => c.cmd === "bash" && c.args?.some((a: string) => a.includes("restart-gateway")),
+      // Verify the gateway was restarted via detached command (so cron module reloads)
+      assert.ok(
+        newHandle.detachedCommands.length > 0,
+        "Gateway should be restarted to load restored jobs",
       );
-      assert.ok(restartCmd, "Gateway should be restarted to load restored jobs");
 
       // Verify restore metrics
       assert.equal(

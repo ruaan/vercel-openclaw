@@ -40,6 +40,7 @@ export type RunCommandOptions = {
   cmd: string;
   args?: string[];
   env?: Record<string, string>;
+  detached?: boolean;
   signal?: AbortSignal;
   stdout?: Writable;
   stderr?: Writable;
@@ -72,6 +73,8 @@ export interface SandboxHandle {
   stop(options?: { blocking?: boolean }): Promise<void>;
   extendTimeout(duration: number): Promise<void>;
   updateNetworkPolicy(policy: NetworkPolicy): Promise<NetworkPolicy>;
+  runDetachedCommand(options: RunCommandOptions): Promise<{ cmdId: string }>;
+  getCommand(cmdId: string): Promise<{ kill(signal?: string): Promise<void> }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +150,23 @@ function wrapSandbox(sandbox: Sandbox): SandboxHandle {
     async updateNetworkPolicy(policy) {
       return sandbox.updateNetworkPolicy(policy);
     },
+    async runDetachedCommand(options) {
+      const cmd = await sandbox.runCommand({
+        cmd: options.cmd,
+        args: options.args ?? [],
+        env: options.env,
+        detached: true,
+      });
+      return { cmdId: (cmd as unknown as { cmdId: string }).cmdId };
+    },
+    async getCommand(cmdId) {
+      const cmd = await sandbox.getCommand(cmdId);
+      return {
+        async kill(signal?: string) {
+          await cmd.kill(signal as Parameters<typeof cmd.kill>[0]);
+        },
+      };
+    },
   };
 }
 
@@ -188,7 +208,7 @@ export function getSandboxController(): SandboxController {
 export function _setSandboxControllerForTesting(
   controller: SandboxController | null,
 ): void {
-  if (process.env.NODE_ENV !== "test") {
+  if (process.env.NODE_ENV !== "test" && controller !== null) {
     throw new Error("test-only helper called outside tests");
   }
 

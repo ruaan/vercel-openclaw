@@ -124,14 +124,10 @@ function buildGatewayEnvShell(): string {
   ].join("\n");
 }
 
-/** Shell fragment that kills any existing gateway and starts a fresh one.
- *  Uses the shell variables exported by buildGatewayEnvShell() so the
- *  conditional API-key logic is honoured. */
+/** Shell fragment that kills any existing gateway process.
+ *  Gateway launch is now handled via the SDK's detached command API. */
 function buildGatewayLaunchShell(): string {
-  return [
-    'pkill -f "openclaw.gateway" || true',
-    `setsid ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &`,
-  ].join("\n");
+  return 'pkill -f "openclaw.gateway" || true';
 }
 
 /**
@@ -145,6 +141,30 @@ set -euo pipefail
 ${buildGatewayEnvShell()}
 ${buildGatewayLaunchShell()}
 `;
+}
+
+export function buildGatewayLaunchCommand(): { cmd: string; args: string[] } {
+  return {
+    cmd: OPENCLAW_BIN,
+    args: ["gateway", "--port", String(OPENCLAW_PORT), "--bind", "loopback"],
+  };
+}
+
+export function buildGatewayLaunchEnv(options: {
+  gatewayToken: string;
+  apiKey?: string;
+}): Record<string, string> {
+  const env: Record<string, string> = {
+    OPENCLAW_CONFIG_PATH: OPENCLAW_CONFIG_PATH,
+    OPENCLAW_GATEWAY_PORT: String(OPENCLAW_PORT),
+    OPENCLAW_GATEWAY_TOKEN: options.gatewayToken,
+  };
+  if (options.apiKey) {
+    env.AI_GATEWAY_API_KEY = options.apiKey;
+    env.OPENAI_API_KEY = options.apiKey;
+    env.OPENAI_BASE_URL = AI_GATEWAY_BASE_URL;
+  }
+  return env;
 }
 
 export type WhatsAppGatewayConfig = {
@@ -468,8 +488,6 @@ export function buildStartupScript(): string {
 set -euo pipefail
 mkdir -p "${OPENCLAW_STATE_DIR}/devices"
 rm -f "${OPENCLAW_STATE_DIR}/devices/paired.json" "${OPENCLAW_STATE_DIR}/devices/pending.json"
-${buildGatewayEnvShell()}
-${buildGatewayLaunchShell()}
 _learning_log=/tmp/shell-commands-for-learning.log
 touch "$_learning_log"
 ${buildGatewayPortProfileShell()}

@@ -68,6 +68,7 @@ function writeToStream(stream: Writable | undefined, text: string): void {
 export class FakeSandboxHandle implements SandboxHandle {
   sandboxId: string;
   commands: Array<{ cmd: string; args?: string[]; env?: Record<string, string> }> = [];
+  detachedCommands: Array<{ cmdId: string; cmd: string; args?: string[]; env?: Record<string, string>; killed: boolean }> = [];
   writtenFiles: Array<{ path: string; content: Buffer }> = [];
   networkPolicies: NetworkPolicy[] = [];
   extendedTimeouts: number[] = [];
@@ -244,6 +245,27 @@ export class FakeSandboxHandle implements SandboxHandle {
       return await this.networkPolicyHandler(policy);
     }
     return policy;
+  }
+
+  async runDetachedCommand(options: RunCommandOptions): Promise<{ cmdId: string }> {
+    const cmdId = `cmd-${this.sandboxId}-${this.detachedCommands.length}`;
+    this.detachedCommands.push({ cmdId, cmd: options.cmd, args: options.args, env: options.env, killed: false });
+    this.eventLog.push({
+      kind: "command",
+      sandboxId: this.sandboxId,
+      timestamp: Date.now(),
+      detail: { command: options.cmd, args: options.args, detached: true, cmdId },
+    });
+    return { cmdId };
+  }
+
+  async getCommand(cmdId: string): Promise<{ kill(signal?: string): Promise<void> }> {
+    const cmd = this.detachedCommands.find(c => c.cmdId === cmdId);
+    return {
+      async kill(_signal?: string) {
+        if (cmd) cmd.killed = true;
+      },
+    };
   }
 }
 

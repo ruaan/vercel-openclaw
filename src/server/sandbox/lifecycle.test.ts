@@ -44,7 +44,6 @@ import {
   OPENCLAW_BIN,
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
-  OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
   OPENCLAW_IMAGE_GEN_SKILL_PATH,
@@ -2387,11 +2386,8 @@ test("[lifecycle] ensureFreshGatewayToken: writes token then runs startup script
         "Token value should be passed as argument",
       );
 
-      // Step 2: gateway restart via env -> dedicated restart script
-      const restartCmd = handle.commands.find(
-        (c) => c.cmd === "env" && c.args?.includes("bash") && c.args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH),
-      );
-      assert.ok(restartCmd, "Should restart gateway via dedicated restart script");
+      // Step 2: gateway restart via detached command API
+      assert.equal(handle.detachedCommands.length, 1, "Should relaunch gateway as detached command");
 
       // Step 3: metadata updated
       const meta = await getInitializedMeta();
@@ -2462,14 +2458,11 @@ test("[lifecycle] ensureFreshGatewayToken: restart failure does not corrupt meta
         meta.lastTokenSource = "oidc";
       });
 
-      // Pre-create the handle with a failing restart script
+      // Pre-create the handle with a failing detached restart
       const handle = new FakeSandboxHandle("sbx-restart-fail", fake.events);
-      handle.responders.push((cmd, args) => {
-        if (cmd === "env" && args?.includes("bash") && args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH)) {
-          return { exitCode: 255, output: async () => "gateway restart failed" };
-        }
-        return undefined;
-      });
+      handle.runDetachedCommand = async () => {
+        throw new Error("gateway restart failed");
+      };
       fake.handlesByIds.set("sbx-restart-fail", handle);
 
       await ensureFreshGatewayToken();
@@ -2508,7 +2501,7 @@ test("[lifecycle] ensureFreshGatewayToken: does NOT force-pair after restart", a
       const handle = fake.handlesByIds.get("sbx-check-pair") as FakeSandboxHandle | undefined;
       assert.ok(handle, "Handle should exist");
 
-      // Token refresh uses the dedicated restart script which does not
+      // Token refresh uses the detached restart path which does not
       // touch pairing state — verify force-pair is NOT invoked.
       const pairCmd = handle.commands.find(
         (c) => c.cmd === "node" && c.args?.[0] === OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
@@ -2586,11 +2579,8 @@ test("[lifecycle] ensureFreshGatewayToken: skips restart when token on disk matc
 
       await ensureFreshGatewayToken();
 
-      // Should NOT have run the restart script (no gateway restart)
-      const restartCmd = handle.commands.find(
-        (c) => c.cmd === "env" && c.args?.includes("bash") && c.args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH),
-      );
-      assert.equal(restartCmd, undefined, "Should not restart gateway when token unchanged");
+      // Should NOT have relaunched the gateway when the token is unchanged.
+      assert.equal(handle.detachedCommands.length, 0, "Should not restart gateway when token unchanged");
 
       // But lastTokenRefreshAt should still be updated
       const meta = await getInitializedMeta();
@@ -3866,10 +3856,11 @@ test("ensureRunningSandboxDynamicConfigFresh returns already-fresh when hash mat
     const handle = h.controller.created.find(
       (c) => c.sandboxId === meta.sandboxId,
     ) as FakeSandboxHandle | undefined;
-    const restartCommands = handle?.commands.filter(
-      (c) => c.args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH),
+    assert.equal(
+      handle?.detachedCommands.length ?? 0,
+      1,
+      "No additional gateway restart should happen on hash match",
     );
-    assert.equal(restartCommands?.length ?? 0, 0, "No gateway restart should happen on hash match");
   });
 });
 
@@ -3897,16 +3888,19 @@ test("ensureRunningSandboxDynamicConfigFresh rewrites and restarts on hash miss"
     // snapshotDynamicConfigHash must NOT be touched by runtime reconcile.
     assert.equal(meta.snapshotDynamicConfigHash, null, "Snapshot hash must not be updated by runtime reconcile");
 
-    // Verify restart command was issued.
+    // Verify the old detached gateway was killed and a new one was launched.
     const handle = h.controller.created.find(
       (c) => c.sandboxId === meta.sandboxId,
     ) as FakeSandboxHandle | undefined;
-    const restartCommands = handle?.commands.filter(
-      (c) => c.args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH),
-    );
     assert.ok(
-      restartCommands && restartCommands.length > 0,
-      "Gateway restart should have been issued",
+      handle && handle.detachedCommands.length >= 2,
+      "Gateway should have been relaunched as a detached command",
+    );
+    assert.equal(handle?.detachedCommands[0]?.killed, true, "Previous detached gateway should be killed");
+    assert.equal(
+      handle?.detachedCommands.at(-1)?.cmd,
+      OPENCLAW_BIN,
+      "Replacement gateway should use the openclaw binary",
     );
   });
 });
@@ -3955,12 +3949,9 @@ test("ensureRunningSandboxDynamicConfigFresh returns restart-failed on nonzero e
     ) as FakeSandboxHandle | undefined;
     assert.ok(handle, "Should have a sandbox handle");
 
-    handle.responders.push((cmd, args) => {
-      if (args?.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH)) {
-        return { exitCode: 1, output: async () => "restart failed" };
-      }
-      return undefined;
-    });
+    handle.runDetachedCommand = async () => {
+      throw new Error("restart failed");
+    };
 
     const result = await ensureRunningSandboxDynamicConfigFresh({
       origin: "https://test.example.com",
@@ -4319,11 +4310,8 @@ test("restoreSandboxFromSnapshot restores cron jobs from store after gateway boo
       assert.equal(parsed.jobs.length, 1);
       assert.equal(parsed.jobs[0].id, "avatar-quote");
 
-      // Verify gateway was restarted (restart script was run)
-      const restartCmd = handle.commands.find(
-        (c) => c.cmd === "bash" && c.args?.some((a) => a.includes("restart-gateway")),
-      );
-      assert.ok(restartCmd, "Gateway restart script should be run after cron restore");
+      // Verify gateway was restarted after cron restore.
+      assert.ok(handle.detachedCommands.length > 0, "Gateway should be relaunched after cron restore");
 
       // Verify metrics record the restore
       assert.equal(meta.lastRestoreMetrics?.cronRestoreOutcome, "restored-verified");
