@@ -177,10 +177,10 @@ export async function setupOpenClaw(
   });
   await assertCommandSuccess("npm install", installResult);
 
-  // Install missing peer dependencies into the openclaw package directory.
-  // OpenClaw 2026.3.31+ ships @buape/carbon only inside the Discord extension
-  // bundle, but the UI module also imports it. Without this, the gateway UI
-  // routes return 500 while API routes work fine.
+  // Install missing plugin peer dependencies into the openclaw package directory.
+  // OpenClaw 2026.3.31+ bundles plugins (slack, telegram, discord, bedrock) but
+  // their peer deps aren't installed with --ignore-scripts.  Without these, the
+  // gateway returns 500 on all routes during plugin init.
   progress?.setPhase("installing-peer-deps", "Installing missing peer dependencies");
   const peerDepResult = await sandbox.runCommand({
     cmd: "bash",
@@ -191,9 +191,11 @@ export async function setupOpenClaw(
         "OC_PKG=/home/vercel-sandbox/.global/npm/lib/node_modules/openclaw",
         "mkdir -p /tmp/openclaw-peer-deps && cd /tmp/openclaw-peer-deps",
         "npm init -y > /dev/null 2>&1",
-        "npm install @buape/carbon --no-save --ignore-scripts --loglevel warn 2>&1",
+        "npm install @buape/carbon @slack/web-api grammy --no-save --ignore-scripts --loglevel warn 2>&1",
         "mkdir -p $OC_PKG/node_modules",
-        "cp -r node_modules/@buape $OC_PKG/node_modules/",
+        "cp -r node_modules/@buape node_modules/@slack node_modules/grammy $OC_PKG/node_modules/ 2>/dev/null || true",
+        // Copy scoped package internals that @slack/web-api needs
+        "for dep in @slack/types @slack/logger @slack/oauth @slack/socket-mode; do [ -d node_modules/${dep%%/*} ] && cp -r node_modules/${dep%%/*} $OC_PKG/node_modules/ 2>/dev/null; done || true",
         "rm -rf /tmp/openclaw-peer-deps",
       ].join(" && "),
     ],

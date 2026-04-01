@@ -381,6 +381,17 @@ export class FakeSandboxController implements SandboxController {
     if (existing) {
       return existing;
     }
+    // v2: for "oc-*" IDs (the lifecycle's derived persistent sandbox name),
+    // throw 404 when no handle was pre-registered.  This mirrors real SDK
+    // behaviour where get() fails for non-existent sandboxes, causing the
+    // lifecycle to fall through to create().
+    if (params.sandboxId.startsWith("oc-")) {
+      throw Object.assign(
+        new Error(`Sandbox ${params.sandboxId} not found`),
+        { response: { status: 404 } },
+      );
+    }
+    // For other IDs, auto-create a handle (backward compatible).
     const handle = new FakeSandboxHandle(params.sandboxId, this.events);
     this.handlesByIds.set(params.sandboxId, handle);
     return handle;

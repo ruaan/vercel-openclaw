@@ -2338,6 +2338,7 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
 
     if (isResumed) {
       // Resumed persistent sandbox — run fast restore (update config/tokens, restart gateway)
+      const resumeStart = Date.now();
       logInfo("sandbox.create.persistent_resume", ctx({ sandboxId: sandbox.sandboxId }));
       progress.appendLine("system", "Resumed persistent sandbox — running fast restore");
 
@@ -2349,6 +2350,7 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
         apiKey: freshApiKey,
       });
 
+      const assetSyncStart = Date.now();
       const slackConfig = latest.channels.slack;
       await syncRestoreAssetsIfNeeded(sandbox, {
         origin,
@@ -2358,9 +2360,11 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
         slackCredentials: slackConfig ? { botToken: slackConfig.botToken, signingSecret: slackConfig.signingSecret } : undefined,
         whatsappConfig: toWhatsAppGatewayConfig(latest.channels.whatsapp),
       });
+      const assetSyncMs = Date.now() - assetSyncStart;
 
       progress.setPhase("starting-gateway", "Running fast restore script");
       const READINESS_TIMEOUT_SECONDS = 30;
+      const fastRestoreStart = Date.now();
       const restoreResult = await sandbox.runCommand({
         cmd: "bash",
         args: [
@@ -2369,6 +2373,7 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
         ],
         env: restoreEnv,
       });
+      const startupScriptMs = Date.now() - fastRestoreStart;
 
       if (restoreResult.exitCode !== 0) {
         const output = await restoreResult.output("both");
@@ -2379,7 +2384,16 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
         });
       }
 
+      // Parse readiness timing from fast-restore script stdout.
+      let localReadyMs = startupScriptMs;
+      try {
+        const stdout = await restoreResult.output("stdout");
+        const parsed = JSON.parse(stdout.trim());
+        if (typeof parsed.readyMs === "number") localReadyMs = parsed.readyMs;
+      } catch { /* best effort */ }
+
       // Apply firewall policy
+      const firewallStart = Date.now();
       try {
         progress.setPhase("applying-firewall", `Applying ${latest.firewall.mode} firewall policy`);
         await applyFirewallPolicyToSandbox(sandbox, latest);
@@ -2394,14 +2408,41 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
           throw new Error(`Firewall sync failed during persistent resume: ${firewallError}`);
         }
       }
+      const firewallSyncMs = Date.now() - firewallStart;
 
-      // Record token metadata from the credential used during resume.
+      const sandboxResumeMs = Date.now() - resumeStart - assetSyncMs - startupScriptMs - firewallSyncMs;
+      const totalMs = Date.now() - resumeStart;
+
+      const metrics: RestorePhaseMetrics = {
+        sandboxCreateMs: sandboxResumeMs,
+        tokenWriteMs: 0,
+        assetSyncMs,
+        startupScriptMs,
+        forcePairMs: 0,
+        firewallSyncMs,
+        localReadyMs,
+        publicReadyMs: 0,
+        totalMs,
+        skippedStaticAssetSync: false,
+        assetSha256: null,
+        vcpus,
+        recordedAt: Date.now(),
+        skippedPublicReady: true,
+      };
+
+      // Record token metadata and restore metrics.
       await mutateMeta((meta) => {
         meta.status = "running";
         meta.sandboxId = sandbox.sandboxId;
         meta.portUrls = resolvePortUrls(sandbox);
         meta.lastAccessedAt = Date.now();
         meta.lastError = null;
+        meta.lastRestoreMetrics = metrics;
+        if (!meta.restoreHistory) meta.restoreHistory = [];
+        meta.restoreHistory = [
+          metrics,
+          ...meta.restoreHistory.slice(0, 19),
+        ];
         if (credential) {
           meta.lastTokenRefreshAt = Date.now();
           meta.lastTokenSource = credential.source;
@@ -2412,6 +2453,11 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
 
       logInfo("sandbox.create.persistent_resume.complete", ctx({
         sandboxId: sandbox.sandboxId,
+        totalMs,
+        assetSyncMs,
+        startupScriptMs,
+        firewallSyncMs,
+        localReadyMs,
       }));
       return getInitializedMeta();
     }
