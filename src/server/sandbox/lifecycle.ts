@@ -2279,15 +2279,40 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
 
     const vcpus = getSandboxVcpus();
     const sleepAfterMs = getSandboxSleepAfterMs();
-    const sandbox = await getSandboxController().create({
-      name: current.id,          // Use instance ID as stable persistent name
+    // Sandbox names must be lowercase alphanumeric + hyphens.
+    // Derive a stable name from the instance ID.
+    const sandboxName = `oc-${current.id.replace(/[^a-z0-9-]/gi, "-").toLowerCase()}`;
+    logInfo("sandbox.create.params", ctx({
+      sandboxName,
+      instanceId: current.id,
       persistent: true,
-      ports: SANDBOX_PORTS,
-      timeout: sleepAfterMs,
-      resources: { vcpus },
-      ...(await buildRuntimeEnv()),
-    });
-    progress.appendLine("system", `Sandbox created: ${sandbox.sandboxId}`);
+      vcpus,
+      sleepAfterMs,
+    }));
+    progress.appendLine("system", `Creating persistent sandbox: ${sandboxName}`);
+    let sandbox;
+    try {
+      sandbox = await getSandboxController().create({
+        name: sandboxName,
+        persistent: true,
+        ports: SANDBOX_PORTS,
+        timeout: sleepAfterMs,
+        resources: { vcpus },
+        ...(await buildRuntimeEnv()),
+      });
+    } catch (createErr) {
+      const apiJson = (createErr as { json?: unknown }).json;
+      const apiText = (createErr as { text?: unknown }).text;
+      logError("sandbox.create.failed", ctx({
+        sandboxName,
+        error: createErr instanceof Error ? createErr.message : String(createErr),
+        ...(apiJson ? { apiJson } : {}),
+        ...(apiText ? { apiText } : {}),
+      }));
+      progress.appendLine("system", `Create failed: ${createErr instanceof Error ? createErr.message : String(createErr)}`);
+      throw createErr;
+    }
+    progress.appendLine("system", `Sandbox ready: ${sandbox.sandboxId} (name=${sandboxName})`);
 
     logInfo("sandbox.status_transition", ctx({ from: "creating", to: "setup", sandboxId: sandbox.sandboxId, vcpus, sleepAfterMs }));
     await mutateMeta((meta) => {
