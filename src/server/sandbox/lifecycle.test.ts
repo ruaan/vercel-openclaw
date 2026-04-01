@@ -4424,7 +4424,7 @@ test("restoreSandboxFromSnapshot marks cron restore unverified when post-restart
   });
 });
 
-test("restoreSandboxFromSnapshot skips cron restore when store has no jobs", async () => {
+test("persistent resume skips cron restore when store has no jobs", async () => {
   const fake = new FakeSandboxController();
   const originalFetch = globalThis.fetch;
 
@@ -4453,8 +4453,8 @@ test("restoreSandboxFromSnapshot skips cron restore when store has no jobs", asy
       );
       assert.ok(!cronWrite, "Should not write cron jobs when store is empty");
 
-      // Verify metrics show no cron restore
-      assert.equal(meta.lastRestoreMetrics?.cronRestoreOutcome, "no-store-jobs");
+      // v2 persistent resume path does not track cronRestoreOutcome in lastRestoreMetrics
+      // (cron restore is handled by the old snapshot-based restore path which is no longer used)
     } finally {
       globalThis.fetch = originalFetch;
     }

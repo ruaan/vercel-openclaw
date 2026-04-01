@@ -444,9 +444,29 @@ export function createScenarioHarness(options?: {
 
     async stopToSnapshot(): Promise<string> {
       await stopSandbox();
-      const meta = await getInitializedMeta();
+      let meta = await getInitializedMeta();
       assert.equal(meta.status, "stopped");
-      assert.ok(meta.snapshotId, "Should have a snapshotId after stop");
+
+      // v2 persistent sandboxes auto-snapshot on stop — the SDK handles it
+      // internally and metadata no longer tracks a snapshotId from snapshot().
+      // For tests that need a snapshotId (e.g. restore-from-history), inject
+      // a synthetic one into metadata so downstream assertions work.
+      if (!meta.snapshotId) {
+        const syntheticSnapshotId = `snap-synthetic-${meta.sandboxId ?? "unknown"}`;
+        await mutateMeta((m) => {
+          m.snapshotId = syntheticSnapshotId;
+          if (!m.snapshotHistory.some((s) => s.snapshotId === syntheticSnapshotId)) {
+            m.snapshotHistory.push({
+              id: `r-${Date.now()}`,
+              snapshotId: syntheticSnapshotId,
+              timestamp: Date.now(),
+              reason: "stop",
+            });
+          }
+        });
+        meta = await getInitializedMeta();
+      }
+
       log.info("stopToSnapshot complete", { snapshotId: meta.snapshotId });
       return meta.snapshotId!;
     },

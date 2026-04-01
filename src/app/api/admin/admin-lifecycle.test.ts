@@ -250,7 +250,7 @@ test("POST /api/admin/ensure: schedules create for uninitialized sandbox and ret
   });
 });
 
-test("POST /api/admin/ensure: schedules restore when stopped with snapshot", async () => {
+test("POST /api/admin/ensure: schedules create when stopped with snapshot (v2 persistent)", async () => {
   await withTestEnv(async () => {
     installFakeController();
     await mutateMeta((m) => {
@@ -264,7 +264,8 @@ test("POST /api/admin/ensure: schedules restore when stopped with snapshot", asy
     assert.equal(result.status, 202);
     const body = result.json as { state: string; status: string };
     assert.equal(body.state, "waiting");
-    assert.equal(body.status, "restoring");
+    // v2 persistent sandboxes always use "creating" — SDK auto-resumes
+    assert.equal(body.status, "creating");
   });
 });
 
@@ -282,7 +283,7 @@ test("POST /api/admin/ensure: without CSRF headers returns 403", async () => {
 
 test("POST /api/admin/stop: stops running sandbox and returns status", async () => {
   await withTestEnv(async () => {
-    const ctrl = installFakeController();
+    installFakeController();
     await mutateMeta((m) => {
       m.status = "running";
       m.sandboxId = "sbx-to-stop";
@@ -292,10 +293,15 @@ test("POST /api/admin/stop: stops running sandbox and returns status", async () 
     const result = await callRoute(stopRoute.POST!, authPost("/api/admin/stop"));
 
     assert.equal(result.status, 200);
-    const body = result.json as { status: string; snapshotId: string };
+    const body = result.json as { status: string; snapshotId: string | null };
     assert.equal(body.status, "stopped");
-    assert.ok(body.snapshotId, "Should return snapshotId");
-    assert.ok(ctrl.snapshotCalls > 0, "Should have called snapshot");
+    // v2 persistent sandboxes auto-snapshot on stop — no manual snapshot() call
+    // snapshotId may be null since metadata no longer tracks it from snapshot()
+
+    // sandboxId should be preserved (persistent sandbox identity persists)
+    const meta = await getInitializedMeta();
+    assert.equal(meta.sandboxId, "sbx-to-stop", "sandboxId should be preserved after stop");
+    assert.equal(meta.status, "stopped");
   });
 });
 
@@ -317,11 +323,13 @@ test("POST /api/admin/stop: idempotent on already-stopped sandbox with snapshot"
   });
 });
 
-test("POST /api/admin/stop: returns 409 when no sandbox running and no snapshot", async () => {
+test("POST /api/admin/stop: returns 409 when no sandbox exists (uninitialized)", async () => {
   await withTestEnv(async () => {
     installFakeController();
     await mutateMeta((m) => {
-      m.status = "stopped";
+      // v2: stopSandbox() returns idempotently when status=stopped.
+      // To hit the 409, status must not be "stopped" AND sandboxId must be null.
+      m.status = "uninitialized";
       m.sandboxId = null;
       m.snapshotId = null;
     });
@@ -331,6 +339,23 @@ test("POST /api/admin/stop: returns 409 when no sandbox running and no snapshot"
     assert.equal(result.status, 409);
     const body = result.json as { error: string };
     assert.equal(body.error, "SANDBOX_NOT_RUNNING");
+  });
+});
+
+test("POST /api/admin/stop: idempotent when already stopped with no snapshot", async () => {
+  await withTestEnv(async () => {
+    installFakeController();
+    await mutateMeta((m) => {
+      m.status = "stopped";
+      m.sandboxId = null;
+      m.snapshotId = null;
+    });
+
+    // v2: stopSandbox() returns current state when status=stopped
+    const result = await callRoute(stopRoute.POST!, authPost("/api/admin/stop"));
+    assert.equal(result.status, 200);
+    const body = result.json as { status: string };
+    assert.equal(body.status, "stopped");
   });
 });
 
@@ -346,9 +371,9 @@ test("POST /api/admin/stop: without CSRF headers returns 403", async () => {
 // POST /api/admin/snapshot
 // ===========================================================================
 
-test("POST /api/admin/snapshot: triggers snapshot-and-stop flow", async () => {
+test("POST /api/admin/snapshot: triggers stop flow (v2 auto-snapshots on stop)", async () => {
   await withTestEnv(async () => {
-    const ctrl = installFakeController();
+    installFakeController();
     await mutateMeta((m) => {
       m.status = "running";
       m.sandboxId = "sbx-snap-me";
@@ -358,15 +383,15 @@ test("POST /api/admin/snapshot: triggers snapshot-and-stop flow", async () => {
     const result = await callRoute(snapshotRoute.POST!, authPost("/api/admin/snapshot"));
 
     assert.equal(result.status, 200);
-    const body = result.json as { status: string; snapshotId: string };
+    const body = result.json as { status: string; snapshotId: string | null };
     assert.equal(body.status, "stopped");
-    assert.ok(body.snapshotId, "Should return snapshotId");
-    assert.ok(ctrl.snapshotCalls > 0, "Should have called snapshot on sandbox");
+    // v2: snapshot() is not called manually — SDK auto-snapshots on stop
 
     // Verify metadata was updated
     const meta = await getInitializedMeta();
     assert.equal(meta.status, "stopped");
-    assert.equal(meta.sandboxId, null);
+    // v2: sandboxId is preserved (persistent sandbox identity persists)
+    assert.equal(meta.sandboxId, "sbx-snap-me");
   });
 });
 

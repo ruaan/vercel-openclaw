@@ -174,9 +174,22 @@ function wrapSandbox(sandbox: Sandbox): SandboxHandle {
 const realController: SandboxController = {
   async create(params) {
     const { Sandbox: SandboxClass } = await import("@vercel/sandbox");
-    // CreateParams is a simplified subset — cast to satisfy the SDK's union type.
-    const sandbox = await SandboxClass.create(params as Parameters<typeof SandboxClass.create>[0]);
-    return wrapSandbox(sandbox);
+    try {
+      // CreateParams is a simplified subset — cast to satisfy the SDK's union type.
+      const sandbox = await SandboxClass.create(params as Parameters<typeof SandboxClass.create>[0]);
+      return wrapSandbox(sandbox);
+    } catch (err) {
+      // v2 beta: 409 means a persistent sandbox with this name already exists.
+      // Fall back to get() which auto-resumes stopped persistent sandboxes.
+      const is409 =
+        (err as { response?: { status?: number } }).response?.status === 409 ||
+        (err as { json?: { error?: { code?: string } } }).json?.error?.code === "conflict";
+      if (is409 && params.name) {
+        const sandbox = await SandboxClass.get({ name: params.name });
+        return wrapSandbox(sandbox);
+      }
+      throw err;
+    }
   },
   async get(params) {
     const { Sandbox: SandboxClass } = await import("@vercel/sandbox");

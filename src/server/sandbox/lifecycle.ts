@@ -27,6 +27,7 @@ import {
   computeGatewayConfigHash,
   GATEWAY_CONFIG_HASH_VERSION,
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+  OPENCLAW_BIN,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
   OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_GATEWAY_TOKEN_PATH,
@@ -592,8 +593,8 @@ export async function stopSandbox(): Promise<SingleMeta> {
   logInfo("sandbox.stop_requested");
   return withLifecycleLock(async () => {
     const meta = await getInitializedMeta();
-    if (meta.status === "stopped" && meta.snapshotId) {
-      logInfo("sandbox.already_stopped", { snapshotId: meta.snapshotId });
+    if (meta.status === "stopped") {
+      logInfo("sandbox.already_stopped", { sandboxId: meta.sandboxId });
       return meta;
     }
     if (!meta.sandboxId) {
@@ -604,34 +605,16 @@ export async function stopSandbox(): Promise<SingleMeta> {
       );
     }
 
-    logInfo("sandbox.snapshotting", { sandboxId: meta.sandboxId });
+    logInfo("sandbox.stopping", { sandboxId: meta.sandboxId });
     try {
       const sandbox = await getSandboxController().get({ sandboxId: meta.sandboxId });
       await cleanupBeforeSnapshot(sandbox, meta.firewall.mode);
       const cronWakeRead = await readCronNextWakeFromSandbox(sandbox);
-      const snapshot = await sandbox.snapshot();
-      // Compute config hash for this snapshot.  The hash covers everything
-      // in buildGatewayConfig EXCEPT the proxy origin (which varies per
-      // restore) and the API key (passed via env, not in config).  If the
-      // hash matches at restore time, the writeFiles call is skipped.
-      const configHashInput: GatewayConfigHashInput = {
-        telegramBotToken: meta.channels.telegram?.botToken,
-        telegramWebhookSecret: meta.channels.telegram?.webhookSecret,
-        slackCredentials: meta.channels.slack
-          ? {
-            botToken: meta.channels.slack.botToken,
-            signingSecret: meta.channels.slack.signingSecret,
-          }
-          : undefined,
-        whatsappConfig: toWhatsAppGatewayConfig(meta.channels.whatsapp),
-      };
-      const configHash = computeGatewayConfigHash(configHashInput);
 
       logInfo("sandbox.status_transition", {
         from: meta.status,
         to: "stopped",
-        snapshotId: snapshot.snapshotId,
-        configHash,
+        sandboxId: meta.sandboxId,
         cronWakeRead,
       });
 
@@ -642,9 +625,9 @@ export async function stopSandbox(): Promise<SingleMeta> {
         await getStore().deleteValue(cronNextWakeKey());
       }
 
-      // Persist structured cron record as a safety net for snapshot restores.
+      // Persist structured cron record as a safety net for resumes.
       // The stop path is authoritative — if there are 0 jobs, the user
-      // intentionally deleted them.  Clear the store so a future restore
+      // intentionally deleted them.  Clear the store so a future resume
       // does not resurrect old jobs.
       const rawJobs = cronWakeRead.status !== "error" ? cronWakeRead.rawJobsJson : undefined;
       if (rawJobs) {
@@ -660,12 +643,11 @@ export async function stopSandbox(): Promise<SingleMeta> {
         logInfo("sandbox.cron_jobs_cleared", { reason: "no-jobs-on-stop" });
       }
 
-      const currentManifest = buildRestoreAssetManifest();
-      const currentAssetSha256 = meta.runtimeAssetSha256 ?? currentManifest.sha256;
+      // v2 persistent sandboxes auto-snapshot on stop — no manual snapshot() needed
+      await sandbox.stop({ blocking: true });
 
       return mutateMeta((next) => {
-        recordSnapshotMetadata(next, snapshot.snapshotId, "stop", configHash, currentAssetSha256);
-        next.sandboxId = null;
+        // Keep sandboxId — persistent sandbox persists across stop/resume
         next.portUrls = null;
         next.status = "stopped";
         next.lastAccessedAt = Date.now();
@@ -674,20 +656,19 @@ export async function stopSandbox(): Promise<SingleMeta> {
     } catch (err) {
       // The sandbox may have already been stopped by the platform (timeout
       // expiry, etc.).  The Vercel API returns 404 or 410 in this case.
-      // Mark as stopped using the existing snapshot if available so the
-      // next ensure can restore from it.
+      // With v2 persistent sandboxes, a gone sandbox means it was deleted.
+      // Mark as uninitialized so the next ensure creates a fresh one.
       const message = err instanceof Error ? err.message : String(err);
       const isGone = message.includes("404") || message.includes("410");
-      if (isGone && meta.snapshotId) {
+      if (isGone) {
         logWarn("sandbox.stop.sandbox_already_gone", {
           sandboxId: meta.sandboxId,
-          snapshotId: meta.snapshotId,
           error: message,
         });
         return mutateMeta((next) => {
           next.sandboxId = null;
           next.portUrls = null;
-          next.status = "stopped";
+          next.status = "uninitialized";
           next.lastAccessedAt = Date.now();
           next.lastError = null;
         });
@@ -2166,10 +2147,7 @@ async function scheduleLifecycleWork(options: {
     return;
   }
 
-  const nextStatus =
-    latest.snapshotId && latest.status !== "uninitialized"
-      ? "restoring"
-      : "creating";
+  const nextStatus = "creating";
 
   if (options.op) {
     logInfo("sandbox.lifecycle.action_chosen", withOperationContext(options.op, {
@@ -2198,17 +2176,7 @@ async function scheduleLifecycleWork(options: {
       },
       async () => {
         try {
-          if (nextStatus === "restoring") {
-            // Background restores skip the public readiness probe — the
-            // gateway is locally healthy and callers that need public
-            // reachability poll via waitForSandboxReady / probeGatewayReady.
-            await restoreSandboxFromSnapshot(options.origin, {
-              skipPublicReady: true,
-              op: options.op,
-            });
-          } else {
-            await createAndBootstrapSandbox(options.origin, { op: options.op });
-          }
+          await createAndBootstrapSandbox(options.origin, { op: options.op });
         } catch (error) {
           if (error instanceof LifecycleLockUnavailableError) {
             const lockCtx = options.op
@@ -2312,6 +2280,8 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
     const vcpus = getSandboxVcpus();
     const sleepAfterMs = getSandboxSleepAfterMs();
     const sandbox = await getSandboxController().create({
+      name: current.id,          // Use instance ID as stable persistent name
+      persistent: true,
       ports: SANDBOX_PORTS,
       timeout: sleepAfterMs,
       resources: { vcpus },
@@ -2327,6 +2297,87 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
       meta.lastAccessedAt = Date.now();
     });
 
+    // Check if this is a resumed persistent sandbox (already has openclaw installed)
+    const versionCheck = await sandbox.runCommand(OPENCLAW_BIN, ["--version"]);
+    const isResumed = versionCheck.exitCode === 0;
+
+    if (isResumed) {
+      // Resumed persistent sandbox — run fast restore (update config/tokens, restart gateway)
+      logInfo("sandbox.create.persistent_resume", ctx({ sandboxId: sandbox.sandboxId }));
+      progress.appendLine("system", "Resumed persistent sandbox — running fast restore");
+
+      const latest = await getInitializedMeta();
+      const freshApiKey = credential?.token;
+
+      const restoreEnv = buildRestoreRuntimeEnv({
+        gatewayToken: latest.gatewayToken,
+        apiKey: freshApiKey,
+      });
+
+      const slackConfig = latest.channels.slack;
+      await syncRestoreAssetsIfNeeded(sandbox, {
+        origin,
+        apiKey: freshApiKey,
+        telegramBotToken: latest.channels.telegram?.botToken,
+        telegramWebhookSecret: latest.channels.telegram?.webhookSecret,
+        slackCredentials: slackConfig ? { botToken: slackConfig.botToken, signingSecret: slackConfig.signingSecret } : undefined,
+        whatsappConfig: toWhatsAppGatewayConfig(latest.channels.whatsapp),
+      });
+
+      progress.setPhase("starting-gateway", "Running fast restore script");
+      const READINESS_TIMEOUT_SECONDS = 30;
+      const restoreResult = await sandbox.runCommand("bash", [
+        OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
+        String(READINESS_TIMEOUT_SECONDS),
+      ]);
+
+      if (restoreResult.exitCode !== 0) {
+        const output = await restoreResult.output("both");
+        throw new CommandFailedError({
+          command: "fast-restore-script",
+          exitCode: restoreResult.exitCode,
+          output,
+        });
+      }
+
+      // Apply firewall policy
+      try {
+        progress.setPhase("applying-firewall", `Applying ${latest.firewall.mode} firewall policy`);
+        await applyFirewallPolicyToSandbox(sandbox, latest);
+      } catch (err) {
+        const firewallError = err instanceof Error ? err.message : String(err);
+        logWarn("sandbox.create.persistent_resume.firewall_sync_failed", ctx({
+          sandboxId: sandbox.sandboxId,
+          mode: latest.firewall.mode,
+          error: firewallError,
+        }));
+        if (latest.firewall.mode === "enforcing") {
+          throw new Error(`Firewall sync failed during persistent resume: ${firewallError}`);
+        }
+      }
+
+      // Record token metadata from the credential used during resume.
+      await mutateMeta((meta) => {
+        meta.status = "running";
+        meta.sandboxId = sandbox.sandboxId;
+        meta.portUrls = resolvePortUrls(sandbox);
+        meta.lastAccessedAt = Date.now();
+        meta.lastError = null;
+        if (credential) {
+          meta.lastTokenRefreshAt = Date.now();
+          meta.lastTokenSource = credential.source;
+          meta.lastTokenExpiresAt = credential.expiresAt ?? null;
+        }
+      });
+      await progress.completeSetupProgress("Sandbox resumed");
+
+      logInfo("sandbox.create.persistent_resume.complete", ctx({
+        sandboxId: sandbox.sandboxId,
+      }));
+      return getInitializedMeta();
+    }
+
+    // Fresh sandbox — run full bootstrap
     const latest = await getInitializedMeta();
     // Reuse the already-resolved credential — no redundant second lookup.
     const apiKey = credential?.token;
