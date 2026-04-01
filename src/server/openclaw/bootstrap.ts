@@ -43,6 +43,7 @@ import {
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
   OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_GATEWAY_TOKEN_PATH,
+  OPENCLAW_LOG_FILE,
   OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
   OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
   OPENCLAW_IMAGE_GEN_SCRIPT_PATH,
@@ -467,8 +468,35 @@ export async function setupOpenClaw(
     progress?.appendLine("system", `Process check: ${psOut.split("\n").filter(l => !l.includes("grep")).join("; ").slice(0, 200)}`);
   } catch { /* best effort */ }
 
+  // Check listening ports and gateway log immediately after launch.
+  try {
+    const portCheck = await sandbox.runCommand("bash", ["-c",
+      "ss -tlnp 2>/dev/null | grep -E '3000|8787' || echo 'no listeners on 3000/8787'",
+    ]);
+    progress?.appendLine("system", `Ports: ${(await portCheck.output("stdout")).trim().slice(0, 200)}`);
+  } catch { /* best effort */ }
+
+  try {
+    const logCheck = await sandbox.runCommand("bash", ["-c",
+      `tail -20 ${OPENCLAW_LOG_FILE} 2>/dev/null || echo 'no log file'`,
+    ]);
+    const logOut = (await logCheck.output("stdout")).trim();
+    if (logOut) progress?.appendLine("system", `Gateway log: ${logOut.slice(0, 300)}`);
+  } catch { /* best effort */ }
+
   progress?.setPhase("waiting-for-gateway", "Waiting for OpenClaw to respond");
-  await waitForGatewayReady(sandbox);
+  try {
+    await waitForGatewayReady(sandbox);
+  } catch (waitErr) {
+    // Collect diagnostics before re-throwing so they appear in setup progress.
+    try {
+      const diag = await collectGatewayWaitFailureDiagnostics(sandbox);
+      for (const [k, v] of Object.entries(diag)) {
+        progress?.appendLine("system", `[diag:${k}] ${v.slice(0, 300)}`);
+      }
+    } catch { /* best effort */ }
+    throw waitErr;
+  }
 
   try {
     progress?.setPhase("pairing-device", "Pairing device");
