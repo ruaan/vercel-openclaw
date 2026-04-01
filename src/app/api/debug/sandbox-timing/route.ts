@@ -35,7 +35,7 @@ export async function POST(request: Request): Promise<Response> {
       resources: { vcpus },
     });
     timings.createMs = performance.now() - t1;
-    logs.push(`sandboxId=${sandbox.sandboxId}`);
+    logs.push(`sandboxId=${sandbox.name}`);
 
     const t2 = performance.now();
     const echoResult = await sandbox.runCommand("echo", ["hello"]);
