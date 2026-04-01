@@ -551,14 +551,18 @@ echo '{"event":"fast_restore.start_gateway"}' >&2
 # gateway status, etc.).
 setsid ${OPENCLAW_BIN} gateway --port ${OPENCLAW_PORT} --bind loopback >> ${OPENCLAW_LOG_FILE} 2>&1 &
 echo '{"event":"fast_restore.readiness_loop"}' >&2
-case "\${1:-}" in ''|*[!0-9]*) _ready_timeout=30 ;; *) _ready_timeout=\$1 ;; esac
+case "\${1:-}" in ''|*[!0-9]*) _ready_timeout=60 ;; *) _ready_timeout=\$1 ;; esac
 _ready_start=\$(date +%s%N 2>/dev/null || echo 0)
 _attempts=0
 _ready=0
 _deadline=\$(( \$(date +%s) + _ready_timeout ))
 while [ "\$(date +%s)" -lt "\$_deadline" ]; do
   _attempts=\$((_attempts + 1))
-  _http_code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 http://localhost:${OPENCLAW_PORT}/ 2>/dev/null || true)
+  _http_code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://localhost:${OPENCLAW_PORT}/ 2>/dev/null || true)
+  # Log every 20th attempt for visibility.
+  if [ "\$((_attempts % 20))" = "0" ] && [ "\$_attempts" -gt 0 ]; then
+    echo "{\"event\":\"fast_restore.probe\",\"attempt\":\$_attempts,\"http_code\":\"\$_http_code\"}" >&2
+  fi
   if [ "\$_http_code" -gt 0 ] 2>/dev/null && [ "\$_http_code" -lt 600 ] 2>/dev/null; then
     _ready=1
     break
