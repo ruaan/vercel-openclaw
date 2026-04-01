@@ -8,8 +8,6 @@ import test from "node:test";
 import {
   buildGatewayConfig,
   buildGatewayRestartScript,
-  buildGatewayLaunchCommand,
-  buildGatewayLaunchEnv,
   computeGatewayConfigHash,
   toWhatsAppGatewayConfig,
   GATEWAY_CONFIG_HASH_VERSION,
@@ -35,7 +33,6 @@ import {
   OPENCLAW_TELEGRAM_WEBHOOK_HOST,
   OPENCLAW_TELEGRAM_INTERNAL_WEBHOOK_PATH,
   TELEGRAM_PUBLIC_WEBHOOK_PATH,
-  OPENCLAW_BIN,
   OPENCLAW_CONFIG_PATH,
 } from "@/server/openclaw/config";
 
@@ -266,19 +263,19 @@ test("buildGatewayRestartScript does not install shell hooks", () => {
   assert.ok(!script.includes(".bashrc"), "restart script must not modify .bashrc");
 });
 
-test("buildGatewayRestartScript kills existing gateway and does not launch via shell", () => {
+test("buildGatewayRestartScript kills existing gateway and relaunches it", () => {
   const script = buildGatewayRestartScript();
   assert.ok(script.includes('pkill -f "openclaw.gateway"'), "restart script should kill existing gateway");
-  assert.ok(!script.includes("setsid"), "restart script should not use setsid");
-  assert.ok(!script.includes("openclaw gateway"), "restart script should not launch gateway via shell");
+  assert.ok(script.includes("setsid"), "restart script should relaunch via setsid");
+  assert.ok(script.includes("gateway --port 3000 --bind loopback"), "restart script should launch the gateway");
 });
 
-test("buildStartupScript does not launch gateway via shell", () => {
+test("buildStartupScript launches gateway via shell", () => {
   const startup = buildStartupScript();
 
-  assert.ok(!startup.includes("setsid"), "startup script should not use setsid");
-  assert.ok(!startup.includes("openclaw gateway"), "startup script should not launch gateway");
-  assert.ok(!startup.includes("&"), "startup script should not background anything");
+  assert.ok(startup.includes("setsid"), "startup script should use setsid");
+  assert.ok(startup.includes("gateway --port 3000 --bind loopback"), "startup script should launch gateway");
+  assert.ok(startup.includes("&"), "startup script should background the gateway");
 
   // Still clears pairing state and sets up learning hooks
   assert.ok(startup.includes("paired.json"), "startup should clear paired.json");
@@ -291,36 +288,6 @@ test("buildStartupScript clears pairing state while restart does not", () => {
 
   assert.ok(startup.includes("paired.json"), "startup should clear paired.json");
   assert.ok(!restart.includes("paired.json"), "restart must not clear paired.json");
-});
-
-// ---------------------------------------------------------------------------
-// buildGatewayLaunchCommand / buildGatewayLaunchEnv
-// ---------------------------------------------------------------------------
-
-test("buildGatewayLaunchCommand returns the correct command and args", () => {
-  const { cmd, args } = buildGatewayLaunchCommand();
-  assert.equal(cmd, OPENCLAW_BIN);
-  assert.deepEqual(args, ["gateway", "--port", "3000", "--bind", "loopback"]);
-});
-
-test("buildGatewayLaunchEnv returns correct env without apiKey", () => {
-  const env = buildGatewayLaunchEnv({ gatewayToken: "test-token" });
-  assert.equal(env.OPENCLAW_CONFIG_PATH, OPENCLAW_CONFIG_PATH);
-  assert.equal(env.OPENCLAW_GATEWAY_PORT, "3000");
-  assert.equal(env.OPENCLAW_GATEWAY_TOKEN, "test-token");
-  assert.equal(env.AI_GATEWAY_API_KEY, undefined);
-  assert.equal(env.OPENAI_API_KEY, undefined);
-  assert.equal(env.OPENAI_BASE_URL, undefined);
-});
-
-test("buildGatewayLaunchEnv returns correct env with apiKey", () => {
-  const env = buildGatewayLaunchEnv({ gatewayToken: "test-token", apiKey: "sk-test" });
-  assert.equal(env.OPENCLAW_CONFIG_PATH, OPENCLAW_CONFIG_PATH);
-  assert.equal(env.OPENCLAW_GATEWAY_PORT, "3000");
-  assert.equal(env.OPENCLAW_GATEWAY_TOKEN, "test-token");
-  assert.equal(env.AI_GATEWAY_API_KEY, "sk-test");
-  assert.equal(env.OPENAI_API_KEY, "sk-test");
-  assert.equal(env.OPENAI_BASE_URL, "https://ai-gateway.vercel.sh/v1");
 });
 
 test("computeGatewayConfigHash returns a stable sha256 hex digest", () => {

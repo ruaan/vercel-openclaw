@@ -6,8 +6,6 @@ import {
   buildFastRestoreScript,
   buildForcePairScript,
   buildGatewayConfig,
-  buildGatewayLaunchCommand,
-  buildGatewayLaunchEnv,
   buildGatewayRestartScript,
   buildImageGenScript,
   buildImageGenSkill,
@@ -141,7 +139,7 @@ export async function setupOpenClaw(
     whatsappConfig?: WhatsAppGatewayConfig;
     progress?: SetupProgressWriter;
   },
-): Promise<{ startupScript: string; openclawVersion: string | null; runtime: BootstrapRuntime; gatewayCmdId: string }> {
+): Promise<{ startupScript: string; openclawVersion: string | null; runtime: BootstrapRuntime }> {
   const startupScript = buildStartupScript();
   const progress = options.progress;
 
@@ -451,23 +449,6 @@ export async function setupOpenClaw(
   });
   await assertCommandSuccess("bash startup-script", startupResult);
 
-  // Launch gateway as a detached process via the SDK instead of shell background.
-  const launchCmd = buildGatewayLaunchCommand();
-  const launchEnv = buildGatewayLaunchEnv({
-    gatewayToken: options.gatewayToken,
-    apiKey: options.apiKey,
-  });
-  const { cmdId: gatewayCmdId } = await sandbox.runDetachedCommand({
-    cmd: launchCmd.cmd,
-    args: launchCmd.args,
-    env: launchEnv,
-  });
-
-  logInfo("openclaw.setup.gateway_detached", {
-    sandboxId: sandbox.sandboxId,
-    gatewayCmdId,
-  });
-
   progress?.setPhase("waiting-for-gateway", "Waiting for OpenClaw to respond");
   await waitForGatewayReady(sandbox);
 
@@ -487,8 +468,8 @@ export async function setupOpenClaw(
     progress?.appendLine("system", "Pairing step skipped");
   }
 
-  logInfo("openclaw.setup.ready", { sandboxId: sandbox.sandboxId, runtime, gatewayCmdId });
-  return { startupScript, openclawVersion, runtime, gatewayCmdId };
+  logInfo("openclaw.setup.ready", { sandboxId: sandbox.sandboxId, runtime });
+  return { startupScript, openclawVersion, runtime };
 }
 
 const GATEWAY_DIAG_MAX_CHARS = 7000;

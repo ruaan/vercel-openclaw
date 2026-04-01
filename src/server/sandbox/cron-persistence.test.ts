@@ -179,9 +179,11 @@ test("cron-persistence: jobs survive a full stop → restore cycle", async (t) =
       assert.equal(restoredJobs.jobs[0].id, "avatar-quote");
       assert.equal(restoredJobs.jobs[1].id, "daily-standup");
 
-      // Verify the gateway was restarted via detached command (so cron module reloads)
+      // Verify the gateway was restarted via the on-disk restart script (so cron module reloads)
       assert.ok(
-        newHandle.detachedCommands.length > 0,
+        newHandle.commands.some(
+          (c) => c.cmd === "bash" && c.args?.[0] === OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
+        ),
         "Gateway should be restarted to load restored jobs",
       );
 

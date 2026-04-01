@@ -92,9 +92,9 @@ export interface SandboxController {
 
 function wrapSandbox(sandbox: Sandbox): SandboxHandle {
   return {
-    sandboxId: sandbox.sandboxId,
+    sandboxId: sandbox.name,
     get timeout() {
-      return sandbox.timeout;
+      return sandbox.timeout ?? 0;
     },
     get status() {
       return sandbox.status;
@@ -148,7 +148,8 @@ function wrapSandbox(sandbox: Sandbox): SandboxHandle {
       await sandbox.extendTimeout(duration);
     },
     async updateNetworkPolicy(policy) {
-      return sandbox.updateNetworkPolicy(policy);
+      await sandbox.update({ networkPolicy: policy });
+      return policy;
     },
     async runDetachedCommand(options) {
       const cmd = await sandbox.runCommand({
@@ -179,7 +180,7 @@ const realController: SandboxController = {
   },
   async get(params) {
     const { Sandbox: SandboxClass } = await import("@vercel/sandbox");
-    const sandbox = await SandboxClass.get(params);
+    const sandbox = await SandboxClass.get({ name: params.sandboxId });
     return wrapSandbox(sandbox);
   },
 };

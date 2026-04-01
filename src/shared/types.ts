@@ -395,8 +395,6 @@ export type SingleMeta = {
   lifecycleAttemptId?: string | null;
   /** Persistent state for the restore oracle autopilot loop. */
   restoreOracle: RestoreOracleState;
-  /** Command ID of the detached gateway process, or null. */
-  gatewayCmdId?: string | null;
 };
 
 export const CURRENT_SCHEMA_VERSION = 3;
@@ -456,7 +454,6 @@ export function createDefaultMeta(
     lastRestoreMetrics: null,
     restoreHistory: [],
     lifecycleAttemptId: null,
-    gatewayCmdId: null,
     restoreOracle: {
       status: "idle",
       pendingReason: null,
@@ -661,10 +658,6 @@ export function ensureMetaShape(
     lifecycleAttemptId:
       typeof (raw as Record<string, unknown>).lifecycleAttemptId === "string"
         ? (raw as Record<string, unknown>).lifecycleAttemptId as string
-        : null,
-    gatewayCmdId:
-      typeof (raw as Record<string, unknown>).gatewayCmdId === "string"
-        ? (raw as Record<string, unknown>).gatewayCmdId as string
         : null,
     restoreOracle: ensureRestoreOracleState(
       (raw as Record<string, unknown>).restoreOracle,

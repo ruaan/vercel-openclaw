@@ -306,7 +306,7 @@ test("setupOpenClaw includes agents config even when apiKey is not provided", as
 // setupOpenClaw — returns startupScript
 // ---------------------------------------------------------------------------
 
-test("setupOpenClaw returns startupScript", async () => {
+test("setupOpenClaw returns startupScript that bootstraps the gateway in shell", async () => {
   const h = createScenarioHarness();
   try {
     const handle = await createHandle(h);
@@ -318,37 +318,9 @@ test("setupOpenClaw returns startupScript", async () => {
 
     assert.ok(result.startupScript, "startupScript should be non-empty");
     assert.ok(
-      !result.startupScript.includes("openclaw gateway"),
-      "startup script should not launch the gateway directly",
+      result.startupScript.includes("openclaw") && result.startupScript.includes("gateway"),
+      "startup script should launch the gateway via setsid",
     );
-  } finally {
-    h.teardown();
-  }
-});
-
-test("setupOpenClaw launches gateway as a detached command and returns its command id", async () => {
-  const h = createScenarioHarness();
-  try {
-    const handle = await createHandle(h);
-
-    const result = await setupOpenClaw(handle, {
-      gatewayToken: "tok-detached",
-      apiKey: "ak-detached",
-      proxyOrigin: "https://proxy.test",
-    });
-
-    assert.equal(handle.detachedCommands.length, 1, "should launch exactly one detached command");
-    assert.equal(handle.detachedCommands[0]?.cmd, OPENCLAW_BIN);
-    assert.deepEqual(handle.detachedCommands[0]?.args, [
-      "gateway",
-      "--port",
-      "3000",
-      "--bind",
-      "loopback",
-    ]);
-    assert.equal(handle.detachedCommands[0]?.env?.OPENCLAW_GATEWAY_TOKEN, "tok-detached");
-    assert.equal(handle.detachedCommands[0]?.env?.AI_GATEWAY_API_KEY, "ak-detached");
-    assert.equal(result.gatewayCmdId, handle.detachedCommands[0]?.cmdId);
   } finally {
     h.teardown();
   }

@@ -24,12 +24,11 @@ import { applyFirewallPolicyToSandbox, toNetworkPolicy } from "@/server/firewall
 import { logError, logInfo, logWarn } from "@/server/log";
 import { setupOpenClaw, CommandFailedError, waitForGatewayReady } from "@/server/openclaw/bootstrap";
 import {
-  buildGatewayLaunchCommand,
-  buildGatewayLaunchEnv,
   computeGatewayConfigHash,
   GATEWAY_CONFIG_HASH_VERSION,
   OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
+  OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
   OPENCLAW_GATEWAY_TOKEN_PATH,
   OPENCLAW_LOG_FILE,
   OPENCLAW_STATE_DIR,
@@ -158,50 +157,24 @@ const TOKEN_REFRESH_LOCK_WAIT_MS = 5_000;
 const TOKEN_REFRESH_LOCK_POLL_MS = 500;
 
 // ---------------------------------------------------------------------------
-// Detached gateway restart helper
+// Gateway restart helper
 // ---------------------------------------------------------------------------
 
 /**
- * Kill the running gateway (via cmdId or fallback pkill) and launch a new
- * detached gateway process.  Persists the new cmdId in metadata.
+ * Kill the running gateway and launch a new one via the on-disk restart script.
+ * The script reads tokens from disk and uses setsid to background the gateway.
  */
 async function restartGateway(
   sandbox: SandboxHandle,
-  options: { gatewayToken: string; apiKey?: string },
-): Promise<string> {
-  const meta = await getInitializedMeta();
-  let needsPkillFallback = !meta.gatewayCmdId;
-  if (meta.gatewayCmdId) {
-    try {
-      const cmd = await sandbox.getCommand(meta.gatewayCmdId);
-      await cmd.kill("SIGTERM");
-      await new Promise((r) => setTimeout(r, 500));
-    } catch {
-      // Stale command handles can happen after restores or process exits.
-      // Fall back to a best-effort pkill so we don't leave a duplicate gateway behind.
-      needsPkillFallback = true;
-    }
+): Promise<void> {
+  const result = await sandbox.runCommand("bash", [OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH]);
+  if (result.exitCode !== 0) {
+    throw new CommandFailedError({
+      command: "bash restart-gateway",
+      exitCode: result.exitCode,
+      output: await result.output("both"),
+    });
   }
-  if (needsPkillFallback) {
-    try {
-      await sandbox.runCommand("bash", ["-c", 'pkill -f "openclaw.gateway" || true']);
-    } catch {
-      /* best effort */
-    }
-  }
-
-  const launch = buildGatewayLaunchCommand();
-  const env = buildGatewayLaunchEnv(options);
-  const { cmdId } = await sandbox.runDetachedCommand({
-    cmd: launch.cmd,
-    args: launch.args,
-    env,
-  });
-
-  await mutateMeta((m) => {
-    m.gatewayCmdId = cmdId;
-  });
-  return cmdId;
 }
 
 export type BackgroundScheduler = (callback: () => Promise<void> | void) => void;
@@ -826,10 +799,7 @@ export async function syncGatewayConfigToSandbox(): Promise<{ synced: boolean; r
     // Without this, hot-reload restarts the channel provider but does not
     // wire up new routes like /slack/events.
     try {
-      await restartGateway(sandbox, {
-        gatewayToken: meta.gatewayToken,
-        apiKey,
-      });
+      await restartGateway(sandbox);
     } catch (restartErr) {
       logWarn("sandbox.config_sync_restart_failed", {
         sandboxId,
@@ -982,10 +952,7 @@ export async function ensureRunningSandboxDynamicConfigFresh(input: {
 
   // Restart the gateway so it picks up the new config.
   try {
-    await restartGateway(sandbox, {
-      gatewayToken: meta.gatewayToken,
-      apiKey,
-    });
+    await restartGateway(sandbox);
     logInfo("sandbox.config_reconcile.checkpoint_after_restart", { sandboxId });
   } catch (error) {
     logWarn("sandbox.config_reconcile.restart_failed", {
@@ -1978,12 +1945,9 @@ async function refreshAiGatewayToken(sandbox: SandboxHandle, sandboxId: string):
 
   logInfo("sandbox.token_refresh.token_written", { sandboxId });
 
-  // Restart gateway via detached command API with the fresh token.
+  // Restart gateway via the on-disk script so it reloads the fresh token.
   const meta = await getInitializedMeta();
-  await restartGateway(sandbox, {
-    gatewayToken: meta.gatewayToken,
-    apiKey: freshToken,
-  });
+  await restartGateway(sandbox);
 
   logInfo("sandbox.token_refresh.gateway_restarted", { sandboxId });
 
@@ -2385,7 +2349,6 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
       meta.lastAccessedAt = Date.now();
       meta.startupScript = setupResult.startupScript;
       meta.openclawVersion = setupResult.openclawVersion;
-      meta.gatewayCmdId = setupResult.gatewayCmdId;
       meta.lastError = null;
       // Record token metadata from the credential used during boot.
       if (credential) {
@@ -2937,10 +2900,7 @@ async function restoreSandboxFromSnapshot(
             content: Buffer.from(storedRecord.jobsJson),
           }]);
           // Restart gateway so cron module re-reads the restored jobs.
-          await restartGateway(sandbox, {
-            gatewayToken: latest.gatewayToken,
-            apiKey: freshApiKey,
-          });
+          await restartGateway(sandbox);
           // Wait for the restarted gateway to become ready.
           await pollUntil({
             label: "cron-restore-gateway-ready",
