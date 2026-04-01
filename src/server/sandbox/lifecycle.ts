@@ -2312,9 +2312,9 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
       progress.appendLine("system", `Create failed: ${createErr instanceof Error ? createErr.message : String(createErr)}`);
       throw createErr;
     }
-    progress.appendLine("system", `Sandbox ready: ${sandbox.sandboxId} (name=${sandboxName})`);
+    progress.appendLine("system", `Sandbox ready: ${sandbox.sandboxId} (name=${sandboxName}) status=${sandbox.status} timeout=${sandbox.timeout}`);
 
-    logInfo("sandbox.status_transition", ctx({ from: "creating", to: "setup", sandboxId: sandbox.sandboxId, vcpus, sleepAfterMs }));
+    logInfo("sandbox.status_transition", ctx({ from: "creating", to: "setup", sandboxId: sandbox.sandboxId, sandboxStatus: sandbox.status, vcpus, sleepAfterMs }));
     await mutateMeta((meta) => {
       meta.status = "setup";
       meta.sandboxId = sandbox.sandboxId;
@@ -2323,7 +2323,15 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
     });
 
     // Check if this is a resumed persistent sandbox (already has openclaw installed)
-    const versionCheck = await sandbox.runCommand(OPENCLAW_BIN, ["--version"]);
+    progress.appendLine("system", "Checking if sandbox has openclaw installed...");
+    let versionCheck;
+    try {
+      versionCheck = await sandbox.runCommand(OPENCLAW_BIN, ["--version"]);
+    } catch (verErr) {
+      progress.appendLine("system", `Version check threw: ${verErr instanceof Error ? verErr.message : String(verErr)}`);
+      // Treat as fresh sandbox
+      versionCheck = { exitCode: 1, output: async () => "" };
+    }
     const isResumed = versionCheck.exitCode === 0;
 
     if (isResumed) {
