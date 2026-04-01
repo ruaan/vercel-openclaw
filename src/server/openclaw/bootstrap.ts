@@ -618,42 +618,79 @@ export async function waitForGatewayReady(
       } catch {
         // Some test doubles only implement a single output stream.
       }
+      const hasMarker = body.includes("openclaw-app");
       lastProbe = {
+        attempt: attempt + 1,
         exitCode: result.exitCode,
         httpStatus,
         bodyBytes: body.length,
-        bodyHead: body.slice(0, 500),
-        stderrHead: stderr.slice(0, 400),
-        hasOpenclawMarker: body.includes("openclaw-app"),
+        bodyHead: body.slice(0, 300),
+        stderrHead: stderr.slice(0, 200),
+        hasOpenclawMarker: hasMarker,
       };
+
+      // Log every single probe attempt so we can trace exactly what happens.
+      logInfo("openclaw.gateway_probe", {
+        sandboxId: sandbox.sandboxId,
+        attempt: attempt + 1,
+        httpStatus,
+        exitCode: result.exitCode,
+        bodyBytes: body.length,
+        hasMarker,
+        bodyHead: body.slice(0, 200),
+      });
+
       // Accept any HTTP response from the gateway — the openclaw-app marker
       // is preferred, but a plain HTTP response (even 500) means the gateway
       // is running.  Plugin init errors (e.g. missing @slack/web-api) cause
       // 500 without the marker but the gateway is functional.
-      if (body.includes("openclaw-app") || (httpStatus > 0 && httpStatus < 600)) {
+      if (hasMarker || (httpStatus > 0 && httpStatus < 600)) {
         logInfo("openclaw.gateway_wait_ok", {
           sandboxId: sandbox.sandboxId,
           attempts: attempt + 1,
           httpStatus,
-          hasMarker: body.includes("openclaw-app"),
+          hasMarker,
         });
         return;
       }
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
       lastProbe = {
+        attempt: attempt + 1,
         probeThrew: true,
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg.slice(0, 300),
       };
+      logInfo("openclaw.gateway_probe", {
+        sandboxId: sandbox.sandboxId,
+        attempt: attempt + 1,
+        threw: true,
+        error: errMsg.slice(0, 200),
+      });
     }
 
     const n = attempt + 1;
-    if (n % 30 === 0) {
+    // Snapshot ports+processes every 10 probes for deeper visibility.
+    if (n % 10 === 0) {
       logWarn("openclaw.gateway_wait_pending", {
         sandboxId: sandbox.sandboxId,
         attempt: n,
         maxAttempts,
         lastProbe,
       });
+      try {
+        const snap = await sandbox.runCommand("bash", [
+          "-c",
+          'echo "PORTS:"; ss -tlnp 2>/dev/null | grep -E "3000|8787" || echo "none"; echo "PS:"; ps aux 2>/dev/null | grep -E "[o]penclaw|[n]ode" | head -5 || true',
+        ]);
+        const snapOut = (await snap.output("stdout")).trim();
+        logInfo("openclaw.gateway_snapshot", {
+          sandboxId: sandbox.sandboxId,
+          attempt: n,
+          snapshot: snapOut.slice(0, 500),
+        });
+      } catch {
+        /* best effort */
+      }
     }
 
     if (attempt < maxAttempts - 1) {
