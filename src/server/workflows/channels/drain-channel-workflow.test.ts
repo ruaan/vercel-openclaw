@@ -463,3 +463,84 @@ test("processChannelStep sets webhookToWorkflowMs to null when receivedAtMs is n
   assert.equal(data.webhookToWorkflowMs, null);
   assert.equal(data.endToEndMs, null);
 });
+
+test("processChannelStep forward captures Telegram webhook secret and correct port domain", async () => {
+  _resetLogBuffer();
+
+  let capturedChannel: string | null = null;
+  let capturedPayload: unknown = null;
+  let capturedMeta: SingleMeta | null = null;
+  let capturedGetSandboxDomain: ((port?: number) => Promise<string>) | null = null;
+
+  const dependencies = createWorkflowDependencies({
+    runWithBootMessages: async () => ({
+      meta: asMeta({
+        status: "running",
+        sandboxId: "sbx-tg-forward",
+        portUrls: { "3000": "https://sbx.example.test", "8787": "https://sbx-8787.example.test" },
+        channels: {
+          telegram: { botToken: "tok", webhookSecret: "secret-123" } as never,
+          slack: null,
+          discord: null,
+          whatsapp: null,
+        },
+      }),
+      bootMessageSent: false,
+    }),
+    forwardToNativeHandlerWithRetry: async (
+      channel: unknown,
+      payload: unknown,
+      meta: SingleMeta,
+      getSandboxDomain: (port?: number) => Promise<string>,
+    ): Promise<RetryingForwardResult> => {
+      capturedChannel = channel as string;
+      capturedPayload = payload;
+      capturedMeta = meta;
+      capturedGetSandboxDomain = getSandboxDomain;
+      return { ok: true, status: 200, attempts: 1, totalMs: 50, retries: [] };
+    },
+  });
+
+  const telegramUpdate = { update_id: 999, message: { chat: { id: 12345 }, text: "hello" } };
+  await processChannelStep("telegram", telegramUpdate, "test", "req-forward", null, { dependencies });
+
+  // Verify the forward received the right data
+  assert.equal(capturedChannel, "telegram");
+  assert.deepStrictEqual(capturedPayload, telegramUpdate);
+  assert.equal(capturedMeta?.sandboxId, "sbx-tg-forward");
+  assert.equal(capturedMeta?.channels.telegram?.webhookSecret, "secret-123");
+  assert.ok(capturedMeta?.portUrls?.["8787"], "portUrls should include port 8787");
+  assert.ok(capturedGetSandboxDomain, "getSandboxDomain should be passed");
+});
+
+test("processChannelStep forward passes meta with portUrls from boot result", async () => {
+  // Simulates the scenario where runWithBootMessages returns running meta
+  // and the forward needs portUrls to resolve the sandbox domain.
+  let forwardedPortUrls: Record<string, string> | null = null;
+
+  const dependencies = createWorkflowDependencies({
+    runWithBootMessages: async () => ({
+      meta: asMeta({
+        status: "running",
+        sandboxId: "sbx-ports",
+        portUrls: { "3000": "https://gw.test", "8787": "https://tg.test" },
+        channels: { telegram: null, slack: null, discord: null, whatsapp: null },
+      }),
+      bootMessageSent: false,
+    }),
+    forwardToNativeHandlerWithRetry: async (
+      _channel: unknown,
+      _payload: unknown,
+      meta: SingleMeta,
+    ): Promise<RetryingForwardResult> => {
+      forwardedPortUrls = (meta.portUrls as Record<string, string>) ?? null;
+      return { ok: true, status: 200, attempts: 1, totalMs: 50, retries: [] };
+    },
+  });
+
+  await processChannelStep("telegram", { update_id: 1 }, "test", "req-ports", null, { dependencies });
+
+  assert.ok(forwardedPortUrls, "portUrls should be present in forwarded meta");
+  assert.equal(forwardedPortUrls["3000"], "https://gw.test");
+  assert.equal(forwardedPortUrls["8787"], "https://tg.test");
+});
