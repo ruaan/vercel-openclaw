@@ -290,8 +290,16 @@ export type HotSpareState = {
   candidateSandboxId: string | null;
   /** Port URLs resolved from the candidate sandbox. */
   candidatePortUrls: Record<string, string> | null;
+  /** Snapshot ID the candidate was created from. */
+  candidateSourceSnapshotId: string | null;
+  /** Dynamic config hash at candidate creation time. */
+  candidateDynamicConfigHash: string | null;
+  /** Asset SHA-256 at candidate creation time. */
+  candidateAssetSha256: string | null;
   /** Unix-epoch ms when the candidate was created. */
   createdAt: number | null;
+  /** Unix-epoch ms when the candidate was marked ready. */
+  preparedAt: number | null;
   /** Error message from the last failed attempt. */
   lastError: string | null;
   /** Unix-epoch ms of the last status change. */
@@ -351,6 +359,12 @@ export type RestorePhaseMetrics = {
   skippedPublicReady?: boolean;
   /** Outcome of the post-restore cron jobs recovery flow. */
   cronRestoreOutcome?: CronRestoreOutcome;
+  /** Whether a hot-spare candidate was successfully promoted for this restore. */
+  hotSpareHit?: boolean;
+  /** Wall-clock ms for the hot-spare promotion (0 when no hit). */
+  hotSparePromotionMs?: number;
+  /** Reason the hot-spare was rejected, or null on hit. */
+  hotSpareRejectReason?: string | null;
 };
 
 /**
@@ -915,7 +929,11 @@ export function createDefaultHotSpareState(): HotSpareState {
     status: "idle",
     candidateSandboxId: null,
     candidatePortUrls: null,
+    candidateSourceSnapshotId: null,
+    candidateDynamicConfigHash: null,
+    candidateAssetSha256: null,
     createdAt: null,
+    preparedAt: null,
     lastError: null,
     updatedAt: null,
   };
@@ -938,8 +956,22 @@ export function ensureHotSpareState(raw: unknown): HotSpareState {
       !Array.isArray(obj.candidatePortUrls)
         ? (obj.candidatePortUrls as Record<string, string>)
         : null,
+    candidateSourceSnapshotId:
+      typeof obj.candidateSourceSnapshotId === "string"
+        ? obj.candidateSourceSnapshotId
+        : null,
+    candidateDynamicConfigHash:
+      typeof obj.candidateDynamicConfigHash === "string"
+        ? obj.candidateDynamicConfigHash
+        : null,
+    candidateAssetSha256:
+      typeof obj.candidateAssetSha256 === "string"
+        ? obj.candidateAssetSha256
+        : null,
     createdAt:
       typeof obj.createdAt === "number" ? obj.createdAt : null,
+    preparedAt:
+      typeof obj.preparedAt === "number" ? obj.preparedAt : null,
     lastError:
       typeof obj.lastError === "string" ? obj.lastError : null,
     updatedAt:

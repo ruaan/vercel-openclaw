@@ -80,6 +80,8 @@ import {
 import {
   isHotSpareEnabled,
   preCreateHotSpare,
+  preCreateHotSpareFromSnapshot,
+  evaluateHotSparePromotion,
   promoteHotSpare,
   applyPreCreateToMeta,
   applyPromoteToMeta,
@@ -1383,6 +1385,70 @@ export async function prepareRestoreTarget(input: {
     preparedAt: finalMeta.restorePreparedAt,
     actions,
     decision: finalDecision,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Hot-spare lifecycle helper
+// ---------------------------------------------------------------------------
+
+export type PrepareHotSpareResult = {
+  ok: boolean;
+  reason: "created" | "skipped" | "failed" | "snapshot-missing";
+  candidateSandboxId: string | null;
+};
+
+/**
+ * Prepare a snapshot-backed hot-spare sandbox from the latest prepared restore
+ * target.  Intended to be called by the watchdog after a successful oracle
+ * prepare so the spare is ready before the next Telegram wake arrives.
+ */
+export async function prepareHotSpareFromPreparedRestore(options?: {
+  op?: OperationContext;
+}): Promise<PrepareHotSpareResult> {
+  void options; // reserved for future observability threading
+
+  const meta = await getInitializedMeta();
+
+  if (!meta.snapshotId) {
+    logInfo("sandbox.hot_spare.prepare.skipped", {
+      reason: "snapshot-missing",
+    });
+    return { ok: false, reason: "snapshot-missing", candidateSandboxId: null };
+  }
+
+  const credential = await resolveAiGatewayCredentialOptional();
+  const restoreEnv = buildRestoreRuntimeEnv({
+    gatewayToken: meta.gatewayToken,
+    apiKey: credential?.token,
+  });
+
+  const result = await preCreateHotSpareFromSnapshot(meta, {
+    create: (createOptions) => getSandboxController().create(createOptions),
+    getSandboxVcpus,
+    getSandboxSleepAfterMs,
+    sandboxPorts: SANDBOX_PORTS,
+    restoreEnv,
+  });
+
+  await mutateMeta((next) => {
+    applyPreCreateToMeta(next, result);
+  });
+
+  logInfo("sandbox.hot_spare.prepare.result", {
+    status: result.status,
+    candidateSandboxId: result.candidateSandboxId,
+    snapshotId: meta.snapshotId,
+  });
+
+  return {
+    ok: result.status !== "failed",
+    reason: result.status === "created"
+      ? "created"
+      : result.status === "skipped"
+        ? "skipped"
+        : "failed",
+    candidateSandboxId: result.candidateSandboxId,
   };
 }
 
@@ -2757,37 +2823,94 @@ async function restoreSandboxFromSnapshot(
       apiKey: freshApiKey,
     });
 
-    const sandboxCreateStart = Date.now();
-    const createParams = {
-      ports: SANDBOX_PORTS,
-      timeout: sleepAfterMs,
-      resources: { vcpus },
-      source: {
-        type: "snapshot" as const,
-        snapshotId: current.snapshotId,
-      },
-      env: restoreEnv,
-      // networkPolicy on snapshot restore returns 400 — apply post-create
-    };
-    let sandbox;
-    try {
-      sandbox = await getSandboxController().create(createParams);
-    } catch (createError) {
-      // Log full API error details for diagnosing 400s from the sandbox API
-      const apiJson = (createError as { json?: unknown }).json;
-      const apiText = (createError as { text?: unknown }).text;
-      logError("sandbox.restore.create_failed", {
-        snapshotId: current.snapshotId,
-        error: createError instanceof Error ? createError.message : String(createError),
-        ...(apiJson ? { apiErrorJson: apiJson } : {}),
-        ...(apiText ? { apiErrorText: apiText } : {}),
-        envKeys: Object.keys(restoreEnv),
-        envSizes: Object.fromEntries(Object.entries(restoreEnv).map(([k, v]) => [k, v.length])),
-      });
-      throw createError;
+    // Hot-spare promotion attempt — skip the normal Sandbox.create() if a
+    // freshness-gated candidate already exists.
+    let sandbox: SandboxHandle | null = null;
+    let sandboxCreateMs = 0;
+    let hotSpareHit = false;
+    let hotSparePromotionMs = 0;
+    let hotSpareRejectReason: string | null = null;
+
+    const desiredDynamicConfigHash =
+      latest.snapshotDynamicConfigHash ?? latest.snapshotConfigHash;
+    const desiredAssetSha256 = latest.snapshotAssetSha256;
+
+    const hotSpareDecision = evaluateHotSparePromotion({
+      hotSpare: latest.hotSpare,
+      desiredSnapshotId: current.snapshotId,
+      desiredDynamicConfigHash,
+      desiredAssetSha256,
+    });
+
+    logInfo("sandbox.restore.hot_spare_considered", {
+      snapshotId: current.snapshotId,
+      candidateSandboxId: latest.hotSpare?.candidateSandboxId ?? null,
+      decision: hotSpareDecision.reason,
+    });
+    if (!hotSpareDecision.ok) {
+      hotSpareRejectReason = hotSpareDecision.reason;
     }
-    const sandboxCreateMs = Date.now() - sandboxCreateStart;
-    logPhase("sandboxCreate", { ms: sandboxCreateMs, sandboxId: sandbox.sandboxId, snapshotId: current.snapshotId });
+
+    if (hotSpareDecision.ok && latest.hotSpare?.candidateSandboxId) {
+      const promotionStartedAt = Date.now();
+      const promoteResult = await promoteHotSpare(latest, {
+        get: (opts) => getSandboxController().get(opts),
+      });
+
+      if (promoteResult.status === "promoted" && promoteResult.promotedSandboxId) {
+        sandbox = await getSandboxController().get({
+          sandboxId: promoteResult.promotedSandboxId,
+        });
+        await mutateMeta((meta) => applyPromoteToMeta(meta, promoteResult));
+        hotSpareHit = true;
+        hotSparePromotionMs = Date.now() - promotionStartedAt;
+        logInfo("sandbox.restore.hot_spare_promoted", {
+          promotedSandboxId: sandbox.sandboxId,
+          hotSparePromotionMs,
+          snapshotId: current.snapshotId,
+        });
+      } else {
+        hotSpareRejectReason = promoteResult.error ?? promoteResult.status;
+        logWarn("sandbox.restore.hot_spare_promotion_failed", {
+          snapshotId: current.snapshotId,
+          candidateSandboxId: latest.hotSpare?.candidateSandboxId ?? null,
+          error: hotSpareRejectReason,
+        });
+      }
+    }
+
+    if (!sandbox) {
+      const sandboxCreateStart = Date.now();
+      const createParams = {
+        ports: SANDBOX_PORTS,
+        timeout: sleepAfterMs,
+        resources: { vcpus },
+        source: {
+          type: "snapshot" as const,
+          snapshotId: current.snapshotId,
+        },
+        env: restoreEnv,
+        // networkPolicy on snapshot restore returns 400 — apply post-create
+      };
+      try {
+        sandbox = await getSandboxController().create(createParams);
+      } catch (createError) {
+        // Log full API error details for diagnosing 400s from the sandbox API
+        const apiJson = (createError as { json?: unknown }).json;
+        const apiText = (createError as { text?: unknown }).text;
+        logError("sandbox.restore.create_failed", {
+          snapshotId: current.snapshotId,
+          error: createError instanceof Error ? createError.message : String(createError),
+          ...(apiJson ? { apiErrorJson: apiJson } : {}),
+          ...(apiText ? { apiErrorText: apiText } : {}),
+          envKeys: Object.keys(restoreEnv),
+          envSizes: Object.fromEntries(Object.entries(restoreEnv).map(([k, v]) => [k, v.length])),
+        });
+        throw createError;
+      }
+      sandboxCreateMs = Date.now() - sandboxCreateStart;
+      logPhase("sandboxCreate", { ms: sandboxCreateMs, sandboxId: sandbox.sandboxId, snapshotId: current.snapshotId });
+    }
 
     markPhase("mutateMeta2");
     await mutateMeta((meta) => {
@@ -3280,6 +3403,9 @@ async function restoreSandboxFromSnapshot(
       bootOverlapMs,
       skippedPublicReady: skipPublicReady,
       cronRestoreOutcome,
+      hotSpareHit,
+      hotSparePromotionMs: hotSpareHit ? hotSparePromotionMs : 0,
+      hotSpareRejectReason,
     };
 
     if (op) {

@@ -22,9 +22,35 @@ the sleeping-sandbox Telegram wake path.
    no longer the main bottleneck.
    **Status: open** — gated on fresh measurement from plan 01.
 
-## Remaining decision branches
+5. `05-snapshot-backed-restore-spare.md`
+   Replace the placeholder hot-spare with a snapshot-backed prewarmed spare
+   consumed by `restoreSandboxFromSnapshot()`.
+   **Status: open** — implementation is in-tree; measurement against baseline pending.
 
-With plans 02 and 03 absorbed into the codebase, the next wins come from:
+## Post-bridge decision branch
+
+Plans 02 and 03 collapsed the Telegram bridge overhead. The codebase now emits
+`channels.telegram_wake_summary` with end-to-end wake timings plus per-phase
+restore sub-timings (including `hotSpareHit`, `hotSparePromotionMs`,
+`hotSpareRejectReason`).
+
+The decision tree from here:
+
+```
+measurement (plan 01)
+  │
+  ├─ bridge still dominant? → revisit bridge optimisations
+  │
+  └─ sandboxCreateMs dominant? (expected)
+       │
+       ├─ YES → snapshot-backed spare (plan 05)
+       │         Run: node scripts/benchmark-restore.mjs --variant=hot-spare
+       │         Compare against --variant=baseline records.
+       │
+       └─ NO  → restore micro-optimisations (plan 04)
+```
+
+## Remaining opportunities
 
 - **Fresh measurement** (plan 01) — collect real `channels.telegram_wake_summary`
   logs to identify which phase dominates after the bridge-side gains.
@@ -35,12 +61,13 @@ With plans 02 and 03 absorbed into the codebase, the next wins come from:
   installed during bootstrap (before any snapshot is taken), so restore never
   needs to run `npm install` on the wake path. The restore script retains a
   fallback for old snapshots that pre-date this change.
-- **Hot-spare escalation** — if `sandboxCreateMs` still dominates after the above
-  cleanup, further restore micro-optimisations hit diminishing returns and the
-  hot-spare approach becomes the only serious path to beat platform resume time.
+- **Snapshot-backed spare** (plan 05) — if `sandboxCreateMs` still dominates,
+  a prewarmed spare created by the watchdog skips the `Sandbox.create()` call
+  entirely on the Telegram wake path.
 
 ## Working rule
 
 Do the plans in order. Do not start restore-focused optimisation until the
 measurement plan shows the Telegram bridge is no longer the dominant wake cost,
 or until the bridge-focused changes fail to hit the target latency.
+Plan 05 is the first restore-side plan and requires measurement as a gate.

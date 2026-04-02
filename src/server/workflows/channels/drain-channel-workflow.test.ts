@@ -323,6 +323,9 @@ test("processChannelStep emits channels.telegram_wake_summary for Telegram reque
     skippedStaticAssetSync: true,
     skippedDynamicConfigSync: true,
     dynamicConfigReason: "hash-match",
+    hotSpareHit: false,
+    hotSparePromotionMs: 0,
+    hotSpareRejectReason: "feature-disabled",
   };
 
   const dependencies = createWorkflowDependencies({
@@ -357,6 +360,9 @@ test("processChannelStep emits channels.telegram_wake_summary for Telegram reque
   assert.equal(data.skippedDynamicConfigSync, true);
   assert.equal(data.dynamicConfigReason, "hash-match");
   assert.equal(data.retryingForwardAttempts, 1);
+  assert.equal(data.hotSpareHit, false);
+  assert.equal(data.hotSparePromotionMs, 0);
+  assert.equal(data.hotSpareRejectReason, "feature-disabled");
 });
 
 test("processChannelStep does NOT emit telegram_wake_summary for Slack requests", async () => {

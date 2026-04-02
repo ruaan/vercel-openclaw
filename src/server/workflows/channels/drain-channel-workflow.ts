@@ -196,6 +196,9 @@ export async function processChannelStep(
         dynamicConfigReason: restore?.dynamicConfigReason ?? null,
         retryingForwardAttempts: retryingResult?.attempts ?? null,
         retryingForwardTotalMs: retryingResult?.totalMs ?? null,
+        hotSpareHit: restore?.hotSpareHit ?? null,
+        hotSparePromotionMs: restore?.hotSparePromotionMs ?? null,
+        hotSpareRejectReason: restore?.hotSpareRejectReason ?? null,
       });
     }
 

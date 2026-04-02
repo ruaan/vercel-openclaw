@@ -92,6 +92,11 @@ function makeDeps(overrides: Partial<Parameters<typeof runSandboxWatchdog>[1]> =
       prepare: null,
       decision: stubDecision({ reusable: true, needsPrepare: false, blocking: false }),
     }),
+    prepareHotSpare: async () => ({
+      ok: true,
+      reason: "skipped" as const,
+      candidateSandboxId: null,
+    }),
     now: (() => {
       let current = 0;
       return () => (current += 10);
@@ -643,6 +648,62 @@ test("restore.prepare: pass when oracle executes and prepares successfully", asy
   assert.ok(check.data, "check should have structured data");
   assert.equal(check.data.blockedReason, null);
   assert.ok((check.data.decision as RestoreDecision).reasons.includes("snapshot-config-stale"));
+
+  // Hot-spare fields populated from default (skipped) prepareHotSpare
+  assert.equal(check.data.hotSpareReason, "skipped");
+  assert.equal(check.data.hotSpareCandidateSandboxId, null);
+});
+
+test("restore.prepare: pass with hot-spare created after oracle prepare", async () => {
+  const decision = stubDecision({
+    reusable: false,
+    reasons: ["snapshot-config-stale"],
+    requiredActions: ["prepare-destructive"],
+    nextAction: "prepare-destructive",
+  });
+  const report = await runSandboxWatchdog(
+    { request: new Request("https://app.test/api/cron/watchdog") },
+    makeDeps({
+      runRestoreOracle: async () => oracleResult({
+        executed: true,
+        blockedReason: null,
+        idleMs: 600_000,
+        minIdleMs: 300_000,
+        attestation: { reusable: false, needsPrepare: true, reasons: ["snapshot-config-stale"] },
+        plan: { schemaVersion: 1, status: "needs-prepare", blocking: true, reasons: [], actions: [] },
+        prepare: {
+          ok: true,
+          destructive: true,
+          state: "ready",
+          reason: "prepared",
+          snapshotId: "snap_fresh",
+          snapshotDynamicConfigHash: "hash",
+          runtimeDynamicConfigHash: "hash",
+          snapshotAssetSha256: "sha",
+          runtimeAssetSha256: "sha",
+          preparedAt: Date.now(),
+          actions: [],
+        },
+        decision,
+      }),
+      prepareHotSpare: async () => ({
+        ok: true,
+        reason: "created" as const,
+        candidateSandboxId: "oc-spare-single-abc",
+      }),
+    }),
+  );
+
+  assert.equal(report.status, "repairing");
+  assert.equal(report.triggeredRepair, true);
+  const check = findCheck(report, "restore.prepare");
+  assert.ok(check, "should have restore.prepare check");
+  assert.equal(check.status, "pass");
+
+  // Hot-spare result fields present in structured data
+  assert.ok(check.data, "check should have structured data");
+  assert.equal(check.data.hotSpareCandidateSandboxId, "oc-spare-single-abc");
+  assert.equal(check.data.hotSpareReason, "created");
 });
 
 test("restore.prepare: fail when oracle executes but prepare fails", async () => {

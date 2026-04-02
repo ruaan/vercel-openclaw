@@ -4097,7 +4097,7 @@ test("markRestoreTargetDirty sets status to dirty", async () => {
       m.restorePreparedReason = "prepared";
     });
 
-    let meta = await markRestoreTargetDirty({ reason: "dynamic-config-changed" });
+    const meta = await markRestoreTargetDirty({ reason: "dynamic-config-changed" });
 
     assert.equal(meta.restorePreparedStatus, "dirty");
     assert.equal(meta.restorePreparedReason, "dynamic-config-changed");

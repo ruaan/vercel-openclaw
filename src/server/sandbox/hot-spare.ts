@@ -35,6 +35,9 @@ export type PreCreateResult = {
   status: "created" | "skipped" | "failed";
   candidateSandboxId: string | null;
   error: string | null;
+  candidateSourceSnapshotId?: string | null;
+  candidateDynamicConfigHash?: string | null;
+  candidateAssetSha256?: string | null;
 };
 
 /**
@@ -110,6 +113,10 @@ export async function preCreateHotSpare(
       status: "created",
       candidateSandboxId: sandbox.sandboxId,
       error: null,
+      candidateSourceSnapshotId: meta.snapshotId,
+      candidateDynamicConfigHash:
+        meta.snapshotDynamicConfigHash ?? meta.snapshotConfigHash,
+      candidateAssetSha256: meta.snapshotAssetSha256,
     };
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
@@ -120,6 +127,170 @@ export async function preCreateHotSpare(
       error: errMsg,
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot-backed pre-creation
+// ---------------------------------------------------------------------------
+
+export type SnapshotBackedCreateDeps = {
+  create: (options: {
+    name: string;
+    persistent: boolean;
+    ports: number[];
+    timeout: number;
+    resources: { vcpus: number };
+    source: { type: "snapshot"; snapshotId: string };
+    env?: Record<string, string>;
+  }) => Promise<SandboxHandle>;
+  getSandboxVcpus: () => number;
+  getSandboxSleepAfterMs: () => number;
+  sandboxPorts: number[];
+  restoreEnv: Record<string, string>;
+};
+
+/**
+ * Pre-create a hot-spare sandbox from the current snapshot.
+ *
+ * Unlike `preCreateHotSpare()`, this creates from a snapshot source so the
+ * candidate is a real restore-ready spare — not a blank persistent sandbox.
+ *
+ * No-op when the feature flag is off, no snapshot exists, or a candidate is
+ * already ready/creating.
+ */
+export async function preCreateHotSpareFromSnapshot(
+  meta: Pick<
+    SingleMeta,
+    | "id"
+    | "snapshotId"
+    | "snapshotDynamicConfigHash"
+    | "snapshotConfigHash"
+    | "snapshotAssetSha256"
+    | "hotSpare"
+  >,
+  deps: SnapshotBackedCreateDeps,
+): Promise<PreCreateResult> {
+  if (!isHotSpareEnabled()) {
+    return { status: "skipped", candidateSandboxId: null, error: null };
+  }
+
+  const hotSpare = meta.hotSpare ?? createDefaultHotSpareState();
+
+  if (hotSpare.status === "ready" || hotSpare.status === "creating") {
+    logInfo("hot_spare.pre_create_from_snapshot.skipped", {
+      reason: `already_${hotSpare.status}`,
+      candidateSandboxId: hotSpare.candidateSandboxId,
+    });
+    return {
+      status: "skipped",
+      candidateSandboxId: hotSpare.candidateSandboxId,
+      error: null,
+    };
+  }
+
+  if (!meta.snapshotId) {
+    logInfo("hot_spare.pre_create_from_snapshot.skipped", {
+      reason: "snapshot-missing",
+    });
+    return { status: "skipped", candidateSandboxId: null, error: null };
+  }
+
+  const candidateName = `oc-spare-${meta.id.replace(/[^a-z0-9-]/gi, "-").toLowerCase()}`;
+
+  logInfo("hot_spare.pre_create_from_snapshot.start", {
+    candidateName,
+    snapshotId: meta.snapshotId,
+    candidateDynamicConfigHash:
+      meta.snapshotDynamicConfigHash ?? meta.snapshotConfigHash,
+    candidateAssetSha256: meta.snapshotAssetSha256,
+  });
+
+  try {
+    const sandbox = await deps.create({
+      name: candidateName,
+      persistent: true,
+      ports: deps.sandboxPorts,
+      timeout: deps.getSandboxSleepAfterMs(),
+      resources: { vcpus: deps.getSandboxVcpus() },
+      source: { type: "snapshot", snapshotId: meta.snapshotId },
+      env: deps.restoreEnv,
+    });
+
+    logInfo("hot_spare.pre_create_from_snapshot.complete", {
+      candidateSandboxId: sandbox.sandboxId,
+      snapshotId: meta.snapshotId,
+    });
+
+    return {
+      status: "created",
+      candidateSandboxId: sandbox.sandboxId,
+      error: null,
+      candidateSourceSnapshotId: meta.snapshotId,
+      candidateDynamicConfigHash:
+        meta.snapshotDynamicConfigHash ?? meta.snapshotConfigHash,
+      candidateAssetSha256: meta.snapshotAssetSha256,
+    };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logError("hot_spare.pre_create_from_snapshot.failed", {
+      snapshotId: meta.snapshotId,
+      error: errMsg,
+    });
+    return {
+      status: "failed",
+      candidateSandboxId: null,
+      error: errMsg,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Promotion evaluation
+// ---------------------------------------------------------------------------
+
+export type HotSpareDecisionReason =
+  | "candidate-ready"
+  | "feature-disabled"
+  | "missing-candidate"
+  | "snapshot-mismatch"
+  | "dynamic-config-mismatch"
+  | "asset-mismatch";
+
+/**
+ * Evaluate whether a hot-spare candidate matches the desired restore target.
+ *
+ * Freshness-gates by snapshot ID, dynamic-config hash, and asset hash.
+ * Returns `{ ok: true }` only when all three match.
+ */
+export function evaluateHotSparePromotion(input: {
+  hotSpare: SingleMeta["hotSpare"] | null | undefined;
+  desiredSnapshotId: string | null;
+  desiredDynamicConfigHash: string | null;
+  desiredAssetSha256: string | null;
+}): { ok: boolean; reason: HotSpareDecisionReason } {
+  if (!isHotSpareEnabled()) {
+    return { ok: false, reason: "feature-disabled" };
+  }
+
+  const hotSpare = input.hotSpare ?? null;
+
+  if (!hotSpare || hotSpare.status !== "ready" || !hotSpare.candidateSandboxId) {
+    return { ok: false, reason: "missing-candidate" };
+  }
+
+  if (hotSpare.candidateSourceSnapshotId !== input.desiredSnapshotId) {
+    return { ok: false, reason: "snapshot-mismatch" };
+  }
+
+  if (hotSpare.candidateDynamicConfigHash !== input.desiredDynamicConfigHash) {
+    return { ok: false, reason: "dynamic-config-mismatch" };
+  }
+
+  if (hotSpare.candidateAssetSha256 !== input.desiredAssetSha256) {
+    return { ok: false, reason: "asset-mismatch" };
+  }
+
+  return { ok: true, reason: "candidate-ready" };
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +433,9 @@ export async function cleanupHotSpare(
 /**
  * Apply a pre-creation result to the mutable metadata.
  * Caller is responsible for wrapping this in `mutateMeta()`.
+ *
+ * Snapshot-backed callers should pass provenance in the result so metadata
+ * matches the snapshot actually used to create the spare.
  */
 export function applyPreCreateToMeta(
   meta: SingleMeta,
@@ -276,7 +450,16 @@ export function applyPreCreateToMeta(
     case "created":
       meta.hotSpare.status = "ready";
       meta.hotSpare.candidateSandboxId = result.candidateSandboxId;
+      meta.hotSpare.candidateSourceSnapshotId =
+        result.candidateSourceSnapshotId ?? meta.snapshotId;
+      meta.hotSpare.candidateDynamicConfigHash =
+        result.candidateDynamicConfigHash ??
+        meta.snapshotDynamicConfigHash ??
+        meta.snapshotConfigHash;
+      meta.hotSpare.candidateAssetSha256 =
+        result.candidateAssetSha256 ?? meta.snapshotAssetSha256;
       meta.hotSpare.createdAt = now;
+      meta.hotSpare.preparedAt = now;
       meta.hotSpare.lastError = null;
       meta.hotSpare.updatedAt = now;
       break;
@@ -310,7 +493,11 @@ export function applyPromoteToMeta(
       meta.hotSpare.status = "idle";
       meta.hotSpare.candidateSandboxId = null;
       meta.hotSpare.candidatePortUrls = null;
+      meta.hotSpare.candidateSourceSnapshotId = null;
+      meta.hotSpare.candidateDynamicConfigHash = null;
+      meta.hotSpare.candidateAssetSha256 = null;
       meta.hotSpare.createdAt = null;
+      meta.hotSpare.preparedAt = null;
       meta.hotSpare.lastError = null;
       meta.hotSpare.updatedAt = now;
       break;

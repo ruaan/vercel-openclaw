@@ -55,7 +55,9 @@ OPTIONS
   --format          Output format: text | json (default: text)
   --timeout-ms      Wait timeout for ensure?wait=1 in ms (default: 240000)
   --request-timeout Per-request fetch timeout in seconds (default: 30)
-  --variant         Label for this benchmark variant (default: baseline)
+  --variant         Label for this benchmark variant (default: baseline).
+                    Use "hot-spare" when the deployment has OPENCLAW_HOT_SPARE_ENABLED=true
+                    to tag records for comparison against the baseline.
   --json-only       Suppress human-readable stderr output
   --help            Show this message
 
@@ -63,8 +65,16 @@ ENVIRONMENT
   SMOKE_AUTH_COOKIE  Auth cookie value
   ADMIN_SECRET       Admin bearer token
 
+VARIANTS
+  baseline     Standard restore from snapshot (default)
+  hot-spare    Restore with OPENCLAW_HOT_SPARE_ENABLED=true on the deployment.
+               Records include hotSpareHit, hotSparePromotionMs, and
+               hotSpareRejectReason from restoreMetrics.
+
 OUTPUT
   JSONL records to stdout: { cycle, vcpus, variant, restoreMetrics, totalWallMs, error? }
+  When variant=hot-spare, restoreMetrics includes hotSpareHit, hotSparePromotionMs,
+  and hotSpareRejectReason fields.
   Summary statistics at end (p50, p95 by phase grouped by vCPU)
 `);
   process.exit(0);
@@ -183,11 +193,17 @@ async function runCycle(cycle, vcpus) {
       ensureWaitedMs: ensureResult.body.waitedMs,
     };
     emitJsonl(result);
+    const hotSpareTag =
+      metrics.hotSpareHit != null
+        ? ` hotSpareHit=${metrics.hotSpareHit} hotSparePromotionMs=${metrics.hotSparePromotionMs ?? 0}` +
+          (metrics.hotSpareRejectReason ? ` hotSpareReject=${metrics.hotSpareRejectReason}` : "")
+        : "";
     log(
       `cycle=${cycle} — done totalMs=${metrics.totalMs} wallMs=${totalWallMs} ` +
         `create=${metrics.sandboxCreateMs} startup=${metrics.startupScriptMs} ` +
         `pair=${metrics.forcePairMs} fw=${metrics.firewallSyncMs} ` +
-        `localReady=${metrics.localReadyMs} publicReady=${metrics.publicReadyMs}`,
+        `localReady=${metrics.localReadyMs} publicReady=${metrics.publicReadyMs}` +
+        hotSpareTag,
     );
     return result;
   } catch (err) {
@@ -225,6 +241,7 @@ function computeStats(results) {
     "localReadyMs",
     "publicReadyMs",
     "totalMs",
+    "hotSparePromotionMs",
   ];
 
   const byVcpu = {};
@@ -254,10 +271,27 @@ function computeStats(results) {
           : null,
       };
     }
+    // Hot-spare hit rate (only meaningful when variant=hot-spare)
+    const hotSpareHits = records.filter(
+      (r) => r.restoreMetrics.hotSpareHit === true,
+    ).length;
+    const hotSpareMisses = records.filter(
+      (r) => r.restoreMetrics.hotSpareHit === false,
+    ).length;
+    const hotSpareReasons = records
+      .map((r) => r.restoreMetrics.hotSpareRejectReason)
+      .filter(Boolean);
+
     summary[vcpuKey] = {
       vcpus: vcpuKey,
       cycles: records.length,
       phases: phaseStats,
+      hotSpare: {
+        hits: hotSpareHits,
+        misses: hotSpareMisses,
+        unknown: records.length - hotSpareHits - hotSpareMisses,
+        rejectReasons: [...new Set(hotSpareReasons)],
+      },
     };
   }
 
@@ -335,6 +369,15 @@ async function main() {
         const pad = (v) => String(v ?? "—").padStart(8);
         process.stderr.write(
           `${phase.padEnd(20)} ${pad(s.p50)}  ${pad(s.p95)}  ${pad(s.min)}  ${pad(s.max)}  ${pad(s.mean)}\n`,
+        );
+      }
+      if (stats.hotSpare && (stats.hotSpare.hits > 0 || stats.hotSpare.misses > 0)) {
+        process.stderr.write(
+          `\nHot-spare: ${stats.hotSpare.hits} hits, ${stats.hotSpare.misses} misses` +
+            (stats.hotSpare.rejectReasons.length
+              ? ` (rejects: ${stats.hotSpare.rejectReasons.join(", ")})`
+              : "") +
+            "\n",
         );
       }
     }

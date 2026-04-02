@@ -12,10 +12,12 @@ import {
   CRON_NEXT_WAKE_KEY,
   ensureSandboxReady,
   isBusyStatus,
+  prepareHotSpareFromPreparedRestore,
   prepareRestoreTarget,
   probeGatewayReady,
   reconcileSandboxHealth,
   reconcileStaleRunningStatus,
+  type PrepareHotSpareResult,
   type ProbeResult,
   type SandboxHealthResult,
 } from "@/server/sandbox/lifecycle";
@@ -67,6 +69,9 @@ export type WatchdogDeps = {
     minIdleMs?: number;
     op?: OperationContext;
   }) => Promise<RestoreOracleCycleResult>;
+  prepareHotSpare: (options?: {
+    op?: OperationContext;
+  }) => Promise<PrepareHotSpareResult>;
   now: () => number;
 };
 
@@ -96,6 +101,7 @@ const defaultDeps: WatchdogDeps = {
       prepare: prepareRestoreTarget,
       now: () => Date.now(),
     }),
+  prepareHotSpare: prepareHotSpareFromPreparedRestore,
   now: () => Date.now(),
 };
 
@@ -256,6 +262,25 @@ export async function runSandboxWatchdog(
 
           if (oracle.executed && oracle.prepare?.ok) {
             triggeredRepair = true;
+
+            // Prewarm a snapshot-backed spare so the next Telegram wake can
+            // skip the Sandbox.create() latency entirely.
+            const hotSpare = await deps.prepareHotSpare({
+              op: createOperationContext({
+                trigger: "watchdog",
+                reason: "watchdog:restore-prepare-hot-spare",
+                sandboxId: meta.sandboxId,
+                status: meta.status,
+              }),
+            });
+            oracleData.hotSpareCandidateSandboxId = hotSpare.candidateSandboxId;
+            oracleData.hotSpareReason = hotSpare.reason;
+            logInfo("watchdog.restore_prepare_hot_spare_result", {
+              ok: hotSpare.ok,
+              reason: hotSpare.reason,
+              candidateSandboxId: hotSpare.candidateSandboxId,
+            });
+
             addCheck(
               "restore.prepare",
               "pass",
