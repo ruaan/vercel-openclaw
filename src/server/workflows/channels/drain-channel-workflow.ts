@@ -116,11 +116,20 @@ export async function processChannelStep(
       existingBootHandle,
     });
 
-    const readyMeta = await ensureSandboxReady({
-      origin,
-      reason: `channel:${channel}`,
-      timeoutMs: WORKFLOW_SANDBOX_READY_TIMEOUT_MS,
-    });
+    // Use the metadata from runWithBootMessages directly.  Do NOT call
+    // ensureSandboxReady() again — its public gateway probe
+    // (probeGatewayReady → fetch to external sandbox URL) consistently
+    // fails from the Workflow step runtime context, causing a 120-second
+    // timeout even though the sandbox is running and the native handler
+    // is listening.  forwardToNativeHandlerWithRetry handles its own
+    // retries on proxy-level errors (502/503/504).
+    const readyMeta = bootResult.meta.status === "running"
+      ? bootResult.meta
+      : await ensureSandboxReady({
+          origin,
+          reason: `channel:${channel}`,
+          timeoutMs: WORKFLOW_SANDBOX_READY_TIMEOUT_MS,
+        });
 
     const sandboxReadyAt = Date.now();
 

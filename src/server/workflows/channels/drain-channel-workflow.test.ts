@@ -78,14 +78,45 @@ function createWorkflowDependencies(
   };
 }
 
-test("processChannelStep always ensures sandbox readiness before native forward", async () => {
+test("processChannelStep skips ensureSandboxReady when boot returns running", async () => {
   let ensureCalls = 0;
   let forwardedSandboxId: string | null = null;
 
   const dependencies = createWorkflowDependencies({
     runWithBootMessages: async () => ({
-      meta: asMeta({ status: "running", sandboxId: "sbx-stale" }),
+      meta: asMeta({ status: "running", sandboxId: "sbx-booted" }),
       bootMessageSent: false,
+    }),
+    ensureSandboxReady: async () => {
+      ensureCalls += 1;
+      return asMeta({
+        status: "running",
+        sandboxId: "sbx-restored",
+        channels: { telegram: null, slack: null, discord: null, whatsapp: null },
+      });
+    },
+    forwardToNativeHandlerWithRetry: async (_channel: unknown, _payload: unknown, meta: SingleMeta): Promise<RetryingForwardResult> => {
+      forwardedSandboxId = meta.sandboxId ?? null;
+      return { ok: true, status: 200, attempts: 1, totalMs: 50, retries: [] };
+    },
+  });
+
+  await processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, { dependencies });
+
+  // When boot returns running, ensureSandboxReady is skipped to avoid
+  // the redundant public gateway probe that times out in workflow steps.
+  assert.equal(ensureCalls, 0);
+  assert.equal(forwardedSandboxId, "sbx-booted");
+});
+
+test("processChannelStep falls back to ensureSandboxReady when boot returns non-running", async () => {
+  let ensureCalls = 0;
+  let forwardedSandboxId: string | null = null;
+
+  const dependencies = createWorkflowDependencies({
+    runWithBootMessages: async () => ({
+      meta: asMeta({ status: "booting", sandboxId: "sbx-stale" }),
+      bootMessageSent: true,
     }),
     ensureSandboxReady: async () => {
       ensureCalls += 1;
@@ -329,13 +360,15 @@ test("processChannelStep emits channels.telegram_wake_summary for Telegram reque
   };
 
   const dependencies = createWorkflowDependencies({
-    ensureSandboxReady: async () =>
-      asMeta({
+    runWithBootMessages: async () => ({
+      meta: asMeta({
         status: "running",
         sandboxId: "sbx-wake-summary",
         channels: { telegram: null, slack: null, discord: null, whatsapp: null },
         lastRestoreMetrics: fakeRestoreMetrics as RestorePhaseMetrics,
       }),
+      bootMessageSent: true,
+    }),
   });
 
   const receivedAtMs = Date.now() - 50;
