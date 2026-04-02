@@ -106,6 +106,34 @@ test("Telegram webhook: valid event enqueues job and returns 200", async () => {
   });
 });
 
+test("Telegram webhook: passes receivedAtMs to drainChannelWorkflow", async () => {
+  await withHarness(async (h) => {
+    await configureTelegram(h);
+    h.fakeFetch.onPost(/api\.telegram\.org/, () =>
+      Response.json({ ok: true, result: { message_id: 1 } }),
+    );
+    const route = getTelegramWebhookRoute();
+    const beforeMs = Date.now();
+    const startMock = mock.method(telegramWebhookWorkflowRuntime, "start", async () => {});
+    const req = buildTelegramWebhook({ webhookSecret: TELEGRAM_WEBHOOK_SECRET });
+    try {
+      const result = await callRoute(route.POST, req);
+      assert.equal(result.status, 200);
+      assert.equal(startMock.mock.callCount(), 1);
+
+      // drainChannelWorkflow args: [channel, payload, origin, requestId, bootMessageId, receivedAtMs]
+      const args = startMock.mock.calls[0].arguments[1] as unknown[];
+      const receivedAtMs = args[5] as number;
+      assert.equal(typeof receivedAtMs, "number", "receivedAtMs should be a number");
+      assert.ok(receivedAtMs >= beforeMs, "receivedAtMs should be at or after test start");
+      assert.ok(receivedAtMs <= Date.now(), "receivedAtMs should be at or before now");
+      resetAfterCallbacks();
+    } finally {
+      startMock.mock.restore();
+    }
+  });
+});
+
 // ===========================================================================
 // Stale running status — fast path failure triggers wake
 // ===========================================================================

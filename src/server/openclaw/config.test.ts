@@ -12,6 +12,7 @@ import {
   toWhatsAppGatewayConfig,
   GATEWAY_CONFIG_HASH_VERSION,
   buildStartupScript,
+  buildFastRestoreScript,
   buildWebSearchSkill,
   buildWebSearchScript,
   buildVisionSkill,
@@ -1071,4 +1072,84 @@ test("buildCompareScript normalizes common shorthand model ids at runtime", asyn
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// buildFastRestoreScript — gateway reset behavior
+// ---------------------------------------------------------------------------
+
+test("buildFastRestoreScript conditionally sleeps only when pkill succeeds", () => {
+  const script = buildFastRestoreScript();
+
+  // The script should contain the conditional sleep pattern:
+  // sleep only inside the `if pkill ...` block, not unconditionally.
+  assert.ok(
+    script.includes("if pkill -f 'openclaw.gateway'"),
+    "expected conditional pkill check",
+  );
+  assert.ok(
+    script.includes("_killed_existing_gateway=1"),
+    "expected killed flag set inside if-block",
+  );
+  assert.ok(
+    script.includes("_sleep_ms=1000"),
+    "expected sleep duration set inside if-block",
+  );
+
+  // Verify sleep is inside the if-block, not standalone after pkill
+  const lines = script.split("\n");
+  const pkillLine = lines.findIndex((l) =>
+    l.includes("if pkill -f 'openclaw.gateway'"),
+  );
+  const sleepLine = lines.findIndex(
+    (l, i) => i > pkillLine && l.trim() === "sleep 1",
+  );
+  const fiLine = lines.findIndex(
+    (l, i) => i > pkillLine && l.trim() === "fi",
+  );
+  assert.ok(pkillLine >= 0, "pkill line must exist");
+  assert.ok(sleepLine >= 0, "sleep line must exist");
+  assert.ok(fiLine >= 0, "fi line must exist");
+  assert.ok(
+    sleepLine < fiLine,
+    "sleep 1 must be inside the if-block (before fi), not after",
+  );
+});
+
+test("buildFastRestoreScript emits fast_restore.gateway_reset log with killed, sleepMs, killMs", () => {
+  const script = buildFastRestoreScript();
+
+  assert.ok(
+    script.includes("fast_restore.gateway_reset"),
+    "expected gateway_reset log event",
+  );
+  assert.ok(
+    script.includes('"killed"'),
+    "expected killed field in gateway_reset log",
+  );
+  assert.ok(
+    script.includes('"sleepMs"'),
+    "expected sleepMs field in gateway_reset log",
+  );
+  assert.ok(
+    script.includes('"killMs"'),
+    "expected killMs field in gateway_reset log",
+  );
+});
+
+test("buildFastRestoreScript peer-deps fallback log includes package and reason metadata", () => {
+  const script = buildFastRestoreScript();
+
+  assert.ok(
+    script.includes("fast_restore.installing_peer_deps"),
+    "expected installing_peer_deps log event",
+  );
+  assert.ok(
+    script.includes('"package":"@buape/carbon"'),
+    "expected package field in peer_deps fallback log",
+  );
+  assert.ok(
+    script.includes('"reason":"snapshot_missing"'),
+    "expected reason field in peer_deps fallback log",
+  );
 });

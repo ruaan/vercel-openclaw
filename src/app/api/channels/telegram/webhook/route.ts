@@ -66,6 +66,7 @@ async function releaseTelegramWebhookDedupLockForRetry(
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const receivedAtMs = Date.now();
   const requestId = extractRequestId(request);
   const meta = await getInitializedMeta();
   const config = meta.channels.telegram;
@@ -187,7 +188,7 @@ export async function POST(request: Request): Promise<Response> {
 
     try {
       const origin = getPublicOrigin(request);
-      await telegramWebhookWorkflowRuntime.start(drainChannelWorkflow, ["telegram", payload, origin, requestId ?? null, bootMessageId]);
+      await telegramWebhookWorkflowRuntime.start(drainChannelWorkflow, ["telegram", payload, origin, requestId ?? null, bootMessageId, receivedAtMs]);
       logInfo("channels.telegram_workflow_started", withOperationContext(op));
     } catch (error) {
       const dedupRelease = await releaseTelegramWebhookDedupLockForRetry(dedupLock);

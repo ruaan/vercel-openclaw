@@ -548,7 +548,7 @@ fi
 # returns 500 while API routes work fine.
 OC_PKG="/home/vercel-sandbox/.global/npm/lib/node_modules/openclaw"
 if [ ! -d "\$OC_PKG/node_modules/@buape/carbon" ]; then
-  echo '{"event":"fast_restore.installing_peer_deps"}' >&2
+  echo '{"event":"fast_restore.installing_peer_deps","package":"@buape/carbon","reason":"snapshot_missing"}' >&2
   (
     set -e
     mkdir -p /tmp/openclaw-peer-deps && cd /tmp/openclaw-peer-deps
@@ -562,8 +562,23 @@ fi
 # Kill any existing gateway process — persistent sandboxes may still have
 # the previous gateway running after resume.  Snapshots have no running
 # processes so this is a no-op for snapshot restores.
-pkill -f 'openclaw.gateway' 2>/dev/null || true
-sleep 1
+_kill_started=\$(date +%s%N 2>/dev/null || echo 0)
+_killed_existing_gateway=0
+_sleep_ms=0
+if pkill -f 'openclaw.gateway' 2>/dev/null; then
+  _killed_existing_gateway=1
+  _sleep_ms=1000
+  sleep 1
+fi
+_kill_finished=\$(date +%s%N 2>/dev/null || echo 0)
+_kill_ms=0
+if [ "\$_kill_started" != "0" ] && [ "\$_kill_finished" != "0" ]; then
+  _kill_ms=\$(( (_kill_finished - _kill_started) / 1000000 ))
+fi
+printf '{"event":"fast_restore.gateway_reset","killed":%s,"sleepMs":%d,"killMs":%d}\\n' \\
+  "\$([ "\$_killed_existing_gateway" = "1" ] && echo true || echo false)" \\
+  "\$_sleep_ms" \\
+  "\$_kill_ms" >&2
 echo '{"event":"fast_restore.start_gateway"}' >&2
 # Always use Node for the gateway — Bun's WebSocket implementation does not
 # expose socket._socket.remoteAddress, which causes isLocalClient to return

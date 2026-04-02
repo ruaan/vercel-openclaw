@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { SingleMeta } from "@/shared/types";
+import type { SingleMeta, RestorePhaseMetrics } from "@/shared/types";
+import { getServerLogs, _resetLogBuffer } from "@/server/log";
 import {
   processChannelStep,
   toWorkflowProcessingError,
@@ -100,7 +101,7 @@ test("processChannelStep always ensures sandbox readiness before native forward"
     },
   });
 
-  await processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies);
+  await processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, { dependencies });
 
   assert.equal(ensureCalls, 1);
   assert.equal(forwardedSandboxId, "sbx-restored");
@@ -114,7 +115,7 @@ test("processChannelStep converts retrying forward fetch exception into Retryabl
   });
 
   await assert.rejects(
-    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies),
+    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, { dependencies }),
     (error: unknown) => {
       assert.ok(error instanceof TestRetryableError);
       assert.equal((error as TestRetryableError).retryAfter, "15s");
@@ -135,7 +136,7 @@ test("processChannelStep converts native forward 502 into RetryableError (Telegr
   });
 
   await assert.rejects(
-    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies),
+    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, { dependencies }),
     (error: unknown) => {
       assert.ok(error instanceof TestRetryableError);
       assert.equal((error as TestRetryableError).retryAfter, "15s");
@@ -156,7 +157,7 @@ test("processChannelStep keeps native forward 404 fatal (Telegram retrying path)
   });
 
   await assert.rejects(
-    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies),
+    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, { dependencies }),
     (error: unknown) => {
       assert.ok(error instanceof TestFatalError);
       return true;
@@ -179,7 +180,7 @@ test("processChannelStep uses retrying forward for Telegram, direct forward for 
     },
   });
 
-  await processChannelStep("telegram", { update_id: 1 }, "test", "req-tg", null, telegramDeps);
+  await processChannelStep("telegram", { update_id: 1 }, "test", "req-tg", null, { dependencies: telegramDeps });
   assert.ok(retryingCalled, "Telegram should use retrying forward");
   assert.ok(!directCalled, "Telegram should not use direct forward");
 
@@ -197,7 +198,7 @@ test("processChannelStep uses retrying forward for Telegram, direct forward for 
     },
   });
 
-  await processChannelStep("slack", { event: {} }, "test", "req-slack", null, slackDeps);
+  await processChannelStep("slack", { event: {} }, "test", "req-slack", null, { dependencies: slackDeps });
   assert.ok(!retryingCalled, "Slack should not use retrying forward");
   assert.ok(directCalled, "Slack should use direct forward");
 });
@@ -217,7 +218,7 @@ test("processChannelStep converts retrying forward 504 (exhausted) into Retryabl
   });
 
   await assert.rejects(
-    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies),
+    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, { dependencies }),
     (error: unknown) => {
       assert.ok(error instanceof TestRetryableError);
       assert.equal((error as TestRetryableError).retryAfter, "15s");
@@ -241,7 +242,7 @@ test("processChannelStep treats retrying forward 500 as retryable at workflow le
   });
 
   await assert.rejects(
-    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, dependencies),
+    processChannelStep("telegram", { update_id: 1 }, "test", "req-1", null, { dependencies }),
     (error: unknown) => {
       assert.ok(error instanceof TestRetryableError);
       assert.equal((error as TestRetryableError).retryAfter, "15s");
@@ -302,4 +303,124 @@ test("toWorkflowProcessingError returns FatalError for native_forward_failed 404
   );
 
   assert.ok(error instanceof TestFatalError);
+});
+
+// ===========================================================================
+// Telegram wake summary log
+// ===========================================================================
+
+test("processChannelStep emits channels.telegram_wake_summary for Telegram requests", async () => {
+  _resetLogBuffer();
+
+  const fakeRestoreMetrics: Partial<RestorePhaseMetrics> = {
+    totalMs: 2000,
+    sandboxCreateMs: 900,
+    assetSyncMs: 0,
+    startupScriptMs: 600,
+    localReadyMs: 400,
+    publicReadyMs: 100,
+    bootOverlapMs: 50,
+    skippedStaticAssetSync: true,
+    skippedDynamicConfigSync: true,
+    dynamicConfigReason: "hash-match",
+  };
+
+  const dependencies = createWorkflowDependencies({
+    ensureSandboxReady: async () =>
+      asMeta({
+        status: "running",
+        sandboxId: "sbx-wake-summary",
+        channels: { telegram: null, slack: null, discord: null, whatsapp: null },
+        lastRestoreMetrics: fakeRestoreMetrics as RestorePhaseMetrics,
+      }),
+  });
+
+  const receivedAtMs = Date.now() - 50;
+  await processChannelStep("telegram", { update_id: 1 }, "test", "req-wake", null, {
+    receivedAtMs,
+    dependencies,
+  });
+
+  const logs = getServerLogs();
+  const summaryLogs = logs.filter((e) => e.message === "channels.telegram_wake_summary");
+  assert.equal(summaryLogs.length, 1, "exactly one telegram_wake_summary log expected");
+
+  const data = summaryLogs[0].data ?? {};
+  assert.equal(data.channel, "telegram");
+  assert.equal(data.requestId, "req-wake");
+  assert.equal(data.sandboxId, "sbx-wake-summary");
+  assert.equal(typeof data.endToEndMs, "number");
+  assert.ok((data.endToEndMs as number) >= 0);
+  assert.equal(data.restoreTotalMs, 2000);
+  assert.equal(data.startupScriptMs, 600);
+  assert.equal(data.skippedStaticAssetSync, true);
+  assert.equal(data.skippedDynamicConfigSync, true);
+  assert.equal(data.dynamicConfigReason, "hash-match");
+  assert.equal(data.retryingForwardAttempts, 1);
+});
+
+test("processChannelStep does NOT emit telegram_wake_summary for Slack requests", async () => {
+  _resetLogBuffer();
+
+  const dependencies = createWorkflowDependencies();
+
+  await processChannelStep("slack", { event: {} }, "test", "req-slack-no-summary", null, { dependencies });
+
+  const logs = getServerLogs();
+  const summaryLogs = logs.filter((e) => e.message === "channels.telegram_wake_summary");
+  assert.equal(summaryLogs.length, 0, "no telegram_wake_summary log for Slack channel");
+});
+
+test("processChannelStep includes webhookToWorkflowMs when receivedAtMs is provided", async () => {
+  _resetLogBuffer();
+
+  const dependencies = createWorkflowDependencies({
+    ensureSandboxReady: async () =>
+      asMeta({
+        status: "running",
+        sandboxId: "sbx-timing",
+        channels: { telegram: null, slack: null, discord: null, whatsapp: null },
+      }),
+  });
+
+  const receivedAtMs = Date.now() - 100;
+  await processChannelStep("telegram", { update_id: 2 }, "test", "req-timing", null, {
+    receivedAtMs,
+    dependencies,
+  });
+
+  const logs = getServerLogs();
+  const summaryLogs = logs.filter((e) => e.message === "channels.telegram_wake_summary");
+  assert.equal(summaryLogs.length, 1);
+
+  const data = summaryLogs[0].data ?? {};
+  assert.equal(typeof data.webhookToWorkflowMs, "number");
+  assert.ok((data.webhookToWorkflowMs as number) >= 0);
+  assert.equal(typeof data.workflowToSandboxReadyMs, "number");
+  assert.equal(typeof data.forwardMs, "number");
+});
+
+test("processChannelStep sets webhookToWorkflowMs to null when receivedAtMs is not provided", async () => {
+  _resetLogBuffer();
+
+  const dependencies = createWorkflowDependencies({
+    ensureSandboxReady: async () =>
+      asMeta({
+        status: "running",
+        sandboxId: "sbx-no-received",
+        channels: { telegram: null, slack: null, discord: null, whatsapp: null },
+      }),
+  });
+
+  await processChannelStep("telegram", { update_id: 3 }, "test", "req-no-ts", null, {
+    dependencies,
+  });
+
+  const logs = getServerLogs();
+  const summaryLogs = logs.filter((e) => e.message === "channels.telegram_wake_summary");
+  assert.equal(summaryLogs.length, 1);
+
+  const data = summaryLogs[0].data ?? {};
+  assert.equal(data.webhookToWorkflowMs, null);
+  assert.equal(data.endToEndMs, null);
 });

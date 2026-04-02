@@ -154,7 +154,7 @@ export async function setupOpenClaw(
       stderr: stderr.slice(-500),
     });
   } else {
-    logInfo("openclaw.setup.peer_deps_installed", { sandboxId: sandbox.sandboxId });
+    logInfo("openclaw.bootstrap.peer_deps_ready", { sandboxId: sandbox.sandboxId, package: "@buape/carbon" });
   }
 
   // Install Bun for faster gateway startup on snapshot restore.

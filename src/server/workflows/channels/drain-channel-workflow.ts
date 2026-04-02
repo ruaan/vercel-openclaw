@@ -10,14 +10,6 @@ import { deleteMessage as deleteWhatsAppMessage } from "@/server/channels/whatsa
 import { logInfo, logWarn } from "@/server/log";
 import { getInitializedMeta } from "@/server/store/store";
 
-export type NativeHandlerWaitResult = {
-  attempts: number;
-  firstReadyMs: number | null;
-  confirmedReadyCount: number;
-  totalMs: number;
-  finalStatus: number | null;
-};
-
 export type RetryingForwardResult = {
   ok: boolean;
   status: number;
@@ -49,16 +41,22 @@ type DrainChannelErrorDependencies = Pick<
   "FatalError" | "RetryableError" | "isRetryable"
 >;
 
+export type ProcessChannelStepOptions = {
+  receivedAtMs?: number | null;
+  dependencies?: DrainChannelWorkflowDependencies;
+};
+
 export async function drainChannelWorkflow(
   channel: string,
   payload: unknown,
   origin: string,
   requestId: string | null,
   bootMessageId?: number | string | null,
+  receivedAtMs?: number | null,
 ): Promise<void> {
   "use workflow";
 
-  await processChannelStep(channel, payload, origin, requestId, bootMessageId ?? null);
+  await processChannelStep(channel, payload, origin, requestId, bootMessageId ?? null, { receivedAtMs: receivedAtMs ?? null });
 }
 
 export async function processChannelStep(
@@ -67,12 +65,14 @@ export async function processChannelStep(
   origin: string,
   requestId: string | null,
   bootMessageId?: number | string | null,
-  dependencies?: DrainChannelWorkflowDependencies,
+  options?: ProcessChannelStepOptions,
 ): Promise<void> {
   "use step";
 
+  const receivedAtMs = options?.receivedAtMs ?? null;
+  const workflowStartedAt = Date.now();
   const resolvedDependencies =
-    dependencies ?? (await loadDrainChannelWorkflowDependencies());
+    options?.dependencies ?? (await loadDrainChannelWorkflowDependencies());
   const {
     reconcileDiscordIntegration,
     runWithBootMessages,
@@ -122,6 +122,8 @@ export async function processChannelStep(
       timeoutMs: WORKFLOW_SANDBOX_READY_TIMEOUT_MS,
     });
 
+    const sandboxReadyAt = Date.now();
+
     logInfo("channels.workflow_sandbox_ready", {
       channel,
       requestId,
@@ -137,6 +139,8 @@ export async function processChannelStep(
     // Non-Telegram channels use the direct (non-retrying) forward path.
     let forwardResult: { ok: boolean; status: number };
     let retryingResult: RetryingForwardResult | null = null;
+
+    const forwardStartedAt = Date.now();
 
     if (channel === "telegram") {
       retryingResult = await forwardToNativeHandlerWithRetry(
@@ -155,6 +159,8 @@ export async function processChannelStep(
       );
     }
 
+    const forwardCompletedAt = Date.now();
+
     logInfo("channels.workflow_native_forward_result", {
       channel,
       requestId,
@@ -165,6 +171,33 @@ export async function processChannelStep(
       retryingForwardTotalMs: retryingResult?.totalMs ?? null,
       retryingForwardRetries: retryingResult?.retries?.length ?? null,
     });
+
+    // Emit one end-to-end Telegram wake summary per request.
+    if (channel === "telegram") {
+      const restore = readyMeta.lastRestoreMetrics;
+      logInfo("channels.telegram_wake_summary", {
+        channel,
+        requestId,
+        sandboxId: readyMeta.sandboxId,
+        bootResultStatus: bootResult.meta.status,
+        webhookToWorkflowMs: typeof receivedAtMs === "number" ? Math.max(0, workflowStartedAt - receivedAtMs) : null,
+        workflowToSandboxReadyMs: sandboxReadyAt - workflowStartedAt,
+        forwardMs: forwardCompletedAt - forwardStartedAt,
+        endToEndMs: typeof receivedAtMs === "number" ? Math.max(0, forwardCompletedAt - receivedAtMs) : null,
+        restoreTotalMs: restore?.totalMs ?? null,
+        sandboxCreateMs: restore?.sandboxCreateMs ?? null,
+        assetSyncMs: restore?.assetSyncMs ?? null,
+        startupScriptMs: restore?.startupScriptMs ?? null,
+        localReadyMs: restore?.localReadyMs ?? null,
+        publicReadyMs: restore?.publicReadyMs ?? null,
+        bootOverlapMs: restore?.bootOverlapMs ?? null,
+        skippedStaticAssetSync: restore?.skippedStaticAssetSync ?? null,
+        skippedDynamicConfigSync: restore?.skippedDynamicConfigSync ?? null,
+        dynamicConfigReason: restore?.dynamicConfigReason ?? null,
+        retryingForwardAttempts: retryingResult?.attempts ?? null,
+        retryingForwardTotalMs: retryingResult?.totalMs ?? null,
+      });
+    }
 
     // Clean up the boot message after the native handler has processed.
     if (existingBootHandle) {
@@ -181,135 +214,7 @@ export async function processChannelStep(
   }
 }
 
-const NATIVE_HANDLER_POLL_INTERVAL_MS = 1_000;
-const NATIVE_HANDLER_CONFIRM_INTERVAL_MS = 250;
-const NATIVE_HANDLER_POLL_TIMEOUT_MS = 30_000;
-const NATIVE_HANDLER_REQUIRED_READY_PROBES = 2;
 const NATIVE_HANDLER_TIMEOUT_ERROR = "native_handler_timeout";
-
-function buildNativeHandlerTimeoutError(
-  channel: ChannelName,
-  timeoutMs: number,
-): Error {
-  return new Error(
-    `${NATIVE_HANDLER_TIMEOUT_ERROR} channel=${channel} timeoutMs=${timeoutMs}`,
-  );
-}
-
-/**
- * Wait for the native channel handler to be fully ready.
- *
- * The Telegram provider on port 8787 starts AFTER the gateway on port 3000.
- * The Vercel proxy may return 502/503 before the handler is listening, and
- * the handler's HTTP server may accept connections before the message
- * processing pipeline is fully initialized.
- *
- * Strategy: poll until we get consecutive non-proxy-error responses (< 500)
- * to confirm the handler is stable, replacing the previous fixed 5s delay.
- */
-async function waitForNativeHandler(
-  channel: ChannelName,
-  meta: import("@/shared/types").SingleMeta,
-  getSandboxDomain: (port?: number) => Promise<string>,
-): Promise<NativeHandlerWaitResult> {
-  // Only Telegram uses a separate port; other channels use the main gateway port
-  if (channel !== "telegram") {
-    return {
-      attempts: 0,
-      firstReadyMs: null,
-      confirmedReadyCount: 0,
-      totalMs: 0,
-      finalStatus: null,
-    };
-  }
-
-  const { OPENCLAW_TELEGRAM_WEBHOOK_PORT } = await import("@/server/openclaw/config");
-  const startedAt = Date.now();
-  const deadline = startedAt + NATIVE_HANDLER_POLL_TIMEOUT_MS;
-  let attempts = 0;
-  let firstReadyMs: number | null = null;
-  let confirmedReadyCount = 0;
-  let finalStatus: number | null = null;
-
-  while (Date.now() < deadline) {
-    attempts += 1;
-    try {
-      const sandboxUrl = await getSandboxDomain(OPENCLAW_TELEGRAM_WEBHOOK_PORT);
-      const probe = await fetch(`${sandboxUrl}/telegram-webhook`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(meta.channels.telegram?.webhookSecret
-            ? { "x-telegram-bot-api-secret-token": meta.channels.telegram.webhookSecret }
-            : {}),
-        },
-        body: JSON.stringify({ update_id: 0 }),
-        signal: AbortSignal.timeout(5_000),
-      });
-      finalStatus = probe.status;
-      // 502/503 from the Vercel proxy means the handler isn't listening yet.
-      // Only accept responses that come from the actual handler (< 500).
-      if (probe.status < 500) {
-        confirmedReadyCount += 1;
-        if (firstReadyMs === null) {
-          firstReadyMs = Date.now() - startedAt;
-        }
-        logInfo("channels.native_handler_probe_ready", {
-          channel,
-          attempt: attempts,
-          status: probe.status,
-          confirmedReadyCount,
-          firstReadyMs,
-        });
-        if (confirmedReadyCount >= NATIVE_HANDLER_REQUIRED_READY_PROBES) {
-          const totalMs = Date.now() - startedAt;
-          logInfo("channels.native_handler_ready", {
-            channel,
-            attempts,
-            confirmedReadyCount,
-            firstReadyMs,
-            totalMs,
-            finalStatus: probe.status,
-          });
-          return {
-            attempts,
-            firstReadyMs,
-            confirmedReadyCount,
-            totalMs,
-            finalStatus: probe.status,
-          };
-        }
-        await new Promise((r) => setTimeout(r, NATIVE_HANDLER_CONFIRM_INTERVAL_MS));
-        continue;
-      }
-      // Got a 5xx — reset consecutive ready count
-      confirmedReadyCount = 0;
-      logInfo("channels.native_handler_proxy_error", {
-        channel,
-        attempt: attempts,
-        status: probe.status,
-      });
-    } catch (error) {
-      // Connection refused or timeout — handler not yet listening
-      confirmedReadyCount = 0;
-      logInfo("channels.native_handler_probe_failed", {
-        channel,
-        attempt: attempts,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    await new Promise((r) => setTimeout(r, NATIVE_HANDLER_POLL_INTERVAL_MS));
-  }
-  logWarn("channels.native_handler_poll_timeout", {
-    channel,
-    attempts,
-    timeoutMs: NATIVE_HANDLER_POLL_TIMEOUT_MS,
-    firstReadyMs,
-    confirmedReadyCount,
-    finalStatus,
-  });
-  throw buildNativeHandlerTimeoutError(channel, NATIVE_HANDLER_POLL_TIMEOUT_MS);
-}
 
 /**
  * Minimal adapter that satisfies runWithBootMessages type requirements.

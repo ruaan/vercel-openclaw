@@ -1,7 +1,18 @@
 # Plan 04: Restore-Internal Follow-Up (Gated on Measured Evidence)
 
 > **This is a fallback plan, not the first implementation cycle.**
-> Restore-focused changes should begin only if Plan 01 shows the Telegram bridge is no longer the dominant wake cost, or Plans 02 and 03 are insufficient to meet the target wake latency.
+> Restore-focused changes should begin only if Plan 01 measurement shows
+> `sandboxCreateMs` does not dominate end-to-end wake time, or if hot-spare
+> escalation is not viable.
+
+## What has already shipped
+
+| Optimisation | Status |
+| ------------ | ------ |
+| Plans 02 + 03 (remove 5-second stabilization sleep, collapse probe + forward) | **Done** — `forwardToNativeHandlerWithRetry` replaces the old probe-then-sleep-then-forward sequence |
+| Conditional `sleep 1` after `pkill` in `buildFastRestoreScript()` | **Done** — snapshot wakes skip the delay when no old gateway process exists |
+| `@buape/carbon` baked into bootstrap | **Done** — peer deps installed before any snapshot is taken; restore-time npm fallback only fires on old snapshots |
+| `channels.telegram_wake_summary` end-to-end log | **Done** — one structured record per stopped-path Telegram wake |
 
 ## Scope
 
@@ -14,15 +25,15 @@
 
 ## Prerequisite
 
-Collect a real `lastRestoreMetrics` sample from a sleeping-sandbox Telegram wake **after** Plans 02 and 03 are applied. The phase breakdown must include at minimum:
+Collect a real `channels.telegram_wake_summary` sample from a sleeping-sandbox
+Telegram wake. The phase breakdown must include at minimum:
 
 - `sandboxCreateMs` (Vercel SDK resume latency)
 - `assetSyncMs` (static + dynamic file upload)
 - `startupScriptMs` (fast-restore script execution)
 - `localReadyMs` (gateway readiness inside sandbox)
 - `publicReadyMs` (proxy readiness from outside)
-- `firewallSyncMs`
-- `totalMs`
+- `restoreTotalMs`
 - `skippedStaticAssetSync` / `skippedDynamicConfigSync`
 - `cronRestoreOutcome` (if wake was cron-triggered)
 
@@ -57,6 +68,7 @@ The dominant phase determines which branch below to pursue.
 1. Compare `startupScriptMs` vs `localReadyMs` — if `localReadyMs` is much larger, the fast-restore script finishes but the gateway is slow to bind.
 2. Check if `openclaw` is doing a full cold start (npm install, config parse, plugin load) vs a warm restart.
 3. Look at the fast-restore script for sequential steps that could overlap.
+4. Check `fast_restore.gateway_reset` log — if `killed=true` and `sleepMs=1000`, the 1-second kill delay is firing on every wake (expected only when resuming a sandbox that still has a running gateway).
 
 ### Actions
 
@@ -66,7 +78,31 @@ The dominant phase determines which branch below to pursue.
 
 ---
 
-## Branch C: Reusable restore-target miss rate is high
+## Branch C: `sandboxCreateMs` dominates (hot-spare escalation)
+
+**Diagnosis**: The Vercel SDK resume latency is the single largest phase and
+further host-side optimisations hit diminishing returns.
+
+### Investigate
+
+1. Confirm `sandboxCreateMs` > 50% of `endToEndMs` across 3+ samples.
+2. Determine whether a warm-standby ("hot spare") sandbox is viable within the
+   product and cost constraints.
+
+### Actions
+
+- **Hot-spare sandbox**: Keep a second sandbox in a warm state (running but idle),
+  ready to accept forwarded payloads immediately. Swap the active sandbox on wake
+  instead of waiting for resume.
+- **Pros**: Eliminates `sandboxCreateMs` entirely from the wake path.
+- **Cons**: Doubles sandbox cost while idle; adds complexity for metadata
+  synchronisation between active and spare sandboxes.
+- **Decision point**: only pursue if measurement confirms `sandboxCreateMs`
+  dominates **and** the product goal explicitly targets sub-second wake latency.
+
+---
+
+## Branch D: Reusable restore-target miss rate is high
 
 **Diagnosis**: Many wakes are not hitting the `restorePreparedStatus: "ready"` fast path because the oracle cannot keep the snapshot fresh between wakes.
 
@@ -79,21 +115,20 @@ The dominant phase determines which branch below to pursue.
 ### Actions
 
 - **Improve oracle freshness**: Trigger a prepare cycle immediately after each deploy, not just on the next watchdog tick.
-- **Reduce spurious dirty transitions**: If `restorePreparedStatus` flips to `"dirty"` on metadata writes that don't affect restore config, narrow the dirty-trigger conditions in `lifecycle.ts` (currently lines ~952–955, ~989).
+- **Reduce spurious dirty transitions**: If `restorePreparedStatus` flips to `"dirty"` on metadata writes that don't affect restore config, narrow the dirty-trigger conditions.
 - **Shorten oracle cycle time**: If `prepareRestoreTarget()` is slow because it does a full stop/snapshot, evaluate whether a hot snapshot (if v2 ever supports it) or incremental prepare is feasible.
 
 ---
 
 ## Excluded from this cycle
 
-- **Keep-alive or longer sleep-time policy changes**: These are cost/product tradeoffs, not restore optimizations. Only reconsider if the product goal explicitly changes.
+- **Keep-alive or longer sleep-time policy changes**: These are cost/product tradeoffs, not restore optimisations. Only reconsider if the product goal explicitly changes.
 - **Moving full config delivery into env vars**: Documented blocker — the Sandbox API env payload limit is too small for the full base64-encoded config. Not viable without upstream API changes.
 
 ## Verification
 
-1. Collect `lastRestoreMetrics` from at least 3 sleeping-sandbox Telegram wakes **before** any restore-focused change.
+1. Collect `channels.telegram_wake_summary` from at least 3 sleeping-sandbox Telegram wakes **before** any restore-focused change.
 2. Apply the change targeting the dominant phase.
-3. Collect `lastRestoreMetrics` from at least 3 wakes **after** the change.
+3. Collect `channels.telegram_wake_summary` from at least 3 wakes **after** the change.
 4. Compare phase-by-phase timings. The targeted phase must show measurable improvement without regression in other phases.
-5. Run the agentic-testing skill to verify no functional regressions.
-6. Inspect wake-path logs for the full phase sequence to confirm the change is exercised.
+5. Run `node scripts/verify.mjs` to confirm no functional regressions.

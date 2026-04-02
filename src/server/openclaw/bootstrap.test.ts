@@ -57,6 +57,55 @@ async function createHandle(h: ReturnType<typeof createScenarioHarness>) {
 // setupOpenClaw — command sequence
 // ---------------------------------------------------------------------------
 
+test("setupOpenClaw installs @buape/carbon peer dep during bootstrap", async () => {
+  const h = createScenarioHarness();
+  try {
+    const handle = await createHandle(h);
+
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok-peer",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    const peerDepCmd = handle.commands.find(
+      (c) =>
+        c.cmd === "bash"
+        && c.args?.[1]?.includes("@buape/carbon"),
+    );
+    assert.ok(peerDepCmd, "peer-deps install command should include @buape/carbon");
+    assert.ok(
+      peerDepCmd.args?.[1]?.includes("npm install @buape/carbon"),
+      "peer-deps command should run npm install @buape/carbon",
+    );
+  } finally {
+    h.teardown();
+  }
+});
+
+test("setupOpenClaw logs openclaw.bootstrap.peer_deps_ready on success", async () => {
+  const { _resetLogBuffer, getServerLogs } = await import("@/server/log");
+  const h = createScenarioHarness();
+  try {
+    _resetLogBuffer();
+    const handle = await createHandle(h);
+
+    await setupOpenClaw(handle, {
+      gatewayToken: "tok-log",
+      proxyOrigin: "https://proxy.test",
+    });
+
+    const peerReady = getServerLogs().filter(
+      (e) => e.message === "openclaw.bootstrap.peer_deps_ready",
+    );
+    assert.equal(peerReady.length, 1, "expected single peer_deps_ready log");
+    const data = peerReady[0]!.data as Record<string, unknown>;
+    assert.equal(data.package, "@buape/carbon", "log should include package name");
+    assert.equal(data.sandboxId, handle.sandboxId, "log should include sandboxId");
+  } finally {
+    h.teardown();
+  }
+});
+
 test("setupOpenClaw executes commands in correct order", async () => {
   const h = createScenarioHarness();
   try {
