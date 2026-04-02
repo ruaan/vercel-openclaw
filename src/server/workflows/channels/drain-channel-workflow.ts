@@ -138,6 +138,7 @@ export async function processChannelStep(
       requestId,
       bootResultStatus: bootResult.meta.status,
       sandboxId: readyMeta.sandboxId,
+      portUrlKeys: readyMeta.portUrls ? Object.keys(readyMeta.portUrls) : null,
     });
 
     // --- Phase 2: Forward raw payload to native handler ---
@@ -283,11 +284,35 @@ async function forwardToNativeHandler(
       throw new Error(`unsupported_native_forward_channel:${channel}`);
   }
 
+  logInfo("channels.native_forward_attempt", {
+    channel,
+    forwardUrl,
+    sandboxId: meta.sandboxId,
+    hasWebhookSecret: channel === "telegram" ? Boolean(headers["x-telegram-bot-api-secret-token"]) : undefined,
+  });
+
   const response = await fetch(forwardUrl, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
   });
+
+  // Capture response body for diagnostics — native handler errors are
+  // otherwise invisible since we only returned status before.
+  let responseBody: string | null = null;
+  try {
+    responseBody = await response.text();
+  } catch { /* best effort */ }
+
+  if (!response.ok) {
+    logWarn("channels.native_forward_error_response", {
+      channel,
+      status: response.status,
+      forwardUrl,
+      sandboxId: meta.sandboxId,
+      responseBody: responseBody?.slice(0, 500) ?? null,
+    });
+  }
 
   return { ok: response.ok, status: response.status };
 }
