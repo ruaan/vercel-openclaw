@@ -632,7 +632,6 @@ export function FirewallPanel({
                           <div className="domain-group-entry">
                             <div>
                               <code>{entry.domain}</code>
-                              <DomainEvidence entry={entry} />
                             </div>
                             <span className="learned-actions">
                               <button
@@ -696,7 +695,6 @@ export function FirewallPanel({
                               <li key={entry.domain} className="domain-group-entry">
                                 <div>
                                   <code>{entry.domain}</code>
-                                  <DomainEvidence entry={entry} />
                                 </div>
                                 <span className="learned-actions">
                                   <button
@@ -928,18 +926,6 @@ export function FirewallPanel({
 // ---------------------------------------------------------------------------
 // Per-domain evidence component
 // ---------------------------------------------------------------------------
-
-function DomainEvidence({ entry }: { entry: LearnedDomain }) {
-  const categories = (entry.categories ?? []).filter((c) => c !== "unknown");
-  return (
-    <span className="muted-copy">
-      {entry.hitCount} hit{entry.hitCount === 1 ? "" : "s"}
-      {categories.length > 0 ? ` \u00b7 ${categories.join(", ")}` : ""}
-      {" \u00b7 "}first {formatRelativeTime(entry.firstSeenAt)}
-      {" \u00b7 "}last {formatRelativeTime(entry.lastSeenAt)}
-    </span>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Client-side eTLD+1 grouping fallback (for filtered results)
