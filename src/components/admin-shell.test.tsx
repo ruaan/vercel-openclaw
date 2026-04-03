@@ -657,3 +657,133 @@ describe("requestJsonCore CSRF header injection", () => {
     assert.equal(getHeaders().get("x-requested-with"), "CustomValue");
   });
 });
+
+describe("requestJsonCore background/quiet mode", () => {
+  test("toastSuccess: false suppresses success toast", async () => {
+    const toasts: { type: string; message: string }[] = [];
+    const result = await requestJsonCore("/api/test", {
+      label: "Quiet action",
+      method: "POST",
+      toastSuccess: false,
+    }, makeDeps({
+      fetchFn: mockFetch(200, { ok: true }),
+      toastSuccess: (m) => toasts.push({ type: "success", message: m }),
+      toastError: (m) => toasts.push({ type: "error", message: m }),
+    }));
+
+    assert.ok(result.ok);
+    assert.deepEqual(toasts, []);
+  });
+
+  test("toastError: false suppresses error toast on failure", async () => {
+    const toasts: { type: string; message: string }[] = [];
+    const result = await requestJsonCore("/api/test", {
+      label: "Quiet action",
+      method: "POST",
+      toastError: false,
+    }, makeDeps({
+      fetchFn: mockFetch(500, null),
+      toastSuccess: (m) => toasts.push({ type: "success", message: m }),
+      toastError: (m) => toasts.push({ type: "error", message: m }),
+    }));
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(toasts, []);
+  });
+
+  test("toastError: false suppresses toast on 401 but still clears auth", async () => {
+    const toasts: string[] = [];
+    let statusCleared = false;
+    const result = await requestJsonCore("/api/test", {
+      label: "Quiet action",
+      method: "POST",
+      toastError: false,
+    }, makeDeps({
+      fetchFn: mockFetch(401),
+      toastError: (m) => toasts.push(m),
+      setStatus: () => { statusCleared = true; },
+    }));
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && result.meta.code === "unauthorized");
+    assert.ok(statusCleared, "auth must still be cleared");
+    assert.deepEqual(toasts, [], "no toast in quiet mode");
+  });
+
+  test("toastError: false suppresses toast on network error", async () => {
+    const toasts: string[] = [];
+    const result = await requestJsonCore("/api/test", {
+      label: "Quiet action",
+      method: "POST",
+      toastError: false,
+    }, makeDeps({
+      fetchFn: throwingFetch(new Error("Connection refused")),
+      toastError: (m) => toasts.push(m),
+    }));
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && result.meta.code === "network-error");
+    assert.deepEqual(toasts, [], "no toast in quiet mode");
+  });
+
+  test("trackPending: false skips setPendingAction calls", async () => {
+    const calls: Array<string | null> = [];
+    await requestJsonCore("/api/test", {
+      label: "Background action",
+      method: "POST",
+      trackPending: false,
+    }, makeDeps({
+      fetchFn: mockFetch(200, null),
+      setPendingAction: (v) => calls.push(v),
+    }));
+
+    assert.deepEqual(calls, [], "setPendingAction should not be called");
+  });
+
+  test("trackPending: false skips setPendingAction even on failure", async () => {
+    const calls: Array<string | null> = [];
+    await requestJsonCore("/api/test", {
+      label: "Background action",
+      method: "POST",
+      trackPending: false,
+    }, makeDeps({
+      fetchFn: throwingFetch(new Error("fail")),
+      setPendingAction: (v) => calls.push(v),
+    }));
+
+    assert.deepEqual(calls, [], "setPendingAction should not be called");
+  });
+
+  test("all quiet options together: no toasts, no pending, still emits events", async () => {
+    const { events, stop } = listenForAdminActionEvents();
+    const toasts: string[] = [];
+    const pending: Array<string | null> = [];
+
+    try {
+      const result = await requestJsonCore("/api/firewall/ingest", {
+        label: "Ingest firewall learning",
+        method: "POST",
+        refreshAfter: false,
+        toastSuccess: false,
+        toastError: false,
+        trackPending: false,
+      }, makeDeps({
+        fetchFn: mockFetch(200, null),
+        toastSuccess: (m) => toasts.push(m),
+        toastError: (m) => toasts.push(m),
+        setPendingAction: (v) => pending.push(v),
+      }));
+
+      assert.ok(result.ok);
+      assert.deepEqual(toasts, []);
+      assert.deepEqual(pending, []);
+
+      // Events still fire
+      assert.equal(events.length, 2);
+      assert.equal(events[0].event, "admin.action.start");
+      assert.equal(events[1].event, "admin.action.success");
+    } finally {
+      stop();
+    }
+  });
+});

@@ -21,6 +21,10 @@ export type ReadJsonDeps = {
   fetchFn?: typeof fetch;
 };
 
+export type ReadJsonOptions = {
+  toastError?: boolean;
+};
+
 function logAdminReadLifecycle(
   event: "admin.read.start" | "admin.read.success" | "admin.read.error",
   payload: Record<string, unknown>,
@@ -46,9 +50,11 @@ function logAdminReadLifecycle(
 export async function fetchAdminJsonCore<T>(
   action: string,
   deps: ReadJsonDeps,
+  options: ReadJsonOptions = {},
 ): Promise<ReadJsonResult<T>> {
   const requestId = createAdminActionRequestId();
   const doFetch = deps.fetchFn ?? fetch;
+  const shouldToastError = options.toastError !== false;
 
   logAdminReadLifecycle("admin.read.start", { requestId, action });
 
@@ -76,7 +82,9 @@ export async function fetchAdminJsonCore<T>(
         code: "unauthorized",
         error,
       });
-      deps.toastError(error);
+      if (shouldToastError) {
+        deps.toastError(error);
+      }
       return { ok: false, error, status: 401 };
     }
 
@@ -97,7 +105,9 @@ export async function fetchAdminJsonCore<T>(
         code: "http-error",
         error,
       });
-      deps.toastError(error);
+      if (shouldToastError) {
+        deps.toastError(error);
+      }
       return { ok: false, error, status: response.status };
     }
 
@@ -125,7 +135,9 @@ export async function fetchAdminJsonCore<T>(
       code: "network-error",
       error,
     });
-    deps.toastError(error);
+    if (shouldToastError) {
+      deps.toastError(error);
+    }
     return { ok: false, error, status: null };
   }
 }

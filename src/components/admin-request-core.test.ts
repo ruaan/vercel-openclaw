@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fetchAdminJsonCore, type ReadJsonDeps } from "./admin-request-core";
+import {
+  fetchAdminJsonCore,
+  type ReadJsonDeps,
+} from "./admin-request-core";
 
 function makeDeps(overrides: Partial<ReadJsonDeps> = {}): ReadJsonDeps {
   return {
@@ -179,6 +182,113 @@ test("network error: toasts, returns status null, and emits start + error logs",
     const errLog = logs.warns.find((l) => l.event === "admin.read.error");
     assert.ok(errLog, "expected admin.read.error log");
     assert.equal(errLog!.status, null);
+    assert.equal(errLog!.code, "network-error");
+  } finally {
+    logs.restore();
+  }
+});
+
+// --- quiet mode (toastError: false) ---
+
+test("200 with toastError: false: returns data normally", async () => {
+  const logs = captureConsoleLogs();
+  try {
+    const result = await fetchAdminJsonCore<{ ok: boolean }>(
+      "/api/status",
+      makeDeps({ fetchFn: mockFetch(200, { ok: true }) }),
+      { toastError: false },
+    );
+
+    assert.equal(result.ok, true);
+    assert.ok(result.ok && result.data.ok === true);
+
+    const start = logs.infos.find((l) => l.event === "admin.read.start");
+    assert.ok(start);
+    const success = logs.infos.find((l) => l.event === "admin.read.success");
+    assert.ok(success);
+  } finally {
+    logs.restore();
+  }
+});
+
+test("401 with toastError: false: clears auth, emits logs, but does not toast", async () => {
+  const errors: string[] = [];
+  let statusCleared = false;
+  const logs = captureConsoleLogs();
+
+  try {
+    const result = await fetchAdminJsonCore(
+      "/api/status",
+      makeDeps({
+        fetchFn: mockFetch(401),
+        toastError: (msg) => errors.push(msg),
+        setStatus: () => {
+          statusCleared = true;
+        },
+      }),
+      { toastError: false },
+    );
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && result.status === 401);
+    assert.ok(statusCleared, "expected setStatus(null) to be called");
+    assert.deepEqual(errors, [], "should not toast when toastError is false");
+
+    const errLog = logs.warns.find((l) => l.event === "admin.read.error");
+    assert.ok(errLog, "expected admin.read.error log even in quiet mode");
+    assert.equal(errLog!.code, "unauthorized");
+  } finally {
+    logs.restore();
+  }
+});
+
+test("503 with toastError: false: returns error result, emits logs, but does not toast", async () => {
+  const errors: string[] = [];
+  const logs = captureConsoleLogs();
+
+  try {
+    const result = await fetchAdminJsonCore(
+      "/api/status",
+      makeDeps({
+        fetchFn: mockFetch(503),
+        toastError: (msg) => errors.push(msg),
+      }),
+      { toastError: false },
+    );
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && result.status === 503);
+    assert.deepEqual(errors, [], "should not toast when toastError is false");
+
+    const errLog = logs.warns.find((l) => l.event === "admin.read.error");
+    assert.ok(errLog, "expected admin.read.error log even in quiet mode");
+    assert.equal(errLog!.code, "http-error");
+  } finally {
+    logs.restore();
+  }
+});
+
+test("network error with toastError: false: returns error result, emits logs, but does not toast", async () => {
+  const errors: string[] = [];
+  const logs = captureConsoleLogs();
+
+  try {
+    const result = await fetchAdminJsonCore(
+      "/api/status",
+      makeDeps({
+        fetchFn: throwingFetch(new Error("Connection refused")),
+        toastError: (msg) => errors.push(msg),
+      }),
+      { toastError: false },
+    );
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && result.status === null);
+    assert.ok(!result.ok && result.error === "Connection refused");
+    assert.deepEqual(errors, [], "should not toast when toastError is false");
+
+    const errLog = logs.warns.find((l) => l.event === "admin.read.error");
+    assert.ok(errLog, "expected admin.read.error log even in quiet mode");
     assert.equal(errLog!.code, "network-error");
   } finally {
     logs.restore();

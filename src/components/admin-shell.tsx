@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, startTransition, useEffect, useState } from "react";
+import { useCallback, startTransition, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Tabs } from "@/components/ui/tabs";
 import { BrandIcon } from "@/components/ui/brand-icon";
@@ -25,7 +25,10 @@ import type {
   AdminActionEvent,
   LiveConfigSyncPayload,
 } from "@/components/admin-types";
-import type { ReadJsonDeps } from "@/components/admin-request-core";
+import {
+  fetchAdminJsonCore,
+  type ReadJsonDeps,
+} from "@/components/admin-request-core";
 
 // Verification stays inside the Channels surface.
 // Do not add a separate launch/verification tab or card.
@@ -96,20 +99,34 @@ function extractLiveConfigSync(
   return null;
 }
 
+export type RequestJsonInput = RequestInit & {
+  label: string;
+  successMessage?: string;
+  refreshAfter?: boolean;
+  toastSuccess?: boolean;
+  toastError?: boolean;
+  trackPending?: boolean;
+};
+
 export async function requestJsonCore<T>(
   action: string,
-  input: RequestInit & { label: string; successMessage?: string; refreshAfter?: boolean },
+  input: RequestJsonInput,
   deps: RequestJsonDeps,
 ): Promise<ActionResult<T>> {
   const requestId = createAdminActionRequestId();
   const refreshAfter = input.refreshAfter !== false;
+  const shouldToastSuccess = input.toastSuccess !== false;
+  const shouldToastError = input.toastError !== false;
+  const trackPending = input.trackPending !== false;
   const method =
     typeof input.method === "string" && input.method.trim().length > 0
       ? input.method.toUpperCase()
       : "GET";
   const doFetch = deps.fetchFn ?? fetch;
 
-  deps.setPendingAction(input.label);
+  if (trackPending) {
+    deps.setPendingAction(input.label);
+  }
   emitAdminActionEvent({
     event: "admin.action.start",
     requestId,
@@ -154,7 +171,9 @@ export async function requestJsonCore<T>(
         ...result.meta,
         error: result.error,
       });
-      deps.toastError(result.error);
+      if (shouldToastError) {
+        deps.toastError(result.error);
+      }
       return result;
     }
 
@@ -181,7 +200,9 @@ export async function requestJsonCore<T>(
         ...result.meta,
         error: result.error,
       });
-      deps.toastError(message);
+      if (shouldToastError) {
+        deps.toastError(message);
+      }
       return result;
     }
 
@@ -226,10 +247,10 @@ export async function requestJsonCore<T>(
         outcome: syncOutcome!,
         reason: bodySync?.reason ?? null,
       });
-      if (syncMessage) {
+      if (syncMessage && shouldToastError) {
         deps.toastError(syncMessage);
       }
-    } else {
+    } else if (shouldToastSuccess) {
       deps.toastSuccess(input.successMessage ?? input.label);
     }
     return result;
@@ -255,10 +276,14 @@ export async function requestJsonCore<T>(
       ...result.meta,
       error: result.error,
     });
-    deps.toastError(message);
+    if (shouldToastError) {
+      deps.toastError(message);
+    }
     return result;
   } finally {
-    deps.setPendingAction(null);
+    if (trackPending) {
+      deps.setPendingAction(null);
+    }
   }
 }
 
@@ -285,6 +310,14 @@ export function AdminShell({
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loginBusy, setLoginBusy] = useState(false);
 
+  const readDeps = useMemo<ReadJsonDeps>(
+    () => ({
+      setStatus: () => setStatus(null),
+      toastError: (message) => toast.error(message),
+    }),
+    [],
+  );
+
   const fetchStatus = useCallback(async ({
     health = false,
     userInitiated = false,
@@ -292,37 +325,15 @@ export function AdminShell({
     health?: boolean;
     userInitiated?: boolean;
   } = {}) => {
-    try {
-      const response = await fetch(getStatusRequestPath(health), {
-        cache: "no-store",
-        headers: { accept: "application/json" },
-      });
-
-      if (response.status === 401) {
-        setStatus(null);
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(`Status request failed with ${response.status}`);
-      }
-
-      const payload = (await response.json()) as StatusPayload;
-      setStatus(payload);
-    } catch (error) {
-      if (error instanceof TypeError || error instanceof DOMException) {
-        if (userInitiated) {
-          toast.error("Unable to reach the status endpoint");
-        }
-        return; // Network-level failure; next poll will recover.
-      }
-      if (userInitiated) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to load status",
-        );
-      }
+    const result = await fetchAdminJsonCore<StatusPayload>(
+      getStatusRequestPath(health),
+      readDeps,
+      { toastError: userInitiated },
+    );
+    if (result.ok) {
+      setStatus(result.data);
     }
-  }, []);
+  }, [readDeps]);
 
   const refreshPassive = useCallback(async () => {
     await fetchStatus();
@@ -340,23 +351,25 @@ export function AdminShell({
   }, [fetchStatus]);
 
   const ingestFirewallLearning = useCallback(async () => {
-    try {
-      const response = await fetch("/api/firewall/ingest", {
+    await requestJsonCore<null>(
+      "/api/firewall/ingest",
+      {
+        label: "Ingest firewall learning",
         method: "POST",
-        cache: "no-store",
-        headers: {
-          accept: "application/json",
-          "x-requested-with": "XMLHttpRequest",
-        },
-      });
-
-      if (response.status === 401) {
-        setStatus(null);
-      }
-    } catch {
-      // Best-effort background ingest; status refresh below handles visible errors.
-    }
-  }, []);
+        refreshAfter: false,
+        toastSuccess: false,
+        toastError: false,
+        trackPending: false,
+      },
+      {
+        setPendingAction,
+        setStatus: () => setStatus(null),
+        refreshPassive,
+        toastSuccess: (message) => toast.success(message),
+        toastError: (message) => toast.error(message),
+      },
+    );
+  }, [refreshPassive, setPendingAction]);
 
   const shouldPollFirewallIngest =
     status?.firewall.mode === "learning" && status.status === "running";
@@ -490,11 +503,6 @@ export function AdminShell({
   }
 
   const busy = pendingAction !== null;
-
-  const readDeps: ReadJsonDeps = {
-    setStatus: () => setStatus(null),
-    toastError: (msg) => toast.error(msg),
-  };
 
   return (
     <main className="shell">
