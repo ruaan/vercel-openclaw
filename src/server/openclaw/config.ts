@@ -696,6 +696,43 @@ if [ "\$_ready" = "1" ]; then
   # left a non-silent pending request, it blocks auto-pairing for all
   # subsequent local CLI connections (cron tool, gateway status, etc.).
   rm -f "${OPENCLAW_STATE_DIR}/devices/pending.json"
+  # Force-pair: re-establish device identity in paired.json so local CLI
+  # connections (cron tool, gateway status, etc.) are accepted by the
+  # gateway without manual pairing approval.
+  node -e '
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const stateDir = "${OPENCLAW_STATE_DIR}";
+const identityDir = path.join(stateDir, "identity");
+const identityPath = path.join(identityDir, "device.json");
+let identity;
+try { identity = JSON.parse(fs.readFileSync(identityPath, "utf8")); } catch {}
+if (!identity) {
+  fs.mkdirSync(identityDir, { recursive: true });
+  const kp = crypto.generateKeyPairSync("ed25519");
+  identity = {
+    publicKeyPem: kp.publicKey.export({ type: "spki", format: "pem" }),
+    privateKeyPem: kp.privateKey.export({ type: "pkcs8", format: "pem" }),
+    createdAtMs: Date.now(),
+  };
+  fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2) + "\\n", { mode: 0o600 });
+}
+const pubKey = crypto.createPublicKey(identity.publicKeyPem);
+const spkiDer = pubKey.export({ type: "spki", format: "der" });
+const rawKey = spkiDer.subarray(12);
+const deviceId = crypto.createHash("sha256").update(rawKey).digest("hex");
+const publicKeyRawBase64Url = rawKey.toString("base64").replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=/g,"");
+const devicesDir = path.join(stateDir, "devices");
+fs.mkdirSync(devicesDir, { recursive: true });
+const pairedPath = path.join(devicesDir, "paired.json");
+let paired = {};
+try { paired = JSON.parse(fs.readFileSync(pairedPath, "utf8")); } catch {}
+if (!paired || typeof paired !== "object" || Array.isArray(paired)) paired = {};
+paired[deviceId] = { deviceId, publicKey: publicKeyRawBase64Url, approvedAtMs: Date.now() };
+fs.writeFileSync(pairedPath, JSON.stringify(paired, null, 2) + "\\n", { mode: 0o600 });
+console.error(JSON.stringify({ event: "fast_restore.force_pair", deviceId }));
+' 2>&1 || echo '{"event":"fast_restore.force_pair_failed"}' >&2
   # Ensure OPENCLAW_GATEWAY_PORT is in the shell profile so agent tools
   # (cron, gateway status) can connect.  Old snapshots may lack this.
   ${buildGatewayPortProfileShell()}
