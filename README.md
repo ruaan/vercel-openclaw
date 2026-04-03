@@ -48,7 +48,7 @@ Click **Deploy with Vercel** above, set a password, and you're up.
 | [Upstash Redis](https://vercel.com/marketplace/upstash-redis) | Persistent state — metadata, snapshots, channel config |
 | [Vercel Workflow](https://vercel.com/docs/workflow) | Durable channel message delivery (Slack, Telegram; WhatsApp and Discord are experimental) |
 | [Vercel Queues](https://vercel.com/docs/queues) | Launch verification probe delivery |
-| [Vercel Cron](https://vercel.com/docs/cron-jobs) | Watchdog health checks and scheduled wake (daily by default; Pro users can increase to every 5 min in `vercel.json`) |
+| [Vercel Cron](https://vercel.com/docs/cron-jobs) | Watchdog health checks and scheduled wake |
 
 ## Configuration
 
@@ -57,6 +57,7 @@ The only required variable is `ADMIN_SECRET`. Everything else is auto-configured
 - **Upstash Redis** — provisioned by the deploy button
 - **AI Gateway auth** — handled via Vercel OIDC on deployed environments
 - **Cron secret** — falls back to `ADMIN_SECRET` if `CRON_SECRET` is not set separately
+- **Watchdog cron** — runs once daily by default so Hobby-plan deploys succeed. On a Pro plan you can change the schedule in `vercel.json` to `*/5 * * * *` for more responsive auto-wake when OpenClaw cron jobs are due
 
 See [docs/environment-variables.md](docs/environment-variables.md) for the full reference, including optional tuning (vCPU count, sleep timeout, version pinning) and alternative auth modes.
 
