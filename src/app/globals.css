@@ -2798,9 +2798,9 @@ html body[data-scroll-locked] {
 
 .danger-zone-card {
   padding: 16px;
-  border: 1px solid rgba(127, 29, 29, 0.5);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   border-radius: 8px;
-  background: rgba(127, 29, 29, 0.16);
+  background: var(--danger-surface);
 }
 
 .danger-zone-body {
