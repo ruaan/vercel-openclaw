@@ -28,18 +28,21 @@ const IS_TRANSITIONAL = new Set<SingleStatus>([
   "setup",
 ]);
 
-const STEP_ORDER = [
-  "Creating sandbox",
-  "Installing OpenClaw",
-  "Configuring",
-  "Starting gateway",
-  "Ready",
-] as const;
+function getStepOrder(isResuming: boolean) {
+  return [
+    isResuming ? "Resuming sandbox" : "Creating sandbox",
+    "Installing OpenClaw",
+    "Configuring",
+    "Starting gateway",
+    "Ready",
+  ] as const;
+}
 
 function getSetupStepIndex(progress: SetupProgress | null): number {
   if (!progress) return 0;
   switch (progress.phase) {
     case "creating-sandbox":
+    case "resuming-sandbox":
       return 0;
     case "installing-openclaw":
     case "installing-bun":
@@ -381,6 +384,9 @@ export function StatusPanel({
   );
   const activeStepIndex = getSetupStepIndex(setupProgress);
   const setupFailed = setupProgress?.phase === "failed";
+  const isResuming = setupProgress?.phase === "resuming-sandbox" ||
+    lifecycleStatus === "restoring";
+  const stepOrder = getStepOrder(isResuming);
 
   const isRunning = lifecycleStatus === "running" && effectiveStatus !== "asleep";
   const primaryFacts = isRunning
@@ -422,7 +428,7 @@ export function StatusPanel({
         <section className="status-setup-card">
           <div className="status-setup-stack">
             <div className="status-setup-steps" aria-label="Setup steps">
-              {STEP_ORDER.map((step, index) => (
+              {stepOrder.map((step, index) => (
                 <div
                   key={step}
                   className="status-setup-step"

@@ -43,6 +43,7 @@ export type SetupProgress = {
   active: boolean;
   phase:
     | "creating-sandbox"
+    | "resuming-sandbox"
     | "installing-openclaw"
     | "installing-bun"
     | "cleaning-cache"

@@ -2478,6 +2478,7 @@ async function createAndBootstrapSandboxWithinLifecycleLock(
       // Resumed persistent sandbox — run fast restore (update config/tokens, restart gateway)
       const resumeStart = Date.now();
       logInfo("sandbox.create.persistent_resume", ctx({ sandboxId: sandbox.sandboxId }));
+      progress.setPhase("resuming-sandbox", "Resuming persistent sandbox");
       progress.appendLine("system", "Resumed persistent sandbox — running fast restore");
 
       const latest = await getInitializedMeta();
