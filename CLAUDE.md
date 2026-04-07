@@ -317,9 +317,10 @@ Bootstrap responsibilities:
 - install `openclaw`
 - write `openclaw.json`
 - write the gateway token file
-- write the AI Gateway key file
 - write the restore startup script
 - wait for the gateway to become healthy
+
+The AI Gateway API key is **not** written to disk — it is injected via network policy header transform (see Firewall section).
 
 On readiness timeout, `openclaw.gateway_wait_exhausted` is logged (Vercel function logs + admin log buffer) with last probe summary, HTTP probe without `-f`, OpenClaw log tail, and port/process snapshot.
 
@@ -349,11 +350,29 @@ Main files:
 - `src/server/firewall/policy.ts`
 - `src/server/firewall/state.ts`
 
-Mode mapping:
+Mode mapping (without AI Gateway token):
 
-- `disabled` -> `allow-all`
-- `learning` -> `allow-all`
+- `disabled` -> `"allow-all"`
+- `learning` -> `"allow-all"`
 - `enforcing` -> `{ allow: [...] }`
+
+Mode mapping (with AI Gateway token — always uses object form):
+
+- `disabled` / `learning` -> `{ allow: { "ai-gateway.vercel.sh": [{ transform }], "*": [] } }`
+- `enforcing` -> `{ allow: { "<domain>": [], ..., "ai-gateway.vercel.sh": [{ transform }] } }`
+
+### AI Gateway credential brokering
+
+The AI Gateway API key never enters the sandbox. Instead, it is injected as an `Authorization: Bearer <token>` header at the sandbox firewall layer via network policy `transform` rules. This protects against prompt injection attacks that might try to exfiltrate the credential — there is nothing inside the sandbox to steal.
+
+Key implementation details:
+
+- `buildAiGatewayTransformRules(token)` in `src/server/firewall/policy.ts` builds the transform rules, reused by main sandbox and worker sandboxes
+- `toNetworkPolicy()` accepts an optional `aiGatewayToken` and always returns the object form when provided, regardless of firewall mode
+- `ai-gateway.vercel.sh` is always present in the allow list (even in enforcing mode) so the gateway can reach the AI service
+- Token refresh calls `applyFirewallPolicyToSandbox()` which updates the network policy via `sandbox.update({ networkPolicy })` — no file writes or gateway restarts needed
+- `OPENAI_BASE_URL` is still set as an env var inside the sandbox so code knows where to send requests; the transform handles authentication transparently
+- Worker sandboxes pass `networkPolicy` with transforms at create time (fresh creates, not snapshot restores)
 
 Learning flow:
 

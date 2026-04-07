@@ -466,6 +466,7 @@ test("worker-sandbox execute passes command.env through to runCommand", async ()
     const handle = h.controller.lastCreated()!;
     assert.deepEqual(handle.commands[0]?.env, {
       INPUT_PATH: "/workspace/input.png",
+      OPENAI_BASE_URL: "https://ai-gateway.vercel.sh/v1",
     });
   } finally {
     h.teardown();

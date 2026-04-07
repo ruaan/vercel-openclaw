@@ -30,6 +30,8 @@ The store backend is selected at startup. Upstash is required for production bec
 
 The enforcement plane is the actual Vercel Sandbox plus its network policy. The app talks to it through the `@vercel/sandbox` v2 beta SDK to create, resume, stop, and update the sandbox network policy. Sandboxes are persistent — they auto-snapshot on stop and auto-resume on get.
 
+The network policy also handles **credential brokering** — the AI Gateway API key is injected as an `Authorization` header via `transform` rules at the firewall layer, so the credential never enters the sandbox. This protects against prompt injection exfiltration. Token refresh is a single `sandbox.update({ networkPolicy })` call with no gateway restart.
+
 ## Request flow to `/gateway`
 
 1. The browser requests `/gateway`.

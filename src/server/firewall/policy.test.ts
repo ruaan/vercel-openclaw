@@ -110,3 +110,103 @@ test("policy: applyFirewallPolicyToSandbox records event in handle log", async (
   const policyEvents = events.filter((e) => e.kind === "update_network_policy");
   assert.equal(policyEvents.length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// toNetworkPolicy with aiGatewayToken (header injection)
+// ---------------------------------------------------------------------------
+
+const TEST_TOKEN = "test-ai-gateway-token";
+const expectedTransform = [
+  { transform: [{ headers: { authorization: `Bearer ${TEST_TOKEN}` } }] },
+];
+
+test("policy: disabled mode with token returns object form with wildcard and transform", () => {
+  const policy = toNetworkPolicy("disabled", [], TEST_TOKEN);
+  assert.deepEqual(policy, {
+    allow: {
+      "ai-gateway.vercel.sh": expectedTransform,
+      "*": [],
+    },
+  });
+});
+
+test("policy: disabled mode with token ignores allowlist", () => {
+  const policy = toNetworkPolicy("disabled", ["example.com"], TEST_TOKEN);
+  assert.deepEqual(policy, {
+    allow: {
+      "ai-gateway.vercel.sh": expectedTransform,
+      "*": [],
+    },
+  });
+});
+
+test("policy: learning mode with token returns object form with wildcard and transform", () => {
+  const policy = toNetworkPolicy("learning", ["example.com"], TEST_TOKEN);
+  assert.deepEqual(policy, {
+    allow: {
+      "ai-gateway.vercel.sh": expectedTransform,
+      "*": [],
+    },
+  });
+});
+
+test("policy: enforcing mode with token returns record form with transform on ai-gateway", () => {
+  const policy = toNetworkPolicy("enforcing", ["api.openai.com", "ai-gateway.vercel.sh"], TEST_TOKEN);
+  assert.deepEqual(policy, {
+    allow: {
+      "ai-gateway.vercel.sh": expectedTransform,
+      "api.openai.com": [],
+    },
+  });
+});
+
+test("policy: enforcing mode with token ensures ai-gateway even when not in allowlist", () => {
+  const policy = toNetworkPolicy("enforcing", ["registry.npmjs.org"], TEST_TOKEN);
+  assert.deepEqual(policy, {
+    allow: {
+      "registry.npmjs.org": [],
+      "ai-gateway.vercel.sh": expectedTransform,
+    },
+  });
+});
+
+test("policy: enforcing mode with token sorts domains", () => {
+  const policy = toNetworkPolicy("enforcing", ["z.io", "a.io"], TEST_TOKEN);
+  const keys = Object.keys((policy as { allow: Record<string, unknown> }).allow);
+  // Sorted allowlist domains come first, then ai-gateway appended at end
+  assert.deepEqual(keys, ["a.io", "z.io", "ai-gateway.vercel.sh"]);
+});
+
+test("policy: enforcing mode with token does not duplicate ai-gateway", () => {
+  const policy = toNetworkPolicy("enforcing", ["ai-gateway.vercel.sh", "other.com"], TEST_TOKEN);
+  const allow = (policy as { allow: Record<string, unknown> }).allow;
+  const aiGatewayEntries = Object.keys(allow).filter(
+    (k) => k === "ai-gateway.vercel.sh",
+  );
+  assert.equal(aiGatewayEntries.length, 1);
+});
+
+test("policy: enforcing mode with token and empty allowlist still includes ai-gateway", () => {
+  const policy = toNetworkPolicy("enforcing", [], TEST_TOKEN);
+  assert.deepEqual(policy, {
+    allow: {
+      "ai-gateway.vercel.sh": expectedTransform,
+    },
+  });
+});
+
+test("policy: applyFirewallPolicyToSandbox with token passes transform to handle", async () => {
+  const events: SandboxEvent[] = [];
+  const handle = new FakeSandboxHandle("sbx-transform", events);
+  const meta = createDefaultMeta(Date.now(), "tok");
+  meta.firewall.mode = "disabled";
+
+  const result = await applyFirewallPolicyToSandbox(handle, meta, TEST_TOKEN);
+  assert.deepEqual(result, {
+    allow: {
+      "ai-gateway.vercel.sh": expectedTransform,
+      "*": [],
+    },
+  });
+  assert.deepEqual(handle.networkPolicies[0], result);
+});

@@ -21,7 +21,6 @@ export type RetryingForwardResult = {
 };
 
 export type DrainChannelWorkflowDependencies = {
-  processChannelJob: typeof import("@/server/channels/driver").processChannelJob;
   isRetryable: typeof import("@/server/channels/driver").isRetryable;
   createSlackAdapter: typeof import("@/server/channels/slack/adapter").createSlackAdapter;
   createTelegramAdapter: typeof import("@/server/channels/telegram/adapter").createTelegramAdapter;
@@ -724,7 +723,7 @@ export function toWorkflowProcessingError(
 
 async function loadDrainChannelWorkflowDependencies(): Promise<DrainChannelWorkflowDependencies> {
   const [
-    { processChannelJob, isRetryable },
+    { isRetryable },
     { createSlackAdapter },
     { createTelegramAdapter },
     { createDiscordAdapter },
@@ -746,7 +745,6 @@ async function loadDrainChannelWorkflowDependencies(): Promise<DrainChannelWorkf
   ]);
 
   return {
-    processChannelJob,
     isRetryable,
     createSlackAdapter,
     createTelegramAdapter,

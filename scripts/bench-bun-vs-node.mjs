@@ -77,7 +77,6 @@ const PATHS = {
   OPENCLAW_STATE_DIR: "/home/vercel-sandbox/.openclaw",
   OPENCLAW_CONFIG_PATH: "/home/vercel-sandbox/.openclaw/openclaw.json",
   OPENCLAW_GATEWAY_TOKEN_PATH: "/home/vercel-sandbox/.openclaw/.gateway-token",
-  OPENCLAW_AI_GATEWAY_API_KEY_PATH: "/home/vercel-sandbox/.openclaw/.ai-gateway-api-key",
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH: "/home/vercel-sandbox/.openclaw/.fast-restore.sh",
   OPENCLAW_LOG_FILE: "/tmp/openclaw.log",
   BUN_BIN: "/home/vercel-sandbox/.bun/bin/bun",
@@ -199,7 +198,6 @@ async function bootstrap(variant) {
   await sandbox.writeFiles([
     { path: PATHS.OPENCLAW_CONFIG_PATH, content: Buffer.from(config) },
     { path: PATHS.OPENCLAW_GATEWAY_TOKEN_PATH, content: Buffer.from(`bench-token-${Date.now()}`) },
-    { path: PATHS.OPENCLAW_AI_GATEWAY_API_KEY_PATH, content: Buffer.from("") },
     { path: PATHS.OPENCLAW_FAST_RESTORE_SCRIPT_PATH, content: Buffer.from(buildFastRestoreScript(variant)) },
   ]);
   await sandbox.runCommand("chmod", ["+x", PATHS.OPENCLAW_FAST_RESTORE_SCRIPT_PATH]);

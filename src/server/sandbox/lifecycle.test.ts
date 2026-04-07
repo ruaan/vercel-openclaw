@@ -40,7 +40,6 @@ import {
   createOperationContext,
 } from "@/server/observability/operation-context";
 import {
-  OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   OPENCLAW_BIN,
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
@@ -953,9 +952,9 @@ test("persistent resume skips static files when manifest hash matches on disk", 
 
       // Credentials should not be in writtenFiles (passed via env)
       const credentialWrites = seededHandle.writtenFiles.filter(
-        (f) => f.path === OPENCLAW_GATEWAY_TOKEN_PATH || f.path === OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+        (f) => f.path === OPENCLAW_GATEWAY_TOKEN_PATH || f.path.endsWith(".ai-gateway-api-key"),
       );
-      assert.equal(credentialWrites.length, 0, "Credentials should not be in writtenFiles (passed via env)");
+      assert.equal(credentialWrites.length, 0, "Credentials should not be in writtenFiles");
     } finally {
       globalThis.fetch = originalFetch;
       _setSandboxControllerForTesting(null);
@@ -1148,9 +1147,12 @@ test("restoreSandboxFromSnapshot records successful firewall sync before running
 
       assert.equal(meta.status, "running");
       assert.equal(handle.networkPolicies.length, 1);
-      assert.deepEqual(handle.networkPolicies[0], {
-        allow: ["api.openai.com", "registry.npmjs.org"],
-      });
+      // With a token, the policy uses the record form with ai-gateway transform
+      const policy = handle.networkPolicies[0] as { allow: Record<string, unknown[]> };
+      assert.ok(policy.allow, "should have allow record");
+      assert.ok(policy.allow["api.openai.com"], "should include api.openai.com");
+      assert.ok(policy.allow["registry.npmjs.org"], "should include registry.npmjs.org");
+      assert.ok(policy.allow["ai-gateway.vercel.sh"], "should include ai-gateway with transform");
       // v2: resume path applies firewall but doesn't record detailed sync outcome
       assert.ok(
         (meta.lastRestoreMetrics?.firewallSyncMs ?? 0) >= 0,
@@ -1358,7 +1360,7 @@ test("restoreSandboxFromSnapshot passes credentials and config via env to fast-r
       assert.ok(bashCmd, "Should run fast-restore script");
       // No writeFiles for credentials (passed via env at create time)
       const credentialWrites = handle.writtenFiles.filter(
-        (f) => f.path === OPENCLAW_GATEWAY_TOKEN_PATH || f.path === OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+        (f) => f.path === OPENCLAW_GATEWAY_TOKEN_PATH || f.path.endsWith(".ai-gateway-api-key"),
       );
       assert.equal(credentialWrites.length, 0, "Credentials should not be in writtenFiles");
     } finally {
@@ -2306,10 +2308,10 @@ test("[lifecycle] ensureFreshGatewayToken: triggers refresh when meta TTL expire
 
       const handle = fake.handlesByIds.get("sbx-token-refresh") as FakeSandboxHandle | undefined;
       if (handle) {
-        const shCmd = handle.commands.find(
-          (c) => c.cmd === "sh" && c.args?.[0] === "-c",
+        assert.ok(
+          handle.networkPolicies.length >= 1,
+          "Should attempt token refresh via network policy update when meta TTL expired",
         );
-        assert.ok(shCmd, "Should attempt token refresh when meta TTL expired");
       }
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);
@@ -2317,7 +2319,7 @@ test("[lifecycle] ensureFreshGatewayToken: triggers refresh when meta TTL expire
   });
 });
 
-test("[lifecycle] ensureFreshGatewayToken: writes token then runs startup script", async () => {
+test("[lifecycle] ensureFreshGatewayToken: updates network policy with fresh token (no disk write or restart)", async () => {
   const fake = new FakeSandboxController();
   await withTestEnv(fake, async () => {
     _setAiGatewayTokenOverrideForTesting("fresh-oidc-token");
@@ -2337,23 +2339,24 @@ test("[lifecycle] ensureFreshGatewayToken: writes token then runs startup script
       const handle = fake.handlesByIds.get("sbx-refresh-script") as FakeSandboxHandle | undefined;
       assert.ok(handle, "Handle should exist");
 
-      // Step 1: token write via sh -c
+      // Token refresh now updates the network policy instead of writing to disk
+      assert.ok(
+        handle.networkPolicies.length >= 1,
+        "Should update network policy with fresh token",
+      );
+
+      // No disk write or gateway restart needed
       const writeCmd = handle.commands.find(
         (c) => c.cmd === "sh" && c.args?.[0] === "-c",
       );
-      assert.ok(writeCmd, "Should write token via sh -c");
-      assert.ok(
-        writeCmd.args?.includes("fresh-oidc-token"),
-        "Token value should be passed as argument",
-      );
+      assert.equal(writeCmd, undefined, "Should not write token to disk");
 
-      // Step 2: gateway restart via the on-disk restart script
       const restartCmd = handle.commands.find(
         (c) => c.cmd === "bash" && c.args?.[0] === OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
       );
-      assert.ok(restartCmd, "Should relaunch gateway via restart script");
+      assert.equal(restartCmd, undefined, "Should not restart gateway");
 
-      // Step 3: metadata updated
+      // Metadata updated
       const meta = await getInitializedMeta();
       assert.ok(
         meta.lastTokenRefreshAt !== null && meta.lastTokenRefreshAt > Date.now() - 5000,
@@ -2405,7 +2408,7 @@ test("[lifecycle] ensureFreshGatewayToken: no OIDC token available -> skips sile
   });
 });
 
-test("[lifecycle] ensureFreshGatewayToken: restart failure does not corrupt metadata", async () => {
+test("[lifecycle] ensureFreshGatewayToken: policy update failure does not corrupt metadata", async () => {
   const fake = new FakeSandboxController();
 
   await withTestEnv(fake, async () => {
@@ -2415,29 +2418,23 @@ test("[lifecycle] ensureFreshGatewayToken: restart failure does not corrupt meta
       const refreshTime = Date.now() - 15 * 60 * 1000;
       await mutateMeta((meta) => {
         meta.status = "running";
-        meta.sandboxId = "sbx-restart-fail";
+        meta.sandboxId = "sbx-policy-fail";
         meta.lastAccessedAt = null;
         meta.lastTokenRefreshAt = refreshTime;
         meta.lastTokenExpiresAt = Math.floor(Date.now() / 1000) - 5 * 60;
         meta.lastTokenSource = "oidc";
       });
 
-      // Pre-create the handle with a failing restart script command
-      const handle = new FakeSandboxHandle("sbx-restart-fail", fake.events);
-      const origRunCommand = handle.runCommand.bind(handle);
-      handle.runCommand = async (...runArgs: Parameters<typeof handle.runCommand>) => {
-        const cmd = typeof runArgs[0] === "string" ? runArgs[0] : runArgs[0].cmd;
-        const cmdArgs = typeof runArgs[0] === "string" ? runArgs[1] : runArgs[0].args;
-        if (cmd === "bash" && cmdArgs?.[0] === OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH) {
-          throw new Error("gateway restart failed");
-        }
-        return origRunCommand(...runArgs);
+      // Pre-create the handle with a failing network policy update
+      const handle = new FakeSandboxHandle("sbx-policy-fail", fake.events);
+      handle.networkPolicyHandler = async () => {
+        throw new Error("network policy update failed");
       };
-      fake.handlesByIds.set("sbx-restart-fail", handle);
+      fake.handlesByIds.set("sbx-policy-fail", handle);
 
       await ensureFreshGatewayToken();
 
-      // Metadata should NOT be updated since restart failed
+      // Metadata should NOT be updated since policy update failed
       const meta = await getInitializedMeta();
       assert.equal(meta.status, "running", "Status should still be running");
       assert.equal(
@@ -2503,20 +2500,16 @@ test("[lifecycle] ensureFreshGatewayToken: force=true bypasses throttle", async 
       // Without force, should skip
       await ensureFreshGatewayToken();
       let handle = fake.handlesByIds.get("sbx-force-refresh") as FakeSandboxHandle | undefined;
-      const cmdCountBefore = handle?.commands.length ?? 0;
+      const policyCountBefore = handle?.networkPolicies.length ?? 0;
 
       // With force, should refresh even though interval not elapsed
       await ensureFreshGatewayToken({ force: true });
       handle = fake.handlesByIds.get("sbx-force-refresh") as FakeSandboxHandle | undefined;
       assert.ok(handle, "Handle should exist");
 
-      const shCmd = handle.commands.find(
-        (c) => c.cmd === "sh" && c.args?.[0] === "-c",
-      );
-      assert.ok(shCmd, "Should attempt token refresh when force=true");
       assert.ok(
-        handle.commands.length > cmdCountBefore,
-        "Should have run commands after force refresh",
+        handle.networkPolicies.length > policyCountBefore,
+        "Should update network policy when force=true",
       );
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);
@@ -2524,18 +2517,13 @@ test("[lifecycle] ensureFreshGatewayToken: force=true bypasses throttle", async 
   });
 });
 
-test("[lifecycle] ensureFreshGatewayToken: skips restart when token on disk matches fresh token", async () => {
+test("[lifecycle] ensureFreshGatewayToken: updates network policy and metadata on refresh", async () => {
   const fake = new FakeSandboxController();
   await withTestEnv(fake, async () => {
     _setAiGatewayTokenOverrideForTesting("same-token");
 
     try {
-      // Pre-create the handle with the same token already on disk
       const handle = new FakeSandboxHandle("sbx-same-token", fake.events);
-      handle.writtenFiles.push({
-        path: OPENCLAW_AI_GATEWAY_API_KEY_PATH,
-        content: Buffer.from("same-token"),
-      });
       fake.handlesByIds.set("sbx-same-token", handle);
 
       await mutateMeta((meta) => {
@@ -2549,17 +2537,23 @@ test("[lifecycle] ensureFreshGatewayToken: skips restart when token on disk matc
 
       await ensureFreshGatewayToken();
 
-      // Should NOT have relaunched the gateway when the token is unchanged.
+      // Network policy updated with the fresh token transform
+      assert.ok(
+        handle.networkPolicies.length >= 1,
+        "Should update network policy on token refresh",
+      );
+
+      // No gateway restart or disk writes
       const restartCmd = handle.commands.find(
         (c) => c.cmd === "bash" && c.args?.[0] === OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH,
       );
-      assert.equal(restartCmd, undefined, "Should not restart gateway when token unchanged");
+      assert.equal(restartCmd, undefined, "Should not restart gateway");
 
-      // But lastTokenRefreshAt should still be updated
+      // lastTokenRefreshAt should be updated
       const meta = await getInitializedMeta();
       assert.ok(
         meta.lastTokenRefreshAt !== null && meta.lastTokenRefreshAt > Date.now() - 5000,
-        "lastTokenRefreshAt should be updated even when skipping restart",
+        "lastTokenRefreshAt should be updated",
       );
     } finally {
       _setAiGatewayTokenOverrideForTesting(null);

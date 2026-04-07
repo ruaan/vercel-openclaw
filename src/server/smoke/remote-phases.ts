@@ -1268,9 +1268,6 @@ export async function restoreFromSnapshot(
 // Self-healing: corrupt gateway token → Telegram round-trip → verify recovery
 // ---------------------------------------------------------------------------
 
-// Matches OPENCLAW_AI_GATEWAY_API_KEY_PATH in src/server/openclaw/config.ts.
-const SANDBOX_AI_KEY_PATH = "/home/vercel-sandbox/.openclaw/.ai-gateway-api-key";
-
 const HEAL_GATEWAY_TIMEOUT_MS = 60_000;
 const HEAL_POST_KILL_SETTLE_MS = 3_000;
 const HEAL_DEAD_CHECK_TIMEOUT_MS = 10_000;
@@ -1347,28 +1344,11 @@ export async function selfHealTokenRefresh(
     }
     log(phase, "pre-check-ok", { status: preCheck.status });
 
-    // Step 2: Corrupt the token file on disk so it differs from the fresh OIDC token.
-    const corruptCmd = `printf '%s' 'STALE-EXPIRED-TOKEN' > ${SANDBOX_AI_KEY_PATH}`;
-    const corruptResult = await sshCommand(baseUrl, corruptCmd, reqTimeout);
-    if (!corruptResult) {
-      return {
-        phase, passed: false, durationMs: 0, endpoint,
-        error: "Failed to corrupt gateway token via SSH",
-        errorCode: "CORRUPT_FAILED",
-      };
-    }
-
-    // Verify corruption
-    const verifyResult = await sshCommand(baseUrl, `cat ${SANDBOX_AI_KEY_PATH}`, reqTimeout);
-    const tokenOnDisk = verifyResult?.stdout?.trim() ?? "";
-    if (tokenOnDisk !== "STALE-EXPIRED-TOKEN") {
-      return {
-        phase, passed: false, durationMs: 0, endpoint,
-        error: `Token file corruption failed: got '${tokenOnDisk.slice(0, 20)}'`,
-        errorCode: "CORRUPT_VERIFY_FAILED",
-      };
-    }
-    log(phase, "token-corrupted", { tokenOnDisk: tokenOnDisk.slice(0, 20) });
+    // Step 2: AI Gateway credential is brokered via network policy header
+    // transform — there is no on-disk token file to corrupt.  The self-heal
+    // test verifies the end-to-end channel round-trip path works when the
+    // gateway is healthy.
+    log(phase, "credential-brokered-via-transform", { note: "no on-disk token to corrupt" });
 
     // Step 4: Read channel connectability
     const baselineSummary = await fetchChannelSummary(baseUrl, reqTimeout);

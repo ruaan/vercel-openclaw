@@ -176,7 +176,6 @@ export async function POST(request: Request): Promise<Response> {
         await sandbox.writeFiles(
           buildDynamicRestoreFiles({
             proxyOrigin: origin,
-            apiKey: freshApiKey,
             telegramBotToken: latest.channels.telegram?.botToken,
             telegramWebhookSecret: latest.channels.telegram?.webhookSecret,
             slackCredentials: slackConfig

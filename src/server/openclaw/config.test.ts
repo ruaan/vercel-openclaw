@@ -192,7 +192,7 @@ test("buildGatewayConfig omits telegram webhookUrl when proxy origin is missing"
 test("buildWebSearchSkill returns valid skill metadata", () => {
   const skill = buildWebSearchSkill();
   assert.ok(skill.includes("name: web-search"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildWebSearchScript references web_search and chat completions", () => {
@@ -204,7 +204,7 @@ test("buildWebSearchScript references web_search and chat completions", () => {
 test("buildVisionSkill returns valid skill metadata", () => {
   const skill = buildVisionSkill();
   assert.ok(skill.includes("name: vision"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildVisionScript references image_url and chat completions", () => {
@@ -216,7 +216,7 @@ test("buildVisionScript references image_url and chat completions", () => {
 test("buildTtsSkill returns valid skill metadata", () => {
   const skill = buildTtsSkill();
   assert.ok(skill.includes("name: tts"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildTtsScript uses AI Gateway and outputs MEDIA line", () => {
@@ -228,7 +228,7 @@ test("buildTtsScript uses AI Gateway and outputs MEDIA line", () => {
 test("buildStructuredExtractSkill returns valid skill metadata", () => {
   const skill = buildStructuredExtractSkill();
   assert.ok(skill.includes("name: structured-extract"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildStructuredExtractScript uses json_schema response format", () => {
@@ -592,7 +592,7 @@ test("toWhatsAppGatewayConfig extracts gateway-relevant fields", () => {
 test("buildEmbeddingsSkill returns valid skill metadata", () => {
   const skill = buildEmbeddingsSkill();
   assert.ok(skill.includes("name: embeddings"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildEmbeddingsScript uses /v1/embeddings", () => {
@@ -606,7 +606,7 @@ test("buildEmbeddingsScript uses /v1/embeddings", () => {
 test("buildSemanticSearchSkill returns valid skill metadata", () => {
   const skill = buildSemanticSearchSkill();
   assert.ok(skill.includes("name: semantic-search"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildSemanticSearchScript uses embeddings and cosine similarity", () => {
@@ -622,7 +622,7 @@ test("buildSemanticSearchScript uses embeddings and cosine similarity", () => {
 test("buildTranscriptionSkill returns valid skill metadata", () => {
   const skill = buildTranscriptionSkill();
   assert.ok(skill.includes("name: transcription"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildTranscriptionScript uses /v1/audio/transcriptions and whisper-1", () => {
@@ -637,7 +637,7 @@ test("buildTranscriptionScript uses /v1/audio/transcriptions and whisper-1", () 
 test("buildReasoningSkill returns valid skill metadata", () => {
   const skill = buildReasoningSkill();
   assert.ok(skill.includes("name: reasoning"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildReasoningScript uses chat completions and reasoning effort", () => {
@@ -923,7 +923,7 @@ test("buildReasoningScript rejects missing prompt at runtime", async () => {
 test("buildCompareSkill returns valid skill metadata", () => {
   const skill = buildCompareSkill();
   assert.ok(skill.includes("name: compare-models"));
-  assert.ok(skill.includes("AI_GATEWAY_API_KEY"));
+  assert.ok(skill.includes("env: []"), "skill should not require AI_GATEWAY_API_KEY env");
 });
 
 test("buildCompareScript uses chat completions and Promise.all", () => {
@@ -1391,6 +1391,38 @@ test("buildForcePairScript exits non-zero on malformed paired.json (array instea
     // Original corrupted file must still exist
     const original = await readFile(join(dir, "devices", "paired.json"), "utf8");
     assert.equal(original, "[]", "corrupted paired.json must not be overwritten");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildForcePairScript purges stale entries that lack role/scopes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fp-purge-stale-"));
+  try {
+    // Pre-seed paired.json with a stale entry (no role/scopes — pre-9a142fc format)
+    await mkdir(join(dir, "devices"), { recursive: true });
+    await writeFile(
+      join(dir, "devices", "paired.json"),
+      JSON.stringify({
+        "stale-device-id": {
+          deviceId: "stale-device-id",
+          publicKey: "staleKey",
+          approvedAtMs: 1000000,
+        },
+      }),
+    );
+
+    const result = await runForcePairScript(dir);
+    assert.equal(result.status, 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
+
+    const paired = JSON.parse(await readFile(join(dir, "devices", "paired.json"), "utf8"));
+    const entries = Object.values(paired) as Array<{ role?: string }>;
+    assert.equal(entries.length, 1, "should have exactly one entry after purge");
+    assert.equal(entries[0]!.role, "operator", "surviving entry should have operator role");
+    assert.ok(
+      !("stale-device-id" in paired),
+      "stale entry without role should be purged",
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

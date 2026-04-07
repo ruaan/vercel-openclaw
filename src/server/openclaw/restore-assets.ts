@@ -135,7 +135,6 @@ export function buildStaticRestoreFiles(): { path: string; content: Buffer }[] {
 
 export function buildDynamicRestoreFiles(options: {
   proxyOrigin: string;
-  apiKey?: string;
   telegramBotToken?: string;
   telegramWebhookSecret?: string;
   slackCredentials?: { botToken: string; signingSecret: string };
@@ -146,7 +145,7 @@ export function buildDynamicRestoreFiles(options: {
       path: OPENCLAW_CONFIG_PATH,
       content: Buffer.from(
         buildGatewayConfig(
-          options.apiKey,
+          undefined, // apiKey — injected via network policy transform
           options.proxyOrigin,
           options.telegramBotToken,
           options.slackCredentials,
@@ -179,14 +178,19 @@ export function buildRestoreRuntimeEnv(
   // env payload limit and the base64-encoded config exceeds it.  The config
   // is delivered via writeFiles() (buildDynamicRestoreFiles) when the hash
   // changes, or already baked into the snapshot when it matches.
+  //
+  // The network policy header transform provides defense-in-depth by
+  // overwriting the Authorization header at the firewall layer, but
+  // OpenClaw also needs AI_GATEWAY_API_KEY in env to populate its internal
+  // auth store (auth-profiles.json) at startup.
   const env: Record<string, string> = {
     OPENCLAW_GATEWAY_TOKEN: options.gatewayToken,
+    OPENAI_BASE_URL: "https://ai-gateway.vercel.sh/v1",
   };
 
   if (options.apiKey) {
     env.AI_GATEWAY_API_KEY = options.apiKey;
     env.OPENAI_API_KEY = options.apiKey;
-    env.OPENAI_BASE_URL = "https://ai-gateway.vercel.sh/v1";
   }
 
   return env;
@@ -226,6 +230,11 @@ export type BootstrapFilesOptions = {
  * This is the single source of truth for both initial bootstrap and
  * restore-skip hash comparison.  Bootstrap calls this instead of
  * maintaining its own hand-written file list.
+ *
+ * The AI Gateway API key is written to disk AND injected via network
+ * policy header transform.  The disk file is needed because OpenClaw's
+ * agent subprocesses read it for auth-profiles resolution.  The transform
+ * provides defense-in-depth at the firewall layer.
  */
 export function buildBootstrapFiles(
   options: BootstrapFilesOptions,
@@ -234,7 +243,6 @@ export function buildBootstrapFiles(
   return [
     ...buildDynamicRestoreFiles({
       proxyOrigin: options.proxyOrigin,
-      apiKey: options.apiKey,
       telegramBotToken: options.telegramBotToken,
       telegramWebhookSecret: options.telegramWebhookSecret,
       slackCredentials: options.slackCredentials,

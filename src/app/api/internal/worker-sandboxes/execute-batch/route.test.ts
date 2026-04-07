@@ -379,12 +379,16 @@ test("batch execute injects AI Gateway env when passAiGatewayKey=true", async ()
     const body = result.json as WorkerSandboxBatchExecuteResponse;
     assert.equal(body.ok, true);
 
-    // Verify the child sandbox received AI Gateway env vars
+    // Verify the child sandbox received network policy transform (not env vars)
     const handle = h.controller.lastCreated()!;
+    assert.ok(handle.createTimeNetworkPolicy, "child sandbox should have networkPolicy at create time");
+    const policy = handle.createTimeNetworkPolicy as { allow: Record<string, unknown[]> };
+    assert.ok(policy.allow?.["ai-gateway.vercel.sh"], "should have ai-gateway transform");
+    // Env should only have OPENAI_BASE_URL — API key is injected via transform
     const commandEnv = handle.commands[0]?.env;
     assert.ok(commandEnv, "child command should have env");
-    assert.equal(commandEnv.AI_GATEWAY_API_KEY, "test-ai-gateway-token");
-    assert.equal(commandEnv.OPENAI_API_KEY, "test-ai-gateway-token");
+    assert.equal(commandEnv.AI_GATEWAY_API_KEY, undefined, "API key should not be in env");
+    assert.equal(commandEnv.OPENAI_API_KEY, undefined, "OPENAI_API_KEY should not be in env");
     assert.equal(commandEnv.OPENAI_BASE_URL, "https://ai-gateway.vercel.sh/v1");
   } finally {
     _setAiGatewayTokenOverrideForTesting(null);
@@ -410,8 +414,11 @@ test("batch execute does not inject AI Gateway env when passAiGatewayKey is not 
     assert.equal(result.status, 200);
 
     const handle = h.controller.lastCreated()!;
+    // Without passAiGatewayKey, env still has OPENAI_BASE_URL
     const commandEnv = handle.commands[0]?.env;
-    assert.equal(commandEnv, undefined, "no env should be injected without passAiGatewayKey");
+    assert.ok(commandEnv, "env should include OPENAI_BASE_URL");
+    assert.equal(commandEnv.OPENAI_BASE_URL, "https://ai-gateway.vercel.sh/v1");
+    assert.equal(commandEnv.AI_GATEWAY_API_KEY, undefined, "no API key without passAiGatewayKey");
   } finally {
     _setAiGatewayTokenOverrideForTesting(null);
     h.teardown();

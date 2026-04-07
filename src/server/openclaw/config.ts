@@ -14,6 +14,7 @@ export const OPENCLAW_STATE_DIR = "/home/vercel-sandbox/.openclaw";
 export const OPENCLAW_CONFIG_PATH = `${OPENCLAW_STATE_DIR}/openclaw.json`;
 export const OPENCLAW_GATEWAY_TOKEN_PATH = `${OPENCLAW_STATE_DIR}/.gateway-token`;
 export const OPENCLAW_AI_GATEWAY_API_KEY_PATH = `${OPENCLAW_STATE_DIR}/.ai-gateway-api-key`;
+
 export const OPENCLAW_FORCE_PAIR_SCRIPT_PATH = `${OPENCLAW_STATE_DIR}/.force-pair.mjs`;
 export const OPENCLAW_NET_LEARN_PATH = "/tmp/net-learn.js";
 export const OPENCLAW_TELEGRAM_BOT_TOKEN_PATH = `${OPENCLAW_STATE_DIR}/.telegram-bot-token`;
@@ -98,8 +99,11 @@ function buildGatewayPortProfileShell(): string {
 }
 
 /**
- * Shell fragment that reads the gateway token and AI gateway key from disk
- * (or env fallback) and exports the variables needed by the openclaw gateway.
+ * Shell fragment that reads the gateway token from disk and exports the
+ * variables needed by the openclaw gateway.  The AI Gateway API key is
+ * also injected via network policy header transform at the firewall layer
+ * (defense-in-depth), but OpenClaw needs the env vars to populate its
+ * internal auth store (auth-profiles.json) at startup.
  * Exits non-zero when the gateway token is missing or empty.
  */
 function buildGatewayEnvShell(): string {
@@ -109,19 +113,20 @@ function buildGatewayEnvShell(): string {
     '  echo \'{"event":"gateway_env.error","reason":"empty_gateway_token"}\' >&2',
     "  exit 1",
     "fi",
+    // AI_GATEWAY_API_KEY: try env first (set at create-time), fall back to
+    // disk file (written during bootstrap).  Both are needed because OpenClaw
+    // reads the env var for its auth-profiles resolution.
     'if [ -z "${AI_GATEWAY_API_KEY:-}" ]; then',
-    `  ai_gateway_api_key="$(cat "${OPENCLAW_AI_GATEWAY_API_KEY_PATH}" 2>/dev/null || true)"`,
-    "else",
-    '  ai_gateway_api_key="$AI_GATEWAY_API_KEY"',
+    `  AI_GATEWAY_API_KEY="$(cat "${OPENCLAW_AI_GATEWAY_API_KEY_PATH}" 2>/dev/null || true)"`,
+    "fi",
+    'if [ -n "$AI_GATEWAY_API_KEY" ]; then',
+    '  export AI_GATEWAY_API_KEY="$AI_GATEWAY_API_KEY"',
+    '  export OPENAI_API_KEY="$AI_GATEWAY_API_KEY"',
     "fi",
     `export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH}"`,
     `export OPENCLAW_GATEWAY_PORT="${OPENCLAW_PORT}"`,
     'export OPENCLAW_GATEWAY_TOKEN="$gateway_token"',
-    'if [ -n "$ai_gateway_api_key" ]; then',
-    '  export AI_GATEWAY_API_KEY="$ai_gateway_api_key"',
-    '  export OPENAI_API_KEY="$ai_gateway_api_key"',
-    `  export OPENAI_BASE_URL="${AI_GATEWAY_BASE_URL}"`,
-    "fi",
+    `export OPENAI_BASE_URL="${AI_GATEWAY_BASE_URL}"`,
     `export NODE_OPTIONS="\${NODE_OPTIONS:-} --require=${OPENCLAW_NET_LEARN_PATH}"`,
   ].join("\n");
 }
@@ -584,6 +589,15 @@ if (!paired || typeof paired !== "object" || Array.isArray(paired)) {
   );
 }
 
+// Purge stale entries that lack role/scopes — they were written before the
+// scopes fix and cause "missing scope: operator.write" rejections from the
+// gateway when the old device identity is used for token auth.
+for (const [id, entry] of Object.entries(paired)) {
+  if (!entry || typeof entry !== "object" || !entry.role) {
+    delete paired[id];
+  }
+}
+
 paired[deviceId] = {
   deviceId,
   publicKey: publicKeyRawBase64Url,
@@ -600,6 +614,35 @@ paired[deviceId] = {
 };
 
 await fs.writeFile(pairedPath, JSON.stringify(paired, null, 2) + "\\n", { mode: 0o600 });
+
+// Register the gateway token in device-auth.json so the HTTP API grants
+// operator scopes to Bearer <gateway-token> requests.  OpenClaw 2026.3.28
+// enforces scopes on token-authenticated HTTP endpoints — without this,
+// chat completions return "missing scope: operator.write".
+const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+if (gatewayToken) {
+  const deviceAuthPath = path.join(identityDir, "device-auth.json");
+  const deviceAuth = {
+    version: 1,
+    deviceId,
+    tokens: {
+      operator: {
+        token: gatewayToken,
+        role: "operator",
+        scopes: [
+          "operator.admin",
+          "operator.read",
+          "operator.write",
+          "operator.approvals",
+          "operator.pairing",
+        ],
+        updatedAtMs: Date.now(),
+      },
+    },
+  };
+  await fs.writeFile(deviceAuthPath, JSON.stringify(deviceAuth, null, 2) + "\\n", { mode: 0o600 });
+}
+
 console.log("Force-paired device identity");
 `;
 }
@@ -607,10 +650,46 @@ console.log("Force-paired device identity");
 export function buildStartupScript(): string {
   return `#!/bin/bash
 set -euo pipefail
-mkdir -p "${OPENCLAW_STATE_DIR}/devices"
+mkdir -p "${OPENCLAW_STATE_DIR}/devices" "${OPENCLAW_STATE_DIR}/identity"
 rm -f "${OPENCLAW_STATE_DIR}/devices/paired.json" "${OPENCLAW_STATE_DIR}/devices/pending.json"
 ${buildNetLearnWriteShell()}
 ${buildGatewayEnvShell()}
+# Pre-register the gateway token in device-auth.json BEFORE the gateway starts
+# so the HTTP API grants operator scopes to Bearer <gateway-token> requests.
+# OpenClaw 2026.3.28 caches token auth at startup — writing after launch has no effect.
+if [ -n "\${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+  node -e '
+const fs = require("fs"), path = require("path"), crypto = require("crypto");
+const stateDir = "${OPENCLAW_STATE_DIR}";
+const identityDir = path.join(stateDir, "identity");
+fs.mkdirSync(identityDir, { recursive: true });
+const identityPath = path.join(identityDir, "device.json");
+let identity;
+try { identity = JSON.parse(fs.readFileSync(identityPath, "utf8")); } catch {}
+if (!identity) {
+  const kp = crypto.generateKeyPairSync("ed25519");
+  identity = { publicKeyPem: kp.publicKey.export({ type: "spki", format: "pem" }), privateKeyPem: kp.privateKey.export({ type: "pkcs8", format: "pem" }), createdAtMs: Date.now() };
+  fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2) + "\\n", { mode: 0o600 });
+}
+const pubKey = crypto.createPublicKey(identity.publicKeyPem);
+const spkiDer = pubKey.export({ type: "spki", format: "der" });
+const rawKey = spkiDer.subarray(12);
+const deviceId = crypto.createHash("sha256").update(rawKey).digest("hex");
+const publicKeyRawBase64Url = rawKey.toString("base64").replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=/g,"");
+const devicesDir = path.join(stateDir, "devices");
+fs.mkdirSync(devicesDir, { recursive: true });
+const pairedPath = path.join(devicesDir, "paired.json");
+let paired = {};
+try { paired = JSON.parse(fs.readFileSync(pairedPath, "utf8")); } catch {}
+if (!paired || typeof paired !== "object" || Array.isArray(paired)) paired = {};
+for (const [id, e] of Object.entries(paired)) { if (!e || typeof e !== "object" || !e.role) delete paired[id]; }
+paired[deviceId] = { deviceId, publicKey: publicKeyRawBase64Url, approvedAtMs: Date.now(), role: "operator", roles: ["operator"], scopes: ["operator.admin","operator.read","operator.write","operator.approvals","operator.pairing"] };
+fs.writeFileSync(pairedPath, JSON.stringify(paired, null, 2) + "\\n", { mode: 0o600 });
+const gt = process.env.OPENCLAW_GATEWAY_TOKEN;
+if (gt) { const dap = path.join(identityDir, "device-auth.json"); fs.writeFileSync(dap, JSON.stringify({ version: 1, deviceId, tokens: { operator: { token: gt, role: "operator", scopes: ["operator.admin","operator.read","operator.write","operator.approvals","operator.pairing"], updatedAtMs: Date.now() } } }, null, 2) + "\\n", { mode: 0o600 }); }
+console.error(JSON.stringify({ event: "startup.pre_gateway_pair", deviceId }));
+' 2>&1 || echo '{"event":"startup.pre_gateway_pair_failed"}' >&2
+fi
 ${buildGatewayKillShell()}
 ${buildGatewayLaunchShell()}
 _learning_log=/tmp/shell-commands-for-learning.log
@@ -660,21 +739,20 @@ if [ -z "\$gateway_token" ]; then
   echo '{"event":"fast_restore.error","reason":"empty_gateway_token"}' >&2
   exit 1
 fi
-if [ -n "\${AI_GATEWAY_API_KEY:-}" ]; then
-  ai_gateway_api_key="\$AI_GATEWAY_API_KEY"
-  (umask 077; printf '%s' "\$ai_gateway_api_key" > "${OPENCLAW_AI_GATEWAY_API_KEY_PATH}")
-else
-  ai_gateway_api_key="$(cat "${OPENCLAW_AI_GATEWAY_API_KEY_PATH}" 2>/dev/null || true)"
+# AI Gateway API key: try env first (set at create-time), fall back to
+# disk file.  Also injected via network policy transform (defense-in-depth).
+if [ -z "\${AI_GATEWAY_API_KEY:-}" ]; then
+  AI_GATEWAY_API_KEY="$(cat "${OPENCLAW_AI_GATEWAY_API_KEY_PATH}" 2>/dev/null || true)"
 fi
-ai_gateway_base_url="https://ai-gateway.vercel.sh/v1"
+if [ -n "\$AI_GATEWAY_API_KEY" ]; then
+  (umask 077; printf '%s' "\$AI_GATEWAY_API_KEY" > "${OPENCLAW_AI_GATEWAY_API_KEY_PATH}")
+  export AI_GATEWAY_API_KEY="\$AI_GATEWAY_API_KEY"
+  export OPENAI_API_KEY="\$AI_GATEWAY_API_KEY"
+fi
 export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH}"
 export OPENCLAW_GATEWAY_PORT="${OPENCLAW_PORT}"
 export OPENCLAW_GATEWAY_TOKEN="\$gateway_token"
-if [ -n "$ai_gateway_api_key" ]; then
-  export AI_GATEWAY_API_KEY="$ai_gateway_api_key"
-  export OPENAI_API_KEY="$ai_gateway_api_key"
-  export OPENAI_BASE_URL="$ai_gateway_base_url"
-fi
+export OPENAI_BASE_URL="https://ai-gateway.vercel.sh/v1"
 ${buildNetLearnWriteShell()}
 export NODE_OPTIONS="\${NODE_OPTIONS:-} --require=${OPENCLAW_NET_LEARN_PATH}"
 # Integrity check: fail fast if bundled peer dependencies are missing.
@@ -725,6 +803,27 @@ printf '{"event":"fast_restore.gateway_reset","killed":%s,"sleepMs":%d,"killMs":
   "\$([ "\$_killed_existing_gateway" = "1" ] && echo true || echo false)" \\
   "\$_sleep_ms" \\
   "\$_kill_ms" >&2
+# Write device-auth.json BEFORE gateway starts so it caches the token scopes.
+node -e '
+const fs = require("fs"), path = require("path"), crypto = require("crypto");
+const stateDir = "${OPENCLAW_STATE_DIR}";
+const identityDir = path.join(stateDir, "identity");
+fs.mkdirSync(identityDir, { recursive: true });
+const identityPath = path.join(identityDir, "device.json");
+let identity;
+try { identity = JSON.parse(fs.readFileSync(identityPath, "utf8")); } catch {}
+if (!identity) {
+  const kp = crypto.generateKeyPairSync("ed25519");
+  identity = { publicKeyPem: kp.publicKey.export({ type: "spki", format: "pem" }), privateKeyPem: kp.privateKey.export({ type: "pkcs8", format: "pem" }), createdAtMs: Date.now() };
+  fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2) + "\\n", { mode: 0o600 });
+}
+const pubKey = crypto.createPublicKey(identity.publicKeyPem);
+const rawKey = pubKey.export({ type: "spki", format: "der" }).subarray(12);
+const deviceId = crypto.createHash("sha256").update(rawKey).digest("hex");
+const gt = process.env.OPENCLAW_GATEWAY_TOKEN;
+if (gt) { const dap = path.join(identityDir, "device-auth.json"); fs.writeFileSync(dap, JSON.stringify({ version: 1, deviceId, tokens: { operator: { token: gt, role: "operator", scopes: ["operator.admin","operator.read","operator.write","operator.approvals","operator.pairing"], updatedAtMs: Date.now() } } }, null, 2) + "\\n", { mode: 0o600 }); }
+console.error(JSON.stringify({ event: "fast_restore.pre_gateway_auth", deviceId }));
+' 2>&1 || echo '{"event":"fast_restore.pre_gateway_auth_failed"}' >&2
 echo '{"event":"fast_restore.start_gateway"}' >&2
 # Always use Node for the gateway — Bun's WebSocket implementation does not
 # expose socket._socket.remoteAddress, which causes isLocalClient to return
@@ -794,8 +893,11 @@ const pairedPath = path.join(devicesDir, "paired.json");
 let paired = {};
 try { paired = JSON.parse(fs.readFileSync(pairedPath, "utf8")); } catch {}
 if (!paired || typeof paired !== "object" || Array.isArray(paired)) paired = {};
+for (const [id, entry] of Object.entries(paired)) { if (!entry || typeof entry !== "object" || !entry.role) delete paired[id]; }
 paired[deviceId] = { deviceId, publicKey: publicKeyRawBase64Url, approvedAtMs: Date.now(), role: "operator", roles: ["operator"], scopes: ["operator.admin","operator.read","operator.write","operator.approvals","operator.pairing"] };
 fs.writeFileSync(pairedPath, JSON.stringify(paired, null, 2) + "\\n", { mode: 0o600 });
+const gt = process.env.OPENCLAW_GATEWAY_TOKEN;
+if (gt) { const dap = path.join(stateDir, "identity", "device-auth.json"); fs.mkdirSync(path.dirname(dap), { recursive: true }); fs.writeFileSync(dap, JSON.stringify({ version: 1, deviceId, tokens: { operator: { token: gt, role: "operator", scopes: ["operator.admin","operator.read","operator.write","operator.approvals","operator.pairing"], updatedAtMs: Date.now() } } }, null, 2) + "\\n", { mode: 0o600 }); }
 console.error(JSON.stringify({ event: "fast_restore.force_pair", deviceId }));
 ' 2>&1 || echo '{"event":"fast_restore.force_pair_failed"}' >&2
   # Ensure OPENCLAW_GATEWAY_PORT is in the shell profile so agent tools
@@ -824,8 +926,7 @@ metadata:
     emoji: "🖼️"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Image Generation (Vercel AI Gateway)
@@ -900,11 +1001,9 @@ if (!values.prompt) {
   process.exit(1);
 }
 
-const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-if (!apiKey) {
-  console.error("No AI Gateway API key found");
-  process.exit(1);
-}
+// AI Gateway API key is injected via network policy header transform —
+// the placeholder below is overwritten by the firewall layer.
+const apiKey = "injected-by-firewall";
 
 const n = Math.min(Math.max(parseInt(values.count, 10) || 1, 1), 8);
 const ext = path.extname(values.output) || ".png";
@@ -1021,8 +1120,7 @@ metadata:
     emoji: "🔎"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Web Search (Vercel AI Gateway)
@@ -1072,11 +1170,9 @@ if (!query) {
   process.exit(1);
 }
 
-const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-if (!apiKey) {
-  console.error("No AI Gateway API key found");
-  process.exit(1);
-}
+// AI Gateway API key is injected via network policy header transform —
+// the placeholder below is overwritten by the firewall layer.
+const apiKey = "injected-by-firewall";
 
 const response = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
   method: "POST",
@@ -1172,8 +1268,7 @@ metadata:
     emoji: "👁️"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Vision (Vercel AI Gateway)
@@ -1243,11 +1338,9 @@ if (!imagePath) {
   process.exit(1);
 }
 
-const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-if (!apiKey) {
-  console.error("No AI Gateway API key found");
-  process.exit(1);
-}
+// AI Gateway API key is injected via network policy header transform —
+// the placeholder below is overwritten by the firewall layer.
+const apiKey = "injected-by-firewall";
 
 const image = await readFile(imagePath);
 const imageDataUri = "data:" + toImageMimeType(imagePath) + ";base64," + image.toString("base64");
@@ -1308,8 +1401,7 @@ metadata:
     emoji: "🔊"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Text-to-Speech (Vercel AI Gateway)
@@ -1363,11 +1455,9 @@ if (!text) {
   process.exit(1);
 }
 
-const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-if (!apiKey) {
-  console.error("No AI Gateway API key found");
-  process.exit(1);
-}
+// AI Gateway API key is injected via network policy header transform —
+// the placeholder below is overwritten by the firewall layer.
+const apiKey = "injected-by-firewall";
 
 const response = await fetch("https://ai-gateway.vercel.sh/v1/audio/speech", {
   method: "POST",
@@ -1403,8 +1493,7 @@ metadata:
     emoji: "🧩"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Structured Extract (Vercel AI Gateway)
@@ -1493,11 +1582,9 @@ if (!values.schema && !values["schema-file"]) {
   process.exit(1);
 }
 
-const apiKey = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-if (!apiKey) {
-  console.error("No AI Gateway API key found");
-  process.exit(1);
-}
+// AI Gateway API key is injected via network policy header transform —
+// the placeholder below is overwritten by the firewall layer.
+const apiKey = "injected-by-firewall";
 
 const schemaSource = values.schema ?? await readFile(values["schema-file"], "utf8");
 let schema;
@@ -1569,8 +1656,7 @@ metadata:
     emoji: "🧠"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Embeddings (Vercel AI Gateway)
@@ -1623,11 +1709,9 @@ const { values, positionals } = parseArgs({
 });
 
 async function readApiKey() {
-  const fromEnv = process.env.AI_GATEWAY_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-  const fromDisk = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-  if (fromDisk) return fromDisk;
-  throw new Error("No AI Gateway API key found");
+  // AI Gateway API key is injected via network policy header transform.
+  // Return a placeholder — the real auth header is added at the firewall layer.
+  return "injected-by-firewall";
 }
 
 const textInputs = [...(values.text ?? [])];
@@ -1708,8 +1792,7 @@ metadata:
     emoji: "🔍"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Semantic Search (Vercel AI Gateway)
@@ -1797,11 +1880,9 @@ if (command !== "index" && command !== "query") {
 }
 
 async function readApiKey() {
-  const fromEnv = process.env.AI_GATEWAY_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-  const fromDisk = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-  if (fromDisk) return fromDisk;
-  throw new Error("No AI Gateway API key found");
+  // AI Gateway API key is injected via network policy header transform.
+  // Return a placeholder — the real auth header is added at the firewall layer.
+  return "injected-by-firewall";
 }
 
 async function embedInputs(apiKey, model, inputs, dimensions) {
@@ -2048,8 +2129,7 @@ metadata:
     emoji: "🎙️"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Audio Transcription (Vercel AI Gateway)
@@ -2117,11 +2197,9 @@ const audioBlob = await openAsBlob(resolvedPath);
 const fileName = path.basename(resolvedPath);
 
 async function readApiKey() {
-  const fromEnv = process.env.AI_GATEWAY_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-  const fromDisk = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-  if (fromDisk) return fromDisk;
-  throw new Error("No AI Gateway API key found");
+  // AI Gateway API key is injected via network policy header transform.
+  // Return a placeholder — the real auth header is added at the firewall layer.
+  return "injected-by-firewall";
 }
 
 const apiKey = await readApiKey();
@@ -2181,8 +2259,7 @@ metadata:
     emoji: "🧠"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Deep Reasoning (Vercel AI Gateway)
@@ -2263,11 +2340,9 @@ if (!prompt) {
 }
 
 async function readApiKey() {
-  const fromEnv = process.env.AI_GATEWAY_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-  const fromDisk = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-  if (fromDisk) return fromDisk;
-  throw new Error("No AI Gateway API key found");
+  // AI Gateway API key is injected via network policy header transform.
+  // Return a placeholder — the real auth header is added at the firewall layer.
+  return "injected-by-firewall";
 }
 
 function extractText(value) {
@@ -2374,8 +2449,7 @@ metadata:
     emoji: "⚖️"
     requires:
       bins: ["node"]
-      env: ["AI_GATEWAY_API_KEY"]
-    primaryEnv: AI_GATEWAY_API_KEY
+      env: []
 ---
 
 # Multi-Model Comparison (Vercel AI Gateway)
@@ -2454,11 +2528,9 @@ if (models.length < 2) {
 }
 
 async function readApiKey() {
-  const fromEnv = process.env.AI_GATEWAY_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-  const fromDisk = (await readFile("${OPENCLAW_AI_GATEWAY_API_KEY_PATH}", "utf8")).trim();
-  if (fromDisk) return fromDisk;
-  throw new Error("No AI Gateway API key found");
+  // AI Gateway API key is injected via network policy header transform.
+  // Return a placeholder — the real auth header is added at the firewall layer.
+  return "injected-by-firewall";
 }
 
 const apiKey = await readApiKey();

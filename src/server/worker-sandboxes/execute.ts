@@ -1,5 +1,6 @@
 import type { SandboxHandle } from "@/server/sandbox/controller";
 import { getSandboxController } from "@/server/sandbox/controller";
+import { buildAiGatewayTransformRules } from "@/server/firewall/policy";
 import { MAX_PORTABLE_SANDBOX_SLEEP_AFTER_MS } from "@/server/sandbox/timeout";
 import type {
   WorkerSandboxExecuteRequest,
@@ -96,7 +97,7 @@ export function validateExecuteRequest(body: unknown): { ok: true; value: Worker
 }
 
 // ---------------------------------------------------------------------------
-// AI Gateway env injection
+// AI Gateway credential injection via network policy transform
 // ---------------------------------------------------------------------------
 
 export type ExecuteWorkerSandboxOptions = {
@@ -105,14 +106,13 @@ export type ExecuteWorkerSandboxOptions = {
 
 function buildChildCommandEnv(
   requestEnv: Record<string, string> | undefined,
-  aiGatewayApiKey?: string,
 ): Record<string, string> | undefined {
-  const env: Record<string, string> = { ...(requestEnv ?? {}) };
-  if (aiGatewayApiKey) {
-    env.AI_GATEWAY_API_KEY = aiGatewayApiKey;
-    env.OPENAI_API_KEY = aiGatewayApiKey;
-    env.OPENAI_BASE_URL = "https://ai-gateway.vercel.sh/v1";
-  }
+  // AI Gateway API key is injected via network policy header transform —
+  // only OPENAI_BASE_URL is needed so code knows where to send requests.
+  const env: Record<string, string> = {
+    ...(requestEnv ?? {}),
+    OPENAI_BASE_URL: "https://ai-gateway.vercel.sh/v1",
+  };
   return Object.keys(env).length > 0 ? env : undefined;
 }
 
@@ -130,6 +130,18 @@ export async function executeWorkerSandbox(
     sandbox = await getSandboxController().create({
       timeout: clampTimeoutMs(request.sandboxTimeoutMs),
       resources: { vcpus: request.vcpus ?? 1 },
+      ...(options.aiGatewayApiKey
+        ? {
+            networkPolicy: {
+              allow: {
+                "ai-gateway.vercel.sh": buildAiGatewayTransformRules(
+                  options.aiGatewayApiKey,
+                ),
+                "*": [],
+              },
+            },
+          }
+        : {}),
     });
 
     if (request.files?.length) {
@@ -141,7 +153,7 @@ export async function executeWorkerSandbox(
       );
     }
 
-    const commandEnv = buildChildCommandEnv(request.command.env, options.aiGatewayApiKey);
+    const commandEnv = buildChildCommandEnv(request.command.env);
 
     const result = await sandbox.runCommand({
       cmd: request.command.cmd,

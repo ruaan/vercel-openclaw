@@ -44,9 +44,6 @@ function createWorkflowDependencies(
   overrides: Partial<DrainChannelWorkflowDependencies> = {},
 ): DrainChannelWorkflowDependencies {
   return {
-    processChannelJob: async () => {
-      throw new Error("not implemented in test");
-    },
     isRetryable: () => false,
     createSlackAdapter: () => ({}) as never,
     createTelegramAdapter: () => ({}) as never,

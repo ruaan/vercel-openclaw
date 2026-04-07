@@ -113,7 +113,6 @@ const SANDBOX_PATHS = {
   OPENCLAW_STATE_DIR: "/home/vercel-sandbox/.openclaw",
   OPENCLAW_CONFIG_PATH: "/home/vercel-sandbox/.openclaw/openclaw.json",
   OPENCLAW_GATEWAY_TOKEN_PATH: "/home/vercel-sandbox/.openclaw/.gateway-token",
-  OPENCLAW_AI_GATEWAY_API_KEY_PATH: "/home/vercel-sandbox/.openclaw/.ai-gateway-api-key",
   OPENCLAW_FORCE_PAIR_SCRIPT_PATH: "/home/vercel-sandbox/.openclaw/.force-pair.mjs",
   OPENCLAW_FAST_RESTORE_SCRIPT_PATH: "/home/vercel-sandbox/.openclaw/.fast-restore.sh",
   OPENCLAW_STARTUP_SCRIPT_PATH: "/vercel/sandbox/.on-restore.sh",
@@ -255,7 +254,6 @@ fi
     await sandbox.writeFiles([
       { path: SANDBOX_PATHS.OPENCLAW_CONFIG_PATH, content: Buffer.from(config) },
       { path: SANDBOX_PATHS.OPENCLAW_GATEWAY_TOKEN_PATH, content: Buffer.from(gatewayToken) },
-      { path: SANDBOX_PATHS.OPENCLAW_AI_GATEWAY_API_KEY_PATH, content: Buffer.from("") },
       { path: SANDBOX_PATHS.OPENCLAW_STARTUP_SCRIPT_PATH, content: Buffer.from(startupScript) },
       { path: SANDBOX_PATHS.OPENCLAW_FAST_RESTORE_SCRIPT_PATH, content: Buffer.from(fastRestoreScript) },
     ]);

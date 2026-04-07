@@ -87,7 +87,6 @@ test("static restore files produce non-empty buffers", () => {
 test("dynamic restore files only contain openclaw.json with the provided origin", () => {
   const files = buildDynamicRestoreFiles({
     proxyOrigin: "https://example.test",
-    apiKey: "token-123",
   });
 
   assert.equal(files.length, 1);
@@ -97,7 +96,7 @@ test("dynamic restore files only contain openclaw.json with the provided origin"
   assert.ok(content.includes("https://example.test"));
 });
 
-test("dynamic restore files work without apiKey", () => {
+test("dynamic restore files contain only config", () => {
   const files = buildDynamicRestoreFiles({
     proxyOrigin: "https://no-key.test",
   });
@@ -193,20 +192,18 @@ test("worker sandbox restore files contain exactly the goal-critical pair", () =
 
 // --- buildRestoreRuntimeEnv ---
 
-test("buildRestoreRuntimeEnv does not include config JSON in env (exceeds 4096 byte limit)", () => {
+test("buildRestoreRuntimeEnv without apiKey has gateway token and base URL only", () => {
   const env = buildRestoreRuntimeEnv({
     gatewayToken: "gw-token",
   });
 
   assert.equal(env.OPENCLAW_GATEWAY_TOKEN, "gw-token");
-  assert.equal(env.OPENCLAW_CONFIG_JSON_B64, undefined,
-    "Config must not be passed via env — sandbox API enforces 4096 byte env limit");
+  assert.equal(env.OPENAI_BASE_URL, "https://ai-gateway.vercel.sh/v1");
   assert.equal(env.AI_GATEWAY_API_KEY, undefined);
   assert.equal(env.OPENAI_API_KEY, undefined);
-  assert.equal(env.OPENAI_BASE_URL, undefined);
 });
 
-test("buildRestoreRuntimeEnv includes AI gateway env when apiKey is present", () => {
+test("buildRestoreRuntimeEnv with apiKey includes AI gateway env vars", () => {
   const env = buildRestoreRuntimeEnv({
     gatewayToken: "gw-token",
     apiKey: "test-ai-key",
@@ -229,10 +226,9 @@ test("manifest path is under the openclaw state directory", () => {
 
 // --- buildBootstrapFiles ---
 
-test("buildBootstrapFiles includes all static, dynamic, token, key, and manifest files", () => {
+test("buildBootstrapFiles includes static, dynamic, token, and manifest files", () => {
   const files = buildBootstrapFiles({
     gatewayToken: "tok-test",
-    apiKey: "ak-test",
     proxyOrigin: "https://bootstrap.test",
   });
 
@@ -244,25 +240,16 @@ test("buildBootstrapFiles includes all static, dynamic, token, key, and manifest
   assert.ok(paths.includes(OPENCLAW_STARTUP_SCRIPT_PATH), "should include startup script");
   assert.ok(paths.includes(OPENCLAW_FORCE_PAIR_SCRIPT_PATH), "should include force-pair script");
   assert.ok(paths.includes(OPENCLAW_GATEWAY_RESTART_SCRIPT_PATH), "should include restart script");
-  // Token files
+  // Gateway token
   const tokenFile = files.find((f) => f.path.endsWith(".gateway-token"));
   assert.ok(tokenFile, "should include gateway token file");
   assert.equal(tokenFile!.content.toString(), "tok-test");
+  // AI gateway key file (empty when no apiKey provided)
   const keyFile = files.find((f) => f.path.endsWith(".ai-gateway-api-key"));
   assert.ok(keyFile, "should include AI gateway key file");
-  assert.equal(keyFile!.content.toString(), "ak-test");
+  assert.equal(keyFile!.content.toString(), "");
   // Manifest
   assert.ok(paths.includes(OPENCLAW_RESTORE_ASSET_MANIFEST_PATH), "should include manifest");
-});
-
-test("buildBootstrapFiles writes empty AI key when apiKey is omitted", () => {
-  const files = buildBootstrapFiles({
-    gatewayToken: "tok",
-    proxyOrigin: "https://no-key.test",
-  });
-  const keyFile = files.find((f) => f.path.endsWith(".ai-gateway-api-key"));
-  assert.ok(keyFile);
-  assert.equal(keyFile!.content.toString(), "");
 });
 
 test("buildBootstrapFiles includes telegram bot token when provided", () => {
@@ -282,14 +269,12 @@ test("buildBootstrapFiles includes telegram bot token when provided", () => {
 test("buildBootstrapFiles is a superset of static + dynamic restore files", () => {
   const opts = {
     gatewayToken: "tok",
-    apiKey: "ak",
     proxyOrigin: "https://superset.test",
   };
   const bootstrapPaths = new Set(buildBootstrapFiles(opts).map((f) => f.path));
   const staticPaths = buildStaticRestoreFiles().map((f) => f.path);
   const dynamicPaths = buildDynamicRestoreFiles({
     proxyOrigin: opts.proxyOrigin,
-    apiKey: opts.apiKey,
   }).map((f) => f.path);
 
   for (const p of staticPaths) {

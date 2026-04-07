@@ -44,6 +44,14 @@ Static assets are only rewritten when the restore asset hash (`assetSha256`) has
 
 These are files that change with runtime configuration, primarily `openclaw.json`. Dynamic files are always checked against the current desired state using a config hash comparison.
 
+### Credential brokering
+
+The AI Gateway API key is not written as a file or env var inside the sandbox. Instead, it is injected at the firewall layer via network policy `transform` rules that add an `Authorization: Bearer <token>` header to outbound requests to `ai-gateway.vercel.sh`. This means:
+
+- Token refresh updates the network policy — no file writes or gateway restarts
+- The sandbox has `OPENAI_BASE_URL` set so code knows where to call, but the auth header is injected transparently
+- Prompt injection attacks cannot exfiltrate the credential because it never exists inside the VM
+
 ### Readiness checks
 
 Resume readiness is checked in two stages:

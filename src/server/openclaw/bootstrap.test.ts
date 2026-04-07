@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  OPENCLAW_AI_GATEWAY_API_KEY_PATH,
   OPENCLAW_BIN,
   OPENCLAW_BUILTIN_IMAGE_GEN_SCRIPT_PATH,
   OPENCLAW_BUILTIN_IMAGE_GEN_SKILL_PATH,
@@ -113,7 +112,6 @@ test("setupOpenClaw executes commands in correct order", async () => {
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok-test",
-      apiKey: "ak-test",
       proxyOrigin: "https://example.com",
     });
 
@@ -176,7 +174,6 @@ test("setupOpenClaw writes all required config files", async () => {
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok-files",
-      apiKey: "ak-files",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -185,7 +182,6 @@ test("setupOpenClaw writes all required config files", async () => {
     const expectedPaths = [
       OPENCLAW_CONFIG_PATH,
       OPENCLAW_GATEWAY_TOKEN_PATH,
-      OPENCLAW_AI_GATEWAY_API_KEY_PATH,
       OPENCLAW_FORCE_PAIR_SCRIPT_PATH,
       OPENCLAW_STARTUP_SCRIPT_PATH,
       OPENCLAW_FAST_RESTORE_SCRIPT_PATH,
@@ -244,42 +240,22 @@ test("setupOpenClaw writes gateway token content", async () => {
   }
 });
 
-test("setupOpenClaw writes AI gateway key content", async () => {
+test("setupOpenClaw writes AI gateway key file for OpenClaw auth-profiles resolution", async () => {
   const h = createScenarioHarness();
   try {
     const handle = await createHandle(h);
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "my-ai-key",
+      apiKey: "test-key",
       proxyOrigin: "https://proxy.test",
     });
 
     const keyFile = handle.writtenFiles.find(
-      (f) => f.path === OPENCLAW_AI_GATEWAY_API_KEY_PATH,
+      (f) => f.path.endsWith(".ai-gateway-api-key"),
     );
-    assert.ok(keyFile, "AI gateway key file not written");
-    assert.equal(keyFile.content.toString(), "my-ai-key");
-  } finally {
-    h.teardown();
-  }
-});
-
-test("setupOpenClaw writes empty AI gateway key when apiKey is omitted", async () => {
-  const h = createScenarioHarness();
-  try {
-    const handle = await createHandle(h);
-
-    await setupOpenClaw(handle, {
-      gatewayToken: "tok",
-      proxyOrigin: "https://proxy.test",
-    });
-
-    const keyFile = handle.writtenFiles.find(
-      (f) => f.path === OPENCLAW_AI_GATEWAY_API_KEY_PATH,
-    );
-    assert.ok(keyFile, "AI gateway key file not written");
-    assert.equal(keyFile.content.toString(), "");
+    assert.ok(keyFile, "AI gateway key file should be written");
+    assert.equal(keyFile!.content.toString(), "test-key");
   } finally {
     h.teardown();
   }
@@ -292,7 +268,6 @@ test("setupOpenClaw writes valid openclaw.json config", async () => {
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://my-app.vercel.app",
     });
 
@@ -313,14 +288,13 @@ test("setupOpenClaw writes valid openclaw.json config", async () => {
   }
 });
 
-test("setupOpenClaw includes agents config when apiKey is provided", async () => {
+test("setupOpenClaw includes agents config in gateway config", async () => {
   const h = createScenarioHarness();
   try {
     const handle = await createHandle(h);
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -328,14 +302,14 @@ test("setupOpenClaw includes agents config when apiKey is provided", async () =>
       (f) => f.path === OPENCLAW_CONFIG_PATH,
     );
     const config = JSON.parse(configFile!.content.toString());
-    assert.ok(config.agents, "agents config should be present when apiKey is set");
-    assert.ok(config.models, "models config should be present when apiKey is set");
+    assert.ok(config.agents, "agents config should be present");
+    assert.ok(config.models, "models config should be present");
   } finally {
     h.teardown();
   }
 });
 
-test("setupOpenClaw includes agents config even when apiKey is not provided", async () => {
+test("setupOpenClaw includes agents config without explicit API key", async () => {
   const h = createScenarioHarness();
   try {
     const handle = await createHandle(h);
@@ -535,7 +509,6 @@ test("setupOpenClaw can be called twice without error (idempotent)", async () =>
     const handle = await createHandle(h);
     const opts = {
       gatewayToken: "tok-idem",
-      apiKey: "ak-idem",
       proxyOrigin: "https://proxy.test",
     };
 
@@ -1181,7 +1154,6 @@ test("setupOpenClaw writes web-search skill and script with expected content", a
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1204,7 +1176,6 @@ test("setupOpenClaw writes vision skill and script with expected content", async
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1227,7 +1198,6 @@ test("setupOpenClaw writes tts skill and script with expected content", async ()
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1250,7 +1220,6 @@ test("setupOpenClaw writes structured-extract skill and script with expected con
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1277,7 +1246,6 @@ test("setupOpenClaw installs whatsapp plugin when enabled", async () => {
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok-wa",
-      apiKey: "ak-wa",
       proxyOrigin: "https://proxy.test",
       whatsappConfig: { enabled: true, dmPolicy: "pairing" },
     });
@@ -1299,7 +1267,6 @@ test("setupOpenClaw uses configured whatsapp plugin spec when provided", async (
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok-wa-custom",
-      apiKey: "ak-wa-custom",
       proxyOrigin: "https://proxy.test",
       whatsappConfig: {
         enabled: true,
@@ -1325,7 +1292,6 @@ test("setupOpenClaw skips whatsapp plugin install when not enabled", async () =>
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok-no-wa",
-      apiKey: "ak-no-wa",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1345,7 +1311,6 @@ test("setupOpenClaw includes whatsapp config in openclaw.json when enabled", asy
 
     await setupOpenClaw(handle, {
       gatewayToken: "tok-wa-cfg",
-      apiKey: "ak-wa-cfg",
       proxyOrigin: "https://proxy.test",
       whatsappConfig: { enabled: true, dmPolicy: "open", allowFrom: ["*"] },
     });
@@ -1372,7 +1337,6 @@ test("setupOpenClaw plugin install is idempotent — does not fail on repeat", a
     // First call
     await setupOpenClaw(handle, {
       gatewayToken: "tok-idem",
-      apiKey: "ak-idem",
       proxyOrigin: "https://proxy.test",
       whatsappConfig,
     });
@@ -1382,7 +1346,6 @@ test("setupOpenClaw plugin install is idempotent — does not fail on repeat", a
 
     await setupOpenClaw(handle2, {
       gatewayToken: "tok-idem",
-      apiKey: "ak-idem",
       proxyOrigin: "https://proxy.test",
       whatsappConfig,
     });
@@ -1402,7 +1365,6 @@ test("setupOpenClaw writes embeddings skill and script with expected content", a
     const handle = await createHandle(h);
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1424,7 +1386,6 @@ test("setupOpenClaw writes semantic-search skill and script with expected conten
     const handle = await createHandle(h);
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1446,7 +1407,6 @@ test("setupOpenClaw writes transcription skill and script with expected content"
     const handle = await createHandle(h);
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1468,7 +1428,6 @@ test("setupOpenClaw writes reasoning skill and script with expected content", as
     const handle = await createHandle(h);
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
@@ -1491,7 +1450,6 @@ test("setupOpenClaw writes compare-models skill and script with expected content
     const handle = await createHandle(h);
     await setupOpenClaw(handle, {
       gatewayToken: "tok",
-      apiKey: "ak",
       proxyOrigin: "https://proxy.test",
     });
 
