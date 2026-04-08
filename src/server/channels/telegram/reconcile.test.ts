@@ -1,12 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { afterEach } from "node:test";
+
 import {
   reconcileTelegramIntegration,
   reconcileTelegramWebhook,
   TELEGRAM_RECONCILE_KEY,
 } from "@/server/channels/telegram/reconcile";
 import { withHarness } from "@/test-utils/harness";
+
+const ORIGINAL_ENV = { ...process.env };
+afterEach(() => {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in ORIGINAL_ENV)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
 test("reconcileTelegramIntegration sets webhook, syncs commands, and records timestamp", async () => {
   await withHarness(async (h) => {
@@ -152,6 +165,48 @@ test("reconcileTelegramWebhook delegates to reconcileTelegramIntegration", async
       assert.ok(urls.some((u) => u.includes("/setWebhook")));
       assert.ok(urls.some((u) => u.includes("/getMyCommands")));
       assert.ok(urls.some((u) => u.includes("/setMyCommands")));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test("reconcileTelegramIntegration uses bypass URL when VERCEL_AUTOMATION_BYPASS_SECRET is set", async () => {
+  process.env.NEXT_PUBLIC_APP_URL = "https://app.example.com";
+  process.env.VERCEL_AUTOMATION_BYPASS_SECRET = "test-bypass-secret";
+
+  await withHarness(async (h) => {
+    await h.mutateMeta((meta) => {
+      meta.channels.telegram = {
+        botToken: "tg-bot-token",
+        webhookSecret: "tg-secret",
+        webhookUrl: "https://app.example.com/api/channels/telegram/webhook",
+        botUsername: "test_bot",
+        configuredAt: Date.now(),
+      };
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = h.fakeFetch.fetch;
+    h.fakeFetch.onPost(/api\.telegram\.org\/bottg-bot-token\/setWebhook/, () =>
+      Response.json({ ok: true, result: true }),
+    );
+    h.fakeFetch.onPost(/api\.telegram\.org\/bottg-bot-token\/getMyCommands/, () =>
+      Response.json({ ok: true, result: [] }),
+    );
+    h.fakeFetch.onPost(/api\.telegram\.org\/bottg-bot-token\/setMyCommands/, () =>
+      Response.json({ ok: true, result: true }),
+    );
+
+    try {
+      await reconcileTelegramIntegration({ force: true });
+
+      const setWebhookReq = h.fakeFetch.requests().find((r) => r.url.includes("/setWebhook"));
+      assert.ok(setWebhookReq, "setWebhook must be called");
+      assert.ok(
+        setWebhookReq.body?.includes("x-vercel-protection-bypass"),
+        "reconciliation must send bypass param to setWebhook when VERCEL_AUTOMATION_BYPASS_SECRET is set",
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }

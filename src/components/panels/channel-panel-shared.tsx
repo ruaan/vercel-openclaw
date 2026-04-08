@@ -33,7 +33,7 @@ export function getChannelActionLabel(
 
 export type ChannelPillModel = {
   label: string;
-  variant: "good" | "bad" | "idle";
+  variant: "good" | "bad" | "idle" | "warn";
 };
 
 export function ChannelCardFrame({

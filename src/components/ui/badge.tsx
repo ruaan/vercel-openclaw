@@ -20,7 +20,7 @@ export function Badge({ children, className = "" }: BadgeProps) {
 export function ChannelPill({
   children,
   variant = "idle",
-}: BadgeProps & { variant?: "good" | "bad" | "idle" }) {
+}: BadgeProps & { variant?: "good" | "bad" | "idle" | "warn" }) {
   return <span className={`channel-pill ${variant}`}>{children}</span>;
 }
 

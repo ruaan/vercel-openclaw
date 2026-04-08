@@ -185,6 +185,50 @@ test("buildGatewayConfig omits telegram webhookUrl when proxy origin is missing"
   );
 });
 
+test("buildGatewayConfig includes bypass param in telegram webhookUrl when secret is set", () => {
+  const original = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  try {
+    process.env.VERCEL_AUTOMATION_BYPASS_SECRET = "test-bypass-secret";
+    const config = JSON.parse(
+      buildGatewayConfig(undefined, "https://app.example.com", "test-telegram-token"),
+    ) as {
+      channels: { telegram: { webhookUrl?: string } };
+    };
+    assert.ok(
+      config.channels.telegram.webhookUrl?.includes("x-vercel-protection-bypass=test-bypass-secret"),
+      "telegram webhookUrl in openclaw.json must include bypass param when secret is configured",
+    );
+  } finally {
+    if (original === undefined) {
+      delete process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+    } else {
+      process.env.VERCEL_AUTOMATION_BYPASS_SECRET = original;
+    }
+  }
+});
+
+test("buildGatewayConfig omits bypass param from telegram webhookUrl when secret is not set", () => {
+  const original = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  try {
+    delete process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+    const config = JSON.parse(
+      buildGatewayConfig(undefined, "https://app.example.com", "test-telegram-token"),
+    ) as {
+      channels: { telegram: { webhookUrl?: string } };
+    };
+    assert.ok(
+      !config.channels.telegram.webhookUrl?.includes("x-vercel-protection-bypass"),
+      "telegram webhookUrl must not include bypass param when secret is not configured",
+    );
+  } finally {
+    if (original === undefined) {
+      delete process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+    } else {
+      process.env.VERCEL_AUTOMATION_BYPASS_SECRET = original;
+    }
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Skill builders — content assertions
 // ---------------------------------------------------------------------------

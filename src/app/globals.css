@@ -1427,6 +1427,12 @@ a[href]:focus-visible {
   color: var(--danger-light);
 }
 
+.channel-pill.warn {
+  border-color: rgba(245, 166, 35, 0.3);
+  background: var(--warning-surface);
+  color: var(--warning);
+}
+
 .inline-code {
   display: block;
   padding: 10px 12px;

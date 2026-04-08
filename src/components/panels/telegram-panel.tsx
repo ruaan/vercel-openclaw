@@ -66,6 +66,7 @@ export function TelegramPanel({
   const [panelError, setPanelError] = useState<string | null>(null);
   const [syncingCommands, setSyncingCommands] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const { confirm, dialogProps } = useConfirm();
 
   const tg = status.channels.telegram;
@@ -102,6 +103,13 @@ export function TelegramPanel({
       setPreview(null);
       setEditing(false);
       setShowToken(false);
+
+      // Show transient "restarting" pill when the gateway was restarted.
+      // Auto-clears after 10s as a safety net.
+      if (result.meta.liveConfigSync?.reason === "config_written_and_restarted") {
+        setRestarting(true);
+        setTimeout(() => setRestarting(false), 10_000);
+      }
     } else {
       setPanelError(result.error);
     }
@@ -158,7 +166,7 @@ export function TelegramPanel({
           ? `Connected${tg.botUsername ? ` · @${tg.botUsername}` : ""}`
           : "Not configured"
       }
-      pill={getTelegramPill({ configured: tg.configured, status: tg.status })}
+      pill={restarting ? { label: "restarting", variant: "warn" } : getTelegramPill({ configured: tg.configured, status: tg.status })}
       errors={[panelError, tg.lastError]}
       connectability={tg.connectability}
       suppressedIds={preflightBlockerIds}
