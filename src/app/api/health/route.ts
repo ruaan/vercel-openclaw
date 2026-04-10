@@ -1,9 +1,9 @@
-import { unstable_noStore as noStore } from "next/cache";
+import { connection } from "next/server";
 import { getAuthMode } from "@/server/env";
 import { getStore, getInitializedMeta } from "@/server/store/store";
 
 export async function GET(_request: Request): Promise<Response> {
-  noStore();
+  await connection();
   const meta = await getInitializedMeta();
   return Response.json({
     ok: true,
